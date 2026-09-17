@@ -488,7 +488,7 @@ code { font-family: var(--font-mono); font-size: 0.82em; color: var(--accent); b
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  min-height: 2.5em;
+  height: 2.9em;
 }
 
 /* Footer */

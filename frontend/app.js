@@ -220,8 +220,18 @@ const App = {
     if (thumbB64) {
       const img = document.getElementById(`thumb-${eid}`);
       const ph  = document.getElementById(`ph-${eid}`);
-      if (img) { img.src = `data:image/jpeg;base64,${thumbB64}`; img.style.display = 'block'; }
-      if (ph)  ph.style.display = 'none';
+      if (img) {
+        const newSrc = `data:image/jpeg;base64,${thumbB64}`;
+        if (img.src !== newSrc) {
+          const tempImg = new Image();
+          tempImg.onload = () => {
+            img.src = newSrc;
+            img.style.display = 'block';
+            if (ph) ph.style.display = 'none';
+          };
+          tempImg.src = newSrc;
+        }
+      }
     }
 
     // Badges
