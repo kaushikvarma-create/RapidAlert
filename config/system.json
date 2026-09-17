@@ -11,7 +11,7 @@
     },
     {
       "url": "http://localhost:8002",
-      "model": "nvidia/Cosmos-Reason2-2B"
+      "model": "hzang/Cosmos-Reason2-2B-4bit"
     }
   ],
   "auto_start_vllm": true,
