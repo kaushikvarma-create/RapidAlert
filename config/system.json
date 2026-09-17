@@ -11,7 +11,7 @@
     },
     {
       "url": "http://localhost:8002",
-      "model": "sasa2000/Cosmos-Reason2-2B-heretic"
+      "model": "microsoft/kosmos-2-patch14-224"
     }
   ],
   "auto_start_vllm": true,
