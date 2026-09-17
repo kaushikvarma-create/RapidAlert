@@ -3,7 +3,7 @@
   "vllm_endpoints": [
     {
       "url": "http://localhost:8000",
-      "model": "vikhyatk/moondream2"
+      "model": "HuggingFaceTB/SmolVLM-Instruct"
     },
     {
       "url": "http://localhost:8001",
@@ -11,7 +11,7 @@
     },
     {
       "url": "http://localhost:8002",
-      "model": "ubr-physical-ai/Cosmos3-Edge-INT4-AWQ"
+      "model": "google/paligemma-3b-mix-224"
     }
   ],
   "auto_start_vllm": true,
