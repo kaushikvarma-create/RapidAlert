@@ -1,0 +1,30 @@
+{
+  "_comment": "RapidAlert system configuration. Edit and restart to apply.",
+  "vllm_endpoints": [
+    {
+      "url": "http://localhost:8000",
+      "model": "cyankiwi/Qwen3-VL-4B-Instruct-AWQ-4bit"
+    },
+    {
+      "url": "http://localhost:8001",
+      "model": "cyankiwi/Qwen3-VL-4B-Instruct-AWQ-4bit"
+    },
+    {
+      "url": "http://localhost:8002",
+      "model": "cyankiwi/Qwen3-VL-4B-Instruct-AWQ-4bit"
+    }
+  ],
+  "auto_start_vllm": true,
+  "vllm_instances": 3,
+  "vllm_model": "cyankiwi/Qwen3-VL-4B-Instruct-AWQ-4bit",
+  "vllm_quantization": "",
+  "vllm_port_start": 8000,
+  "vllm_max_seqs": 4,
+  "vllm_max_model_len": 4096,
+  "vllm_gpu_utilization": 0.2,
+  "initial_concurrency": 3,
+  "max_concurrency": 12,
+  "frame_width": 768,
+  "jpeg_quality": 82,
+  "dashboard_port": 7000
+}

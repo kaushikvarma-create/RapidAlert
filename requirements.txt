@@ -1,0 +1,7 @@
+# Install: pip install --break-system-packages -r requirements.txt
+fastapi
+uvicorn[standard]
+aiohttp
+opencv-python-headless
+numpy
+Pillow

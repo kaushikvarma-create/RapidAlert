@@ -1,0 +1,58 @@
+[
+  {
+    "name": "SERVER_ENTRY",
+    "url": "rtsp://malliswar:Cl0ve%40123@10.91.87.35:554/cam/realmonitor?channel=1&subtype=0",
+    "enabled": true,
+    "normal_context_day": "",
+    "normal_context_night": "",
+    "priority": "high"
+  },
+  {
+    "name": "1ST_ENTRANCE",
+    "url": "rtsp://malliswar:Cl0ve%40123@10.91.87.35:554/cam/realmonitor?channel=2&subtype=0",
+    "enabled": true,
+    "normal_context_day": "Detect crowd gathering.",
+    "normal_context_night": "Detect crowd gathering.",
+    "priority": "high"
+  },
+  {
+    "name": "PARKING",
+    "url": "rtsp://malliswar:Cl0ve%40123@10.91.87.35:554/cam/realmonitor?channel=3&subtype=0",
+    "enabled": true,
+    "normal_context_day": "",
+    "normal_context_night": "",
+    "priority": "normal"
+  },
+  {
+    "name": "1ST_OUT",
+    "url": "rtsp://malliswar:Cl0ve%40123@10.91.87.35:554/cam/realmonitor?channel=4&subtype=0",
+    "enabled": true,
+    "normal_context_day": "",
+    "normal_context_night": "",
+    "priority": "normal"
+  },
+  {
+    "name": "ADMIN_CABIN",
+    "url": "rtsp://malliswar:Cl0ve%40123@10.91.87.35:554/cam/realmonitor?channel=5&subtype=0",
+    "enabled": true,
+    "normal_context_day": "3-4 office workers using electronic devices sitting in chairs",
+    "normal_context_night": "3-4 office workers using electronic devices sitting in chairs",
+    "priority": "normal"
+  },
+  {
+    "name": "1ST_EXIT",
+    "url": "rtsp://malliswar:Cl0ve%40123@10.91.87.35:554/cam/realmonitor?channel=6&subtype=0",
+    "enabled": true,
+    "normal_context_day": "",
+    "normal_context_night": "",
+    "priority": "normal"
+  },
+  {
+    "name": "RECEPTION",
+    "url": "rtsp://malliswar:Cl0ve%40123@10.91.87.35:554/cam/realmonitor?channel=7&subtype=0",
+    "enabled": true,
+    "normal_context_day": "",
+    "normal_context_night": "",
+    "priority": "normal"
+  }
+]

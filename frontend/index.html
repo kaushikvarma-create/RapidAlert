@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RapidAlert — AI Surveillance Dashboard</title>
+  <meta name="description" content="Real-time multi-camera AI surveillance with VLM analysis, alert management, and dynamic prompt control." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+
+  <!-- ═══════════════════════════════════════════════════════════ HEADER -->
+  <header class="header" id="header">
+    <div class="header-brand">
+      <div class="brand-pulse"></div>
+      <span class="brand-name">RapidAlert</span>
+      <span class="brand-tag">AI Surveillance</span>
+    </div>
+
+    <div class="header-metrics" id="header-metrics">
+      <div class="metric-chip" title="Active cameras">
+        <span class="metric-value" id="metric-cams">0</span>
+        <span class="metric-label">cams</span>
+      </div>
+      <div class="metric-chip" title="Analyses per second">
+        <span class="metric-value" id="metric-aps">—</span>
+        <span class="metric-label">infer/s</span>
+      </div>
+      <div class="metric-chip metric-latency" title="p95 inference latency">
+        <span class="metric-value" id="metric-p95">—</span>
+        <span class="metric-label">p95 lat</span>
+      </div>
+      <div class="metric-chip" title="Active VLM workers">
+        <span class="metric-value" id="metric-conc">—</span>
+        <span class="metric-label">workers</span>
+      </div>
+      <div class="metric-chip" title="Queue depth">
+        <span class="metric-value" id="metric-queue">0</span>
+        <span class="metric-label">queued</span>
+      </div>
+    </div>
+
+    <div class="header-actions">
+      <div class="ws-pill" id="ws-pill">
+        <span class="ws-dot" id="ws-dot"></span>
+        <span id="ws-status">Connecting</span>
+      </div>
+      <button class="btn-icon" id="btn-settings" title="Settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- ═══════════════════════════════════════════════════════════ MAIN -->
+  <main class="main-layout">
+
+    <!-- Camera Grid -->
+    <section class="cameras-section">
+      <div class="section-header">
+        <h1 class="section-title">Camera Feed</h1>
+        <div class="cam-filter-row">
+          <button class="filter-btn active" data-filter="all">All</button>
+          <button class="filter-btn" data-filter="high">🔴 High</button>
+          <button class="filter-btn" data-filter="medium">🟡 Medium</button>
+          <button class="filter-btn" data-filter="active">⚡ Active</button>
+        </div>
+      </div>
+      <div class="cameras-grid" id="cameras-grid">
+        <div class="empty-state" id="empty-cameras">
+          <div class="empty-icon">📡</div>
+          <p>Waiting for cameras...</p>
+          <small>Open Settings to add cameras or check the connection.</small>
+        </div>
+      </div>
+    </section>
+
+    <!-- Alert Feed -->
+    <aside class="alerts-section">
+      <div class="alerts-header">
+        <h2 class="alerts-title">
+          <span class="alerts-icon">⚠</span>
+          Alerts
+          <span class="alert-count-badge" id="alert-count">0</span>
+        </h2>
+        <button class="btn-text" id="btn-clear-alerts">Clear</button>
+      </div>
+      <div class="alerts-feed" id="alerts-feed">
+        <div class="alerts-empty" id="alerts-empty">
+          <div class="alerts-empty-icon">✅</div>
+          <p>No alerts</p>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <!-- ═══════════════════════════════════════════════════════════ SETTINGS PANEL -->
+  <div class="settings-backdrop" id="settings-backdrop" hidden></div>
+  <div class="settings-panel" id="settings-panel" hidden>
+    <div class="settings-header">
+      <h2>Settings</h2>
+      <button class="btn-icon btn-close-panel" id="btn-close-settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+
+    <div class="settings-tabs">
+      <button class="stab active" data-stab="cameras">📷 Cameras</button>
+      <button class="stab" data-stab="prompts">✏ Prompts</button>
+      <button class="stab" data-stab="scanner">🔍 Scan Network</button>
+      <button class="stab" data-stab="history">🗄 History</button>
+      <button class="stab" data-stab="system">⚙ System</button>
+    </div>
+
+    <!-- ── Cameras Tab ─────────────────────────────────────────── -->
+    <div class="stab-content active" id="stab-cameras">
+      <div class="add-cam-form" id="add-cam-form">
+        <h3 class="form-label">Add Camera</h3>
+        <div class="form-grid">
+          <input id="new-cam-name" type="text" placeholder="Name (e.g. GATE_1)" class="input" />
+          <input id="new-cam-url"  type="text" placeholder="rtsp://..." class="input url-input" />
+          <button class="btn-primary" id="btn-add-camera">+ Add</button>
+        </div>
+      </div>
+
+      <div class="cam-table-wrap">
+        <table class="cam-table" id="cam-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>URL</th>
+              <th>On</th>
+              <th>Day Context</th>
+              <th>Night Context</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="cam-table-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── Prompts Tab ─────────────────────────────────────────── -->
+    <div class="stab-content" id="stab-prompts">
+      <div class="prompt-section">
+        <div class="prompt-section-header">
+          <h3>Master Prompt</h3>
+          <span class="prompt-hint">Use <code>{normal_context}</code> for per-camera context</span>
+        </div>
+        <textarea id="master-prompt-ta" class="prompt-ta" spellcheck="false"></textarea>
+        <div class="prompt-actions">
+          <button class="btn-primary" id="btn-save-master">💾 Save Master Prompt</button>
+          <span class="save-feedback" id="master-save-fb"></span>
+        </div>
+      </div>
+
+      <div class="prompt-section prompt-section-alt">
+        <div class="prompt-section-header">
+          <h3>Per-Camera Override</h3>
+          <span class="prompt-hint">Leave blank to use master prompt</span>
+        </div>
+        <select id="cam-prompt-sel" class="input select-input">
+          <option value="">— Select camera —</option>
+        </select>
+        <textarea id="cam-prompt-ta" class="prompt-ta" spellcheck="false" placeholder="Leave blank to use master prompt for this camera…"></textarea>
+        <div class="prompt-actions">
+          <button class="btn-primary" id="btn-save-cam-prompt">💾 Save Camera Prompt</button>
+          <button class="btn-ghost" id="btn-clear-cam-prompt">✕ Clear Override</button>
+          <span class="save-feedback" id="cam-save-fb"></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Scanner Tab ─────────────────────────────────────────── -->
+    <div class="stab-content" id="stab-scanner">
+      <div class="scanner-section">
+        <h3>Network Camera Scanner</h3>
+        <p class="prompt-hint">Discovers ONVIF cameras (WS-Discovery multicast) + any device with RTSP port 554 open.</p>
+
+        <div class="scanner-controls">
+          <div class="form-grid-2">
+            <div>
+              <label class="field-label">Subnet (auto-detected)</label>
+              <input id="scan-subnet" type="text" class="input" placeholder="192.168.1.0/24">
+            </div>
+            <div>
+              <label class="field-label">Credentials (optional)</label>
+              <div class="creds-row">
+                <input id="scan-user" type="text" class="input" placeholder="admin">
+                <input id="scan-pass" type="password" class="input" placeholder="password">
+              </div>
+            </div>
+          </div>
+          <button class="btn-primary" id="btn-scan-network">🔍 Scan Network</button>
+          <span class="scan-status" id="scan-status"></span>
+        </div>
+
+        <div class="scan-results-wrap" id="scan-results-wrap" style="display:none">
+          <div class="scan-results-header">
+            <span id="scan-count">0 cameras found</span>
+            <button class="btn-ghost" id="btn-scan-clear">Clear</button>
+          </div>
+          <div class="scan-results" id="scan-results"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── History Tab ────────────────────────────────────────── -->
+    <div class="stab-content" id="stab-history">
+      <div class="history-controls">
+        <select id="hist-cam-sel" class="input select-input"><option value="">All cameras</option></select>
+        <select id="hist-sev-sel" class="input select-input">
+          <option value="">Any severity</option>
+          <option value="HIGH">HIGH</option>
+          <option value="MEDIUM">MEDIUM</option>
+          <option value="LOW">LOW</option>
+        </select>
+        <select id="hist-safe-sel" class="input select-input">
+          <option value="">Any safety</option>
+          <option value="DANGER">DANGER</option>
+          <option value="WARNING">WARNING</option>
+          <option value="OK">OK</option>
+        </select>
+        <button class="btn-primary" id="btn-load-history">Load</button>
+        <span class="field-label" id="hist-count"></span>
+      </div>
+      <div class="history-table-wrap">
+        <table class="cam-table" id="hist-table">
+          <thead><tr>
+            <th>Time</th><th>Camera</th><th>Observation</th>
+            <th>Activity</th><th>Safety</th><th>Severity</th><th>Latency</th>
+          </tr></thead>
+          <tbody id="hist-table-body"></tbody>
+        </table>
+      </div>
+      <div class="hist-pagination">
+        <button class="btn-ghost" id="btn-hist-prev">← Prev</button>
+        <span id="hist-page-label">Page 1</span>
+        <button class="btn-ghost" id="btn-hist-next">Next →</button>
+      </div>
+      <div class="storage-stats" id="storage-stats"></div>
+    </div>
+
+    <!-- ── System Tab ─────────────────────────────────────────── -->
+    <div class="stab-content" id="stab-system">
+      <div class="sys-info-grid" id="sys-info-grid">
+        <div class="sys-card">
+          <div class="sys-card-label">vLLM Endpoints</div>
+          <div class="sys-card-value" id="sys-endpoints">—</div>
+        </div>
+        <div class="sys-card">
+          <div class="sys-card-label">Active Workers</div>
+          <div class="sys-card-value" id="sys-workers">—</div>
+        </div>
+        <div class="sys-card">
+          <div class="sys-card-label">Total Analyses</div>
+          <div class="sys-card-value" id="sys-total">—</div>
+        </div>
+        <div class="sys-card">
+          <div class="sys-card-label">p50 Latency</div>
+          <div class="sys-card-value" id="sys-p50">—</div>
+        </div>
+        <div class="sys-card">
+          <div class="sys-card-label">p95 Latency</div>
+          <div class="sys-card-value" id="sys-p95">—</div>
+        </div>
+        <div class="sys-card">
+          <div class="sys-card-label">Analyses / sec</div>
+          <div class="sys-card-value" id="sys-aps">—</div>
+        </div>
+      </div>
+      <div class="vlm-health" id="vlm-health">
+        <h3>VLM Health</h3>
+        <div id="vlm-health-items"></div>
+        <button class="btn-ghost" id="btn-check-vlm">🔄 Check now</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════════ CAMERA MODAL -->
+  <div class="modal-backdrop" id="modal-backdrop" hidden></div>
+  <div class="modal" id="cam-modal" hidden>
+    <div class="modal-header">
+      <div>
+        <h2 id="modal-cam-name">Camera</h2>
+        <span class="modal-cam-ts" id="modal-cam-ts"></span>
+      </div>
+      <button class="btn-icon btn-close-panel" id="btn-close-modal">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-frame-wrap">
+        <img id="modal-frame" src="" alt="Camera frame" />
+        <div class="modal-frame-loading" id="modal-frame-loading">Loading frame...</div>
+      </div>
+      <div class="modal-analysis" id="modal-analysis">
+        <div class="modal-badges" id="modal-badges"></div>
+        <p class="modal-observation" id="modal-obs">—</p>
+        <div class="modal-meta" id="modal-meta"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════════ ALERT MODAL -->
+  <div class="modal-backdrop" id="alert-modal-backdrop" hidden></div>
+  <div class="modal" id="alert-modal" hidden>
+    <div class="modal-header">
+      <div>
+        <h2 id="alert-modal-cam">Alert</h2>
+        <span class="modal-cam-ts" id="alert-modal-ts"></span>
+      </div>
+      <button class="btn-icon btn-close-panel" id="btn-close-alert-modal">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-frame-wrap" id="alert-modal-frame-wrap">
+        <img id="alert-modal-img" src="" alt="Alert frame" style="display:none"/>
+        <div class="modal-frame-loading" id="alert-modal-no-thumb">No snapshot available</div>
+      </div>
+      <div class="modal-analysis">
+        <div class="modal-badges" id="alert-modal-badges"></div>
+        <p class="modal-observation" id="alert-modal-obs">—</p>
+        <div class="modal-meta" id="alert-modal-meta"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════════ TOAST -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
