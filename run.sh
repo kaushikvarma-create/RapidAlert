@@ -168,7 +168,9 @@ if [[ "$AUTO_START_VLLM" == "true" ]]; then
                 -e HF_HOME=/data/models/huggingface \
                 -v "${HF_CACHE}:/data/models/huggingface" \
                 "${VLLM_IMAGE}" \
-                bash -c "pip install --upgrade vllm transformers && vllm serve \"${EP_MODEL}\" \
+                bash -c "pip install --upgrade vllm transformers && \
+                    python3 -c \"from huggingface_hub import hf_hub_download; import json; p = hf_hub_download('${EP_MODEL}', 'tokenizer_config.json'); d = json.load(open(p)); d['extra_special_tokens'] = {} if isinstance(d.get('extra_special_tokens'), list) else d.get('extra_special_tokens'); json.dump(d, open(p, 'w'))\" 2>/dev/null || true && \
+                    vllm serve \"${EP_MODEL}\" \
                     --host 0.0.0.0 \
                     --port \"${PORT}\" \
                     ${EP_TOKENIZER:+--tokenizer \"${EP_TOKENIZER}\"} \
