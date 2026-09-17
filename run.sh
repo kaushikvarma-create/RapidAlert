@@ -137,6 +137,7 @@ if [[ "$AUTO_START_VLLM" == "true" ]]; then
         
         # Extract the specific model for this endpoint
         EP_MODEL=$(python3 -c "import json; d=json.load(open('config/system.json')); eps=d.get('vllm_endpoints', []); print(eps[$i]['model'] if $i < len(eps) else d.get('vllm_model'))" 2>/dev/null || echo "$VLLM_MODEL")
+        EP_TOKENIZER=$(python3 -c "import json; d=json.load(open('config/system.json')); eps=d.get('vllm_endpoints', []); print(eps[$i].get('tokenizer', '')) if $i < len(eps) else print('')" 2>/dev/null || echo "")
 
         # Check if running and serving correct model
         if curl -sf "${C_API_URL}" >/dev/null 2>&1; then
@@ -170,6 +171,7 @@ if [[ "$AUTO_START_VLLM" == "true" ]]; then
                 bash -c "pip install --upgrade vllm transformers && vllm serve \"${EP_MODEL}\" \
                     --host 0.0.0.0 \
                     --port \"${PORT}\" \
+                    ${EP_TOKENIZER:+--tokenizer \"${EP_TOKENIZER}\"} \
                     --max-model-len \"${VLLM_MAX_MODEL_LEN}\" \
                     --gpu-memory-utilization \"${VLLM_GPU_UTILIZATION}\" \
                     --dtype auto \

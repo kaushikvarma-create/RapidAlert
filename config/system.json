@@ -11,7 +11,8 @@
     },
     {
       "url": "http://localhost:8002",
-      "model": "sasa2000/Cosmos-Reason2-2B-heretic"
+      "model": "hzang/Cosmos-Reason2-2B-4bit",
+      "tokenizer": "sasa2000/Cosmos-Reason2-2B-heretic"
     }
   ],
   "auto_start_vllm": true,
