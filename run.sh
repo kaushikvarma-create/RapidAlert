@@ -167,16 +167,16 @@ if [[ "$AUTO_START_VLLM" == "true" ]]; then
                 -e HF_HOME=/data/models/huggingface \
                 -v "${HF_CACHE}:/data/models/huggingface" \
                 "${VLLM_IMAGE}" \
-                vllm serve "${EP_MODEL}" \
+                bash -c "pip install --upgrade vllm transformers && vllm serve \"${EP_MODEL}\" \
                     --host 0.0.0.0 \
-                    --port "${PORT}" \
-                    --max-model-len "${VLLM_MAX_MODEL_LEN}" \
-                    --gpu-memory-utilization "${VLLM_GPU_UTILIZATION}" \
+                    --port \"${PORT}\" \
+                    --max-model-len \"${VLLM_MAX_MODEL_LEN}\" \
+                    --gpu-memory-utilization \"${VLLM_GPU_UTILIZATION}\" \
                     --dtype auto \
                     --trust-remote-code \
-                    ${VLLM_QUANTIZATION:+--quantization "${VLLM_QUANTIZATION}"} \
+                    ${VLLM_QUANTIZATION:+--quantization \"${VLLM_QUANTIZATION}\"} \
                     --disable-log-stats \
-                    --no-enable-log-requests >/dev/null
+                    --no-enable-log-requests >/dev/null"
 
             # Stream logs while we wait
             docker logs -f "${CNAME}" 2>&1 | sed "s/^/  ${YELLOW}[${CNAME}]${NC} /" &
