@@ -173,6 +173,7 @@ if [[ "$AUTO_START_VLLM" == "true" ]]; then
                     --max-model-len "${VLLM_MAX_MODEL_LEN}" \
                     --gpu-memory-utilization "${VLLM_GPU_UTILIZATION}" \
                     --dtype auto \
+                    --trust-remote-code \
                     ${VLLM_QUANTIZATION:+--quantization "${VLLM_QUANTIZATION}"} \
                     --disable-log-stats \
                     --no-enable-log-requests >/dev/null
