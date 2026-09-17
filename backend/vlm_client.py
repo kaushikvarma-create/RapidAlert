@@ -81,7 +81,37 @@ class VLMPool:
         async with self._lock:
             idx = self._inflight.index(min(self._inflight))
             self._inflight[idx] += 1
-        ep = self.endpoints[idx]
+        
+        try:
+            return await self._analyze_single(idx, cam_name, frame_b64, system_prompt)
+        finally:
+            self._inflight[idx] -= 1
+
+    async def analyze_concurrent(
+        self, cam_name: str, frame_b64: str, system_prompt: str
+    ) -> list[dict]:
+        """Fire request to ALL endpoints simultaneously (Comparator mode)"""
+        for i in range(len(self.endpoints)):
+            self._inflight[i] += 1
+            
+        try:
+            tasks = [
+                self._analyze_single(i, cam_name, frame_b64, system_prompt)
+                for i in range(len(self.endpoints))
+            ]
+            results = await asyncio.gather(*tasks)
+            # Tag each result with its model
+            for i, res in enumerate(results):
+                res["model"] = self.endpoints[i]["model"]
+            return results
+        finally:
+            for i in range(len(self.endpoints)):
+                self._inflight[i] -= 1
+
+    async def _analyze_single(
+        self, ep_idx: int, cam_name: str, frame_b64: str, system_prompt: str
+    ) -> dict:
+        ep = self.endpoints[ep_idx]
         url = f"{ep['url']}/v1/chat/completions"
         model = ep["model"]
 
@@ -100,6 +130,7 @@ class VLMPool:
             "stop": ["<think>", "</think>"]
         }
 
+        t0 = time.monotonic()
         try:
             for attempt in range(3):
                 try:
@@ -114,7 +145,9 @@ class VLMPool:
                             continue
                         data = await resp.json()
                         raw = data["choices"][0]["message"]["content"]
-                        return self._parse(raw, cam_name)
+                        res = self._parse(raw, cam_name)
+                        res["latency"] = time.monotonic() - t0
+                        return res
                 except asyncio.TimeoutError:
                     print(f"[VLMPool] Timeout — {cam_name} (attempt {attempt+1})")
                     await asyncio.sleep(1)
@@ -131,9 +164,20 @@ class VLMPool:
                 "safety": "UNKNOWN",
                 "severity": "LOW",
                 "error": True,
+                "latency": time.monotonic() - t0,
             }
-        finally:
-            self._inflight[idx] -= 1
+        except Exception as e:
+            return {
+                "cam": cam_name,
+                "observation": f"Request failed: {str(e)}",
+                "activity": "UNKNOWN",
+                "workers": "0",
+                "machinery": "None",
+                "safety": "UNKNOWN",
+                "severity": "LOW",
+                "error": True,
+                "latency": time.monotonic() - t0,
+            }
 
     def _parse(self, raw: str, cam_name: str) -> dict:
         result: dict = {

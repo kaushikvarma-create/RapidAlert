@@ -134,15 +134,18 @@ if [[ "$AUTO_START_VLLM" == "true" ]]; then
         CNAME="rapidalert_vllm_${i}"
         C_API_URL="http://localhost:${PORT}/v1/models"
         NEEDS_START=1
+        
+        # Extract the specific model for this endpoint
+        EP_MODEL=$(python3 -c "import json; d=json.load(open('config/system.json')); eps=d.get('vllm_endpoints', []); print(eps[$i]['model'] if $i < len(eps) else d.get('vllm_model'))" 2>/dev/null || echo "$VLLM_MODEL")
 
         # Check if running and serving correct model
         if curl -sf "${C_API_URL}" >/dev/null 2>&1; then
             CURRENT_MODEL=$(curl -sf "${C_API_URL}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data'][0]['id'])" 2>/dev/null || echo "")
-            if [[ "$CURRENT_MODEL" == "$VLLM_MODEL" ]]; then
-                ok "Instance ${i} (${CNAME}) already running on port ${PORT} serving ${VLLM_MODEL}."
+            if [[ "$CURRENT_MODEL" == "$EP_MODEL" ]]; then
+                ok "Instance ${i} (${CNAME}) already running on port ${PORT} serving ${EP_MODEL}."
                 NEEDS_START=0
             else
-                warn "Instance ${i} is serving '${CURRENT_MODEL}' instead of '${VLLM_MODEL}'."
+                warn "Instance ${i} is serving '${CURRENT_MODEL}' instead of '${EP_MODEL}'."
                 warn "Restarting container ${CNAME}..."
                 docker rm -f "${CNAME}" >/dev/null 2>&1 || true
                 sleep 2
@@ -164,7 +167,7 @@ if [[ "$AUTO_START_VLLM" == "true" ]]; then
                 -e HF_HOME=/data/models/huggingface \
                 -v "${HF_CACHE}:/data/models/huggingface" \
                 "${VLLM_IMAGE}" \
-                vllm serve "${VLLM_MODEL}" \
+                vllm serve "${EP_MODEL}" \
                     --host 0.0.0.0 \
                     --port "${PORT}" \
                     --max-model-len "${VLLM_MAX_MODEL_LEN}" \

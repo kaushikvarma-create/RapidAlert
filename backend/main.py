@@ -37,6 +37,7 @@ from scheduler import DeadlineScheduler
 from ws_manager import WSManager
 from storage import StorageManager
 from rtsp_scanner import RTSPScanner
+from metrics_monitor import metrics_loop
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -115,6 +116,7 @@ async def lifespan(app: FastAPI):
     await scheduler.start()
     _bg_tasks.append(asyncio.create_task(prompt_manager.watch_loop()))
     _bg_tasks.append(asyncio.create_task(_config_sync_loop()))
+    _bg_tasks.append(asyncio.create_task(metrics_loop(ws_manager.broadcast)))
     print(f"\n[RapidAlert] ✅ Dashboard → http://localhost:{SYS_CFG.get('dashboard_port', 7000)}\n")
     yield
     # ── Shutdown ────────────────────────────────────────────────

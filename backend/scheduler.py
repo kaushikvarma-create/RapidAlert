@@ -185,34 +185,30 @@ class DeadlineScheduler:
         prompt = self.prompt_manager.get_prompt(cam_name)
 
         t0 = time.monotonic()
-        result = await self.vlm_pool.analyze(cam_name, frame_b64, prompt)
-        latency = time.monotonic() - t0
-
-        self._latencies.append(latency)
-        if len(self._latencies) > 100:
-            del self._latencies[0]
+        results = await self.vlm_pool.analyze_concurrent(cam_name, frame_b64, prompt)
+        
+        # Extract latencies from results
+        for res in results:
+            self._latencies.append(res.get("latency", 0))
+            if len(self._latencies) > 100:
+                del self._latencies[0]
 
         self._last_analyzed[cam_name] = time.monotonic()
         self._total_analyzed += 1
-        self.result_store.put(cam_name, result, latency)
+        
+        # We can just store the first result or the list. Since we are in testing branch,
+        # we bypass deep result_store and storage tracking for all models.
+        self.result_store.put(cam_name, results[0], results[0].get("latency", 0))
 
-        # Persist to SQLite (non-blocking — storage uses thread-local conn)
-        if self.storage:
-            try:
-                self.storage.save(result, latency=latency)
-            except Exception as exc:
-                print(f"[Scheduler] Storage error for {cam_name}: {exc}")
+        # Alert check based on the first model (or skip)
+        await self.alert_engine.process(cam_name, results[0], thumbnail_b64=thumb_b64)
 
-        # Alert check (only for significant events)
-        await self.alert_engine.process(cam_name, result, thumbnail_b64=thumb_b64)
-
-        # Broadcast result to dashboard
+        # Broadcast ALL results to dashboard for tensorboard
         if self.broadcast_fn:
             await self.broadcast_fn({
-                "type": "result",
+                "type": "result_concurrent",
                 "cam": cam_name,
-                "result": result,
-                "latency": round(latency, 2),
+                "results": results,
                 "thumbnail_b64": thumb_b64,
             })
 

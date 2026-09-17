@@ -21,25 +21,21 @@
     </div>
 
     <div class="header-metrics" id="header-metrics">
-      <div class="metric-chip" title="Active cameras">
-        <span class="metric-value" id="metric-cams">0</span>
-        <span class="metric-label">cams</span>
+      <div class="metric-chip" title="GPU Utilization">
+        <span class="metric-value" id="metric-gpu">—</span>
+        <span class="metric-label">gpu</span>
+      </div>
+      <div class="metric-chip" title="CPU Utilization">
+        <span class="metric-value" id="metric-cpu">—</span>
+        <span class="metric-label">cpu</span>
+      </div>
+      <div class="metric-chip" title="RAM Utilization">
+        <span class="metric-value" id="metric-ram">—</span>
+        <span class="metric-label">ram</span>
       </div>
       <div class="metric-chip" title="Analyses per second">
         <span class="metric-value" id="metric-aps">—</span>
         <span class="metric-label">infer/s</span>
-      </div>
-      <div class="metric-chip metric-latency" title="p95 inference latency">
-        <span class="metric-value" id="metric-p95">—</span>
-        <span class="metric-label">p95 lat</span>
-      </div>
-      <div class="metric-chip" title="Active VLM workers">
-        <span class="metric-value" id="metric-conc">—</span>
-        <span class="metric-label">workers</span>
-      </div>
-      <div class="metric-chip" title="Queue depth">
-        <span class="metric-value" id="metric-queue">0</span>
-        <span class="metric-label">queued</span>
       </div>
     </div>
 
@@ -58,45 +54,25 @@
   </header>
 
   <!-- ═══════════════════════════════════════════════════════════ MAIN -->
-  <main class="main-layout">
-
-    <!-- Camera Grid -->
-    <section class="cameras-section">
-      <div class="section-header">
-        <h1 class="section-title">Camera Feed</h1>
-        <div class="cam-filter-row">
-          <button class="filter-btn active" data-filter="all">All</button>
-          <button class="filter-btn" data-filter="high">🔴 High</button>
-          <button class="filter-btn" data-filter="medium">🟡 Medium</button>
-          <button class="filter-btn" data-filter="active">⚡ Active</button>
-        </div>
+  <main class="tensorboard-layout">
+    <!-- Camera Sidebar -->
+    <aside class="sidebar-cams">
+      <div class="sidebar-header">
+        <h2 class="sidebar-title">Cameras</h2>
       </div>
-      <div class="cameras-grid" id="cameras-grid">
-        <div class="empty-state" id="empty-cameras">
-          <div class="empty-icon">📡</div>
-          <p>Waiting for cameras...</p>
-          <small>Open Settings to add cameras or check the connection.</small>
-        </div>
-      </div>
-    </section>
-
-    <!-- Alert Feed -->
-    <aside class="alerts-section">
-      <div class="alerts-header">
-        <h2 class="alerts-title">
-          <span class="alerts-icon">⚠</span>
-          Alerts
-          <span class="alert-count-badge" id="alert-count">0</span>
-        </h2>
-        <button class="btn-text" id="btn-clear-alerts">Clear</button>
-      </div>
-      <div class="alerts-feed" id="alerts-feed">
-        <div class="alerts-empty" id="alerts-empty">
-          <div class="alerts-empty-icon">✅</div>
-          <p>No alerts</p>
-        </div>
+      <div class="camera-list" id="camera-checkbox-list">
+        <!-- Checkboxes injected here -->
       </div>
     </aside>
+
+    <!-- Main Stage -->
+    <section class="tensorboard-stage" id="tensorboard-stage">
+      <div class="empty-state" id="empty-tensorboard">
+        <div class="empty-icon">🧪</div>
+        <p>No cameras selected.</p>
+        <small>Select cameras from the sidebar to begin VLM A/B/C testing.</small>
+      </div>
+    </section>
   </main>
 
   <!-- ═══════════════════════════════════════════════════════════ SETTINGS PANEL -->

@@ -54,8 +54,8 @@ const App = {
   handleMessage(msg) {
     switch (msg.type) {
       case 'init':    return this.onInit(msg);
-      case 'result':  return this.onResult(msg);
-      case 'alert':   return this.onAlert(msg);
+      case 'result_concurrent': return this.onResultConcurrent(msg);
+      case 'sys_metrics': return this.onSysMetrics(msg);
       case 'metrics': return this.onMetrics(msg);
       case 'cameras': return this.onCameras(msg);
       case 'prompts': return this.onPrompts(msg);
@@ -67,49 +67,37 @@ const App = {
   //  Message handlers
   // ════════════════════════════════════════════════════════════
   onInit(msg) {
-    // Build camera registry from config
     this.cameras = {};
     for (const cam of (msg.cameras || [])) {
-      this.cameras[cam.name] = { config: cam, result: null, lastTs: 0, thumbB64: null };
-      this._renderCard(cam.name);
+      this.cameras[cam.name] = { config: cam, results: [], lastTs: 0, thumbB64: null };
     }
-
-    // Apply known results
-    for (const [name, result] of Object.entries(msg.results || {})) {
-      if (this.cameras[name]) {
-        this.cameras[name].result = result;
-        this.cameras[name].lastTs = result.ts || 0;
-        this._applyResult(name, result, null);
-      }
-    }
-
-    // Seed alerts (oldest → newest in DOM means newest at top)
-    const alerts = (msg.alerts || []).slice().reverse();
-    for (const alert of alerts) this._renderAlert(alert, false);
-    this._syncAlertCount();
-
-    // Metrics
+    this._renderSidebar();
+    
     if (msg.metrics) this._applyMetrics(msg.metrics);
-
-    // Prompts
     if (msg.prompts) this._applyPrompts(msg.prompts);
-
-    // Fetch initial thumbnails from REST
-    this._fetchAllThumbs();
-
-    this._updateCamCount();
     this._updateCamSelect();
-    this._syncEmptyState();
   },
 
-  onResult(msg) {
-    const { cam, result, latency, thumbnail_b64 } = msg;
+  onSysMetrics(msg) {
+    this._setText('metric-gpu', `${msg.gpu}%`);
+    this._setText('metric-cpu', `${msg.cpu}%`);
+    this._setText('metric-ram', `${msg.ram}%`);
+  },
+
+  onResultConcurrent(msg) {
+    const { cam, results, thumbnail_b64 } = msg;
 
     if (!this.cameras[cam]) {
-      this.cameras[cam] = { config: { name: cam }, result: null, lastTs: 0, thumbB64: null };
-      this._renderCard(cam);
-      this._syncEmptyState();
+      this.cameras[cam] = { config: { name: cam }, results: [], lastTs: 0, thumbB64: null };
+      this._renderSidebar();
     }
+
+    this.cameras[cam].results = results;
+    this.cameras[cam].lastTs = Date.now() / 1000;
+    if (thumbnail_b64) this.cameras[cam].thumbB64 = thumbnail_b64;
+
+    this._renderTbRow(cam);
+  },
 
     this.cameras[cam].result = result;
     this.cameras[cam].lastTs = result.ts || Date.now() / 1000;
@@ -163,110 +151,101 @@ const App = {
   },
 
   // ════════════════════════════════════════════════════════════
-  //  Camera Cards
+  //  Tensorboard Rendering
   // ════════════════════════════════════════════════════════════
-  _renderCard(name) {
-    const grid = document.getElementById('cameras-grid');
-    if (!grid) return;
-
-    // Remove stale
-    document.getElementById(`card-${this._eid(name)}`)?.remove();
-
-    const card = document.createElement('div');
-    card.className = 'cam-card';
-    card.id = `card-${this._eid(name)}`;
-    card.dataset.cam = name;
-    card.innerHTML = `
-      <div class="cam-card-header">
-        <span class="cam-card-name">${this._esc(name)}</span>
-        <span class="cam-live-dot" id="dot-${this._eid(name)}"></span>
-      </div>
-      <div class="cam-thumb-wrap">
-        <img class="cam-thumb" id="thumb-${this._eid(name)}" src="" alt="${this._esc(name)}" style="display:none">
-        <div class="cam-thumb-placeholder" id="ph-${this._eid(name)}">
-          <span class="cam-thumb-icon">📷</span>
-          <span>Connecting...</span>
-        </div>
-      </div>
-      <div class="cam-badges" id="badges-${this._eid(name)}">
-        <span class="badge badge-muted">⚡ —</span>
-        <span class="badge badge-muted">🛡 —</span>
-        <span class="badge badge-muted">⚠ —</span>
-      </div>
-      <p class="cam-obs" id="obs-${this._eid(name)}">Awaiting analysis…</p>
-      <div class="cam-card-footer">
-        <span class="cam-latency" id="lat-${this._eid(name)}"></span>
-        <span class="cam-ts"     id="ts-${this._eid(name)}">—</span>
-      </div>
-    `;
-    card.addEventListener('click', () => this._openModal(name));
-    grid.appendChild(card);
-    this._applyFilter(card, name);
+  _renderSidebar() {
+    const list = document.getElementById('camera-checkbox-list');
+    if (!list) return;
+    list.innerHTML = '';
+    for (const name of Object.keys(this.cameras)) {
+      const isChecked = document.getElementById(`tb-row-${this._eid(name)}`) ? 'checked' : '';
+      const lbl = document.createElement('label');
+      lbl.className = 'cam-checkbox-label';
+      lbl.innerHTML = `<input type="checkbox" data-cam="${this._esc(name)}" ${isChecked}> ${this._esc(name)}`;
+      lbl.querySelector('input').addEventListener('change', (e) => {
+        if (e.target.checked) this._renderTbRow(name);
+        else document.getElementById(`tb-row-${this._eid(name)}`)?.remove();
+        this._syncTbEmptyState();
+      });
+      list.appendChild(lbl);
+    }
   },
 
-  _applyResult(name, result, thumbB64) {
-    const eid = this._eid(name);
-    const card = document.getElementById(`card-${eid}`);
-    if (!card) return;
+  _syncTbEmptyState() {
+    const stage = document.getElementById('tensorboard-stage');
+    const empty = document.getElementById('empty-tensorboard');
+    if (!stage || !empty) return;
+    if (stage.querySelectorAll('.tb-row').length === 0) {
+      empty.style.display = 'block';
+    } else {
+      empty.style.display = 'none';
+    }
+  },
 
-    const sev = (result.severity || 'LOW').toLowerCase();
-    const saf = (result.safety   || 'UNKNOWN').toUpperCase();
-    const act = (result.activity || 'UNKNOWN').toUpperCase();
+  _renderTbRow(name) {
+    const stage = document.getElementById('tensorboard-stage');
+    if (!stage) return;
+    
+    // Check if the checkbox is checked before rendering/updating
+    const checkbox = document.querySelector(`.cam-checkbox-label input[data-cam="${name}"]`);
+    if (!checkbox || !checkbox.checked) return;
+    
+    this._syncTbEmptyState();
 
-    // Severity class on card
-    card.className = `cam-card sev-${sev}`;
-
-    // Thumbnail
-    if (thumbB64) {
-      const img = document.getElementById(`thumb-${eid}`);
-      const ph  = document.getElementById(`ph-${eid}`);
-      if (img) {
-        const newSrc = `data:image/jpeg;base64,${thumbB64}`;
-        if (img.src !== newSrc) {
-          const tempImg = new Image();
-          tempImg.onload = () => {
-            img.src = newSrc;
-            img.style.display = 'block';
-            if (ph) ph.style.display = 'none';
-          };
-          tempImg.src = newSrc;
-        }
-      }
+    const cam = this.cameras[name];
+    let row = document.getElementById(`tb-row-${this._eid(name)}`);
+    
+    if (!row) {
+      row = document.createElement('div');
+      row.className = 'tb-row';
+      row.id = `tb-row-${this._eid(name)}`;
+      stage.appendChild(row);
     }
 
-    // Badges
-    const badgesEl = document.getElementById(`badges-${eid}`);
-    if (badgesEl) {
-      const actCls = { ACTIVE: 'green', IDLE: 'amber', UNKNOWN: 'muted' }[act] || 'muted';
-      const safCls = { OK: 'green', WARNING: 'amber', DANGER: 'red', UNKNOWN: 'muted' }[saf] || 'muted';
-      const sevCls = { LOW: 'green', MEDIUM: 'amber', HIGH: 'red' }[sev.toUpperCase()] || 'muted';
-      badgesEl.innerHTML = `
-        <span class="badge badge-${actCls}">⚡ ${act}</span>
-        <span class="badge badge-${safCls}">🛡 ${saf}</span>
-        <span class="badge badge-${sevCls}">⚠ ${sev.toUpperCase()}</span>
-        ${result.workers && result.workers !== '0' ? `<span class="badge badge-neutral">👷 ${this._esc(result.workers)}</span>` : ''}
+    const imgSrc = cam.thumbB64 ? `data:image/jpeg;base64,${cam.thumbB64}` : '';
+    
+    let modelsHtml = '';
+    for (const res of cam.results) {
+      const sevCls = { LOW: 'green', MEDIUM: 'amber', HIGH: 'red' }[(res.severity || 'LOW').toUpperCase()] || 'muted';
+      modelsHtml += `
+        <div class="tb-model-card">
+          <div class="tb-model-name">${this._esc(res.model || 'Unknown Model')}</div>
+          <div class="tb-model-obs">${this._esc(res.observation || '—')}</div>
+          <div class="tb-model-meta">
+            <span>Latency: ${res.latency ? res.latency.toFixed(2) + 's' : '—'}</span>
+            <span class="badge badge-${sevCls}">${this._esc(res.severity || 'LOW')}</span>
+          </div>
+        </div>
       `;
     }
 
-    // Observation
-    const obsEl = document.getElementById(`obs-${eid}`);
-    if (obsEl) obsEl.textContent = result.observation || '';
+    // Use double buffering for image to prevent flicker
+    let imgTag = `<div style="aspect-ratio:16/9; background:#1e1e1e; border-radius:4px;"></div>`;
+    if (imgSrc) {
+       imgTag = `<img id="tb-img-${this._eid(name)}" src="${imgSrc}" class="tb-cam-img">`;
+    }
 
-    // Latency
-    const latEl = document.getElementById(`lat-${eid}`);
-    if (latEl) latEl.textContent = result.latency ? `${result.latency}s` : '';
-
-    // Live dot
-    const dotEl = document.getElementById(`dot-${eid}`);
-    if (dotEl) dotEl.className = 'cam-live-dot live-ok';
-
-    // Pulse animation
-    card.classList.add('pulse-new');
-    setTimeout(() => card.classList.remove('pulse-new'), 1200);
-
-    // Re-apply filter visibility
-    this._applyFilter(card, name);
+    row.innerHTML = `
+      <div class="tb-cam-col">
+        <div class="tb-cam-title">${this._esc(name)}</div>
+        ${imgTag}
+      </div>
+      <div class="tb-models-grid">
+        ${modelsHtml}
+      </div>
+    `;
+    
+    // Double buffering for non-flicker update if image already exists
+    if (imgSrc) {
+       const existingImg = document.getElementById(`tb-img-${this._eid(name)}`);
+       if (existingImg && existingImg.src !== imgSrc) {
+           const tempImg = new Image();
+           tempImg.onload = () => { existingImg.src = imgSrc; };
+           tempImg.src = imgSrc;
+       }
+    }
   },
+
 
   _applyFilter(card, name) {
     const f = this.activeFilter;
