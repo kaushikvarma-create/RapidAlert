@@ -1,62 +1,62 @@
-# 🚨 RapidAlert: Ultra-Fast VLM CCTV Engine
+# 🚀 RapidAlert - Model Testing Tensorboard
 
-RapidAlert is a high-performance, real-time Vision-Language Model (VLM) surveillance engine designed specifically for the NVIDIA Jetson Thor platform. It processes multi-camera RTSP feeds simultaneously, utilizing Qwen3-VL to provide zero-latency natural language analysis of physical spaces.
+Welcome to the **Model Testing** branch of RapidAlert. 
+This branch completely forks the original RapidAlert unified-CCTV architecture into a **highly optimized, concurrent A/B/C testing environment** designed specifically for benchmarking Vision-Language Models (VLMs) on the NVIDIA Jetson Thor platform.
 
-## ✨ Key Features
+---
 
-* **Massive Concurrency:** Capable of processing 7+ camera feeds simultaneously with a 12-worker async Python scheduler leveraging vLLM's continuous batching.
-* **Intelligent Routing:** Custom `VLMPool` architecture load-balances incoming frames across multiple localized vLLM Docker containers using real-time in-flight request tracking.
-* **Zero-Latency Ingestion:** Dedicated `CameraManager` threads guarantee that only the absolute freshest frame is ever sent to the VLM, dropping stale frames instantly.
-* **Jetson Thor Optimized:** Exploits the Jetson Thor's massive unified memory pool, running three 4-bit AWQ quantized Qwen-VL instances in parallel.
-* **Dynamic Prompts:** Master and camera-specific overriding prompts allow fine-tuning the AI's attention (e.g., watching for PPE in a factory vs. spills in a cafeteria).
-* **Real-Time Dashboard:** A responsive, glassmorphism-styled frontend built with vanilla HTML/JS/CSS and WebSockets.
+## 🏗️ Architectural Overview
 
-## 🚀 Getting Started
+Unlike the main branch, which uses a Least-Connections router to load-balance CCTV feeds across instances of the same model, this branch operates as a synchronous **Comparator Engine**. 
 
-### Prerequisites
-* NVIDIA Jetson Thor (or similar high-VRAM unified memory Linux environment).
-* Docker with NVIDIA Runtime installed.
-* Python 3.12+
+### 1. Per-Instance Model Spawning (`run.sh`)
+When booting up, `run.sh` no longer limits the VLM pool to a single global model. It deeply integrates with `config/system.json`:
+- It parses the `vllm_endpoints` JSON array.
+- For `VLLM_INSTANCES=3`, it assigns endpoint 0 to `model_0`, endpoint 1 to `model_1`, etc.
+- This allows 3 distinct AWQ-quantized VLMs (e.g. Qwen3-VL-4B, LLaVA-1.5, InternVL) to reside in memory across the unified Jetson Thor RAM footprint.
 
-### Installation
-```bash
-# Clone the repository
-git clone https://github.com/kaushikvarma-create/RapidAlert.git
-cd RapidAlert
+### 2. Concurrent Execution Engine (`backend/scheduler.py` & `backend/vlm_client.py`)
+The `DeadlineScheduler` was entirely re-engineered. 
+- **Trigger**: Driven by user selection from the Frontend WebSocket stream (`selected_cameras`).
+- **Dispatch**: The scheduler fetches the latest base64 snapshot from the active camera.
+- **Gather (`asyncio.gather`)**: It triggers `analyze_concurrent()` in the `VLMPool`, firing the EXACT same frame and prompt to all 3 endpoints concurrently.
+- **Consolidation**: Instead of returning a single `dict`, it returns `list[dict]` containing the side-by-side responses and distinct time-to-first-token (TTFT)/latency metrics. 
 
-# Install python dependencies (handled automatically by run.sh if missing)
-pip install -r requirements.txt
-```
+### 3. Native Hardware Monitoring (`backend/metrics_monitor.py`)
+To prevent crashes on Jetson due to heavy LLM footprint, hardware utilization is monitored at 2Hz using native hooks, bypassing the need for bulky PIP libraries:
+- **GPU Usage**: Polled asynchronously using `nvidia-smi --query-gpu=utilization.gpu`.
+- **CPU & Unified RAM Usage**: Sourced natively via `/proc/stat` and `/proc/meminfo` differential parsing.
+These metrics are packaged into a `sys_metrics` WS event and flushed to the dashboard.
 
-### Running the Engine
-```bash
-./run.sh
-```
+---
 
-The startup script will:
-1. Ensure all orphaned/zombie background processes are cleanly terminated.
-2. Spin up the configured number of vLLM containers via Docker.
-3. Wait for the endpoints to become healthy.
-4. Launch the FastAPI backend and WebSocket server.
-5. Open the dashboard at `http://localhost:7000`.
+## 🖥️ Frontend Tensorboard Redesign
 
-## 📁 Repository Structure
+The Vanilla HTML/JS frontend has been rebuilt from the ground up for analytical clarity.
 
-* `run.sh`: The master orchestrator script for Docker and the FastAPI app.
-* `backend/`: Python core logic (Scheduler, Frame Ingestion, VLM Client, Alert Engine).
-* `frontend/`: Real-time dashboard UI (HTML, CSS, JS).
-* `config/`: System configuration (`system.json`), camera setups (`cameras.json`), and prompts (`prompts.json`).
-* `data/`: SQLite databases for persistent event logs.
-* `docs/`: Extensive technical deep-dive and architectural documentation.
+1. **Top HUD**: 
+   Displays real-time hardware telemetry (GPU, CPU, RAM) rather than production analytics.
+2. **Camera Target Selection**: 
+   A left sidebar dynamically lists all detected IP streams. Checking a stream assigns it to the Tensorboard active queue.
+3. **Multi-Model Main Stage**: 
+   Each selected stream generates a dedicated wide-row on the main stage. 
+   - **Left side**: Real-time thumbnail (double-buffered in JS to prevent DOM flicker).
+   - **Right side**: A dynamically generated 3-column grid, showcasing the live inference observation, severity tagging, and generation latency side-by-side for each of the 3 VLMs.
 
-## 🛠 Configuration
+---
 
-Modify `config/system.json` to tune system limits:
-* `vllm_instances`: Number of parallel vLLM nodes to spawn (default: 3).
-* `vllm_model`: The HuggingFace model string (e.g., `cyankiwi/Qwen3-VL-4B-Instruct-AWQ-4bit`).
-* `frame_width`: Internal resolution to scale frames to before sending to the VLM (default: 768px to drastically reduce token count).
-* `max_concurrency`: Total number of active Python async workers feeding the vLLM nodes (default: 12).
+## ⚙️ Configuration & Execution
 
-## 📖 Further Reading
-
-For a comprehensive breakdown of the greedy scheduling algorithm, VLM continuous batching, and system architecture, please see the [Technical Deep Dive](docs/technical_deep_dive.md).
+1. Edit `config/system.json`:
+   ```json
+   "vllm_endpoints": [
+     {"url": "http://localhost:8000", "model": "cyankiwi/Qwen3.5-4B-AWQ-4bit"},
+     {"url": "http://localhost:8001", "model": "other/Model-A"},
+     {"url": "http://localhost:8002", "model": "other/Model-B"}
+   ]
+   ```
+2. **Run System**:
+   ```bash
+   ./run.sh
+   ```
+3. Open `http://localhost:7000` to access the Tensorboard!
