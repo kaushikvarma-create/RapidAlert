@@ -11,7 +11,7 @@
     },
     {
       "url": "http://localhost:8002",
-      "model": "google/paligemma-3b-mix-224"
+      "model": "nvidia/Cosmos-Reason2-2B"
     }
   ],
   "auto_start_vllm": true,
