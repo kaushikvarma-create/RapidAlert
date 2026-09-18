@@ -131,8 +131,9 @@ class VLMPool:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content}
             ],
-            "temperature": 0.25,
-            "max_tokens": 220,
+            "temperature": 0.2,
+            "max_tokens": 300,
+            "repetition_penalty": 1.15,
             "stop": ["<think>", "</think>"]
         }
 

@@ -1,11 +1,12 @@
 """
 ResultStore: per-camera latest VLM result + rolling history.
-Also tracks global metrics: analyses/sec and latency percentiles.
+Stores both single and concurrent multi-model comparisons + thumbnails.
+Tracks global metrics: analyses/sec and latency percentiles.
 """
 import threading
 import time
 from collections import deque
-from typing import Optional
+from typing import Optional, Union, List
 
 
 class ResultStore:
@@ -13,16 +14,30 @@ class ResultStore:
 
     def __init__(self):
         self._latest: dict[str, dict] = {}
+        self._latest_concurrent: dict[str, list[dict]] = {}
+        self._latest_thumbnails: dict[str, list[str]] = {}
         self._history: dict[str, deque] = {}
         self._latencies: deque = deque(maxlen=100)
         self._analysis_times: deque = deque(maxlen=500)
         self._lock = threading.Lock()
 
-    def put(self, cam_name: str, result: dict, latency: float) -> None:
+    def put(
+        self,
+        cam_name: str,
+        results: Union[dict, List[dict]],
+        latency: float,
+        thumbnails_b64: Optional[List[str]] = None,
+    ) -> None:
         ts = time.time()
-        record = dict(result, ts=ts, latency=round(latency, 2))
+        res_list = results if isinstance(results, list) else [results]
+        primary = res_list[0] if res_list else {}
+        record = dict(primary, ts=ts, latency=round(latency, 2))
+
         with self._lock:
             self._latest[cam_name] = record
+            self._latest_concurrent[cam_name] = res_list
+            if thumbnails_b64:
+                self._latest_thumbnails[cam_name] = thumbnails_b64
             if cam_name not in self._history:
                 self._history[cam_name] = deque(maxlen=self.HISTORY_LEN)
             self._history[cam_name].append(record)
@@ -37,6 +52,17 @@ class ResultStore:
     def get_all_latest(self) -> dict[str, dict]:
         with self._lock:
             return {k: dict(v) for k, v in self._latest.items()}
+
+    def get_all_latest_concurrent(self) -> dict[str, dict]:
+        """Returns full multi-model results and thumbnails for all cameras."""
+        with self._lock:
+            out = {}
+            for cam in set(list(self._latest.keys()) + list(self._latest_concurrent.keys())):
+                out[cam] = {
+                    "results": list(self._latest_concurrent.get(cam, [])),
+                    "thumbnails_b64": list(self._latest_thumbnails.get(cam, [])),
+                }
+            return out
 
     def get_history(self, cam_name: str) -> list[dict]:
         with self._lock:

@@ -16,7 +16,7 @@ import numpy as np
 class FrameStore:
     def __init__(self, max_w: int = 1280, jpeg_quality: int = 82):
         self._store: dict[str, collections.deque[Tuple[np.ndarray, float]]] = collections.defaultdict(
-            lambda: collections.deque(maxlen=150)
+            lambda: collections.deque(maxlen=300)
         )
         self._lock = threading.Lock()
         self.max_w = max_w
@@ -46,6 +46,27 @@ class FrameStore:
             return None
         frame, _ = entry
         return self._encode_frame(frame, max_w, quality)
+
+    def get_pre_trigger_frames(
+        self,
+        cam_name: str,
+        trigger_time: float,
+        offsets: list[float] = [-5.0, -2.0, -0.5],
+    ) -> list[np.ndarray]:
+        """Finds frames closest to trigger_time + offset for each offset."""
+        with self._lock:
+            q = self._store.get(cam_name)
+            if not q:
+                return []
+            items = list(q)
+
+        results = []
+        for offset in offsets:
+            target_ts = trigger_time + offset
+            # Find item with minimal absolute timestamp difference
+            closest = min(items, key=lambda item: abs(item[1] - target_ts))
+            results.append(closest[0].copy())
+        return results
 
     def get_temporal_snapshots_b64(
         self,
@@ -81,6 +102,14 @@ class FrameStore:
             selected = [window[i] for i in indices]
 
         return [self._encode_frame(f, max_w, quality) for f, _ in selected]
+
+    def encode_frames(
+        self,
+        frames: list[np.ndarray],
+        max_w: Optional[int] = None,
+        quality: Optional[int] = None,
+    ) -> list[str]:
+        return [self._encode_frame(f, max_w, quality) for f in frames]
 
     def _encode_frame(
         self,

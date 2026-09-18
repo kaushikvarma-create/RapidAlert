@@ -75,9 +75,11 @@ echo "  ██╔══██╗██╔══██║██╔═══╝ �
 echo "  ██║  ██║██║  ██║██║     ██║██████╔╝██║  ██║███████╗███████╗██║  ██║   ██║   "
 echo "  ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝╚═════╝ ╚═╝  ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝   ╚═╝   "
 echo -e "${NC}"
-echo -e "  ${CYAN}Ultra-Fast VLM CCTV Engine${NC}  —  Jetson Thor Edition"
+echo -e "  ${CYAN}Hybrid VLM Surveillance Engine${NC}  —  Jetson Thor Edition"
 echo "  ─────────────────────────────────────────────────────"
-echo -e "  Model  : ${BOLD}${VLLM_MODEL}${NC}"
+echo -e "  Ingest   : ${BOLD}NVIDIA DeepStream (NVDEC Hardware Decode)${NC}"
+echo -e "  Trigger  : ${BOLD}DINOv2 Scene Drift (CUDA Real-Time)${NC}"
+echo -e "  VLM      : ${BOLD}Cosmos Reason2 8B (${VLLM_MODEL})${NC}"
 echo -e "  Dashboard: ${BOLD}http://0.0.0.0:${DASHBOARD_PORT}${NC}"
 echo "  ─────────────────────────────────────────────────────"
 echo ""
@@ -88,10 +90,17 @@ command -v docker >/dev/null 2>&1 || die "docker not found. Required for vLLM."
 command -v python3 >/dev/null 2>&1 || die "python3 not found."
 [[ -d "${HF_CACHE}" ]] || { warn "HF cache not found — creating ${HF_CACHE}"; mkdir -p "${HF_CACHE}"; }
 
-if ! python3 -c "import fastapi, uvicorn, aiohttp, cv2, numpy" 2>/dev/null; then
+if ! python3 -c "import fastapi, uvicorn, aiohttp, cv2, numpy, torch, transformers, PIL" 2>/dev/null; then
   warn "Missing dependencies — installing from requirements.txt"
   pip install --break-system-packages -q -r requirements.txt || die "Failed to install dependencies"
 fi
+
+if python3 -c "import sys; sys.path.insert(0, 'backend'); from nvidia_ingest import is_nvidia_available; exit(0 if is_nvidia_available() else 1)" 2>/dev/null; then
+  ok "NVIDIA DeepStream / NVDEC hardware decoding available."
+else
+  warn "NVIDIA DeepStream plugins not found — will use OpenCV fallback."
+fi
+
 ok "Pre-flight checks passed."
 echo ""
 
@@ -106,7 +115,10 @@ if [[ -n "${pids}" ]]; then
     pkill -15 -f "backend.main:app" 2>/dev/null || true
     sleep 1
     pkill -9 -f "backend.main:app" 2>/dev/null || true
+    fuser -k "${DASHBOARD_PORT}/tcp" 2>/dev/null || true
+    sleep 0.5
 fi
+fuser -k "${DASHBOARD_PORT}/tcp" 2>/dev/null || true
 ok "Cleanup done."
 echo ""
 

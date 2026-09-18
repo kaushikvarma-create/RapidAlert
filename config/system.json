@@ -3,27 +3,30 @@
   "vllm_endpoints": [
     {
       "url": "http://localhost:8000",
-      "model": "embedl/Cosmos-Reason2-2B-W4A16"
+      "model": "vrfai/Cosmos-Reason2-8B-NVFP4"
     },
     {
       "url": "http://localhost:8001",
       "model": "vrfai/Cosmos-Reason2-8B-NVFP4"
-    },
-    {
-      "url": "http://localhost:8002",
-      "model": "cyankiwi/Qwen3-VL-4B-Instruct-AWQ-4bit"
     }
   ],
   "auto_start_vllm": true,
-  "vllm_instances": 3,
-  "vllm_model": "cyankiwi/Qwen3-VL-4B-Instruct-AWQ-4bit",
+  "vllm_instances": 2,
+  "vllm_model": "vrfai/Cosmos-Reason2-8B-NVFP4",
+  "primary_model": "vrfai/Cosmos-Reason2-8B-NVFP4",
   "vllm_quantization": "",
   "vllm_port_start": 8000,
   "vllm_max_seqs": 4,
   "vllm_max_model_len": 4096,
-  "vllm_gpu_utilization": 0.2,
-  "initial_concurrency": 3,
-  "max_concurrency": 12,
+  "vllm_gpu_utilization": 0.25,
+  "initial_concurrency": 4,
+  "max_concurrency": 8,
+  "ingest_backend": "nvidia",
+  "trigger_backend": "dinov2",
+  "dinov2_model": "facebook/dinov2-small",
+  "scene_threshold": 0.033,
+  "semantic_interval": 0.5,
+  "event_cooldown": 15.0,
   "frame_width": 768,
   "jpeg_quality": 82,
   "dashboard_port": 7000

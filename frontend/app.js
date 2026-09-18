@@ -55,6 +55,8 @@ const App = {
     switch (msg.type) {
       case 'init':    return this.onInit(msg);
       case 'result_concurrent': return this.onResultConcurrent(msg);
+      case 'camera_frame': return this.onCameraFrame(msg);
+      case 'scene_shift': return this.onSceneShift(msg);
       case 'sys_metrics': return this.onSysMetrics(msg);
       case 'metrics': return this.onMetrics(msg);
       case 'cameras': return this.onCameras(msg);
@@ -69,10 +71,30 @@ const App = {
   onInit(msg) {
     this.cameras = {};
     for (const cam of (msg.cameras || [])) {
-      this.cameras[cam.name] = { config: cam, results: [], lastTs: 0, thumbB64: null };
+      this.cameras[cam.name] = { config: cam, results: [], lastTs: 0, thumbB64: null, thumbnailsB64: [] };
     }
-    
-    if (msg.results) {
+
+    if (msg.thumbnails) {
+      for (const [cam, thumbs] of Object.entries(msg.thumbnails)) {
+        if (this.cameras[cam] && thumbs && thumbs.length > 0) {
+          this.cameras[cam].thumbnailsB64 = thumbs;
+          this.cameras[cam].thumbB64 = thumbs[0];
+        }
+      }
+    }
+
+    if (msg.concurrent_results) {
+      for (const [cam, data] of Object.entries(msg.concurrent_results)) {
+        if (this.cameras[cam]) {
+          if (data.results && data.results.length > 0) {
+            this.cameras[cam].results = data.results;
+          }
+          if (data.thumbnails_b64 && data.thumbnails_b64.length > 0) {
+            this.cameras[cam].thumbnailsB64 = data.thumbnails_b64;
+          }
+        }
+      }
+    } else if (msg.results) {
       for (const [cam, res] of Object.entries(msg.results)) {
         if (this.cameras[cam]) {
           this.cameras[cam].results = [res];
@@ -81,11 +103,39 @@ const App = {
       }
     }
 
+    if (msg.drifts) {
+      for (const [cam, val] of Object.entries(msg.drifts)) {
+        if (this.cameras[cam]) this.cameras[cam].drift = val;
+      }
+    }
+
     this._renderSidebar();
     
     if (msg.metrics) this._applyMetrics(msg.metrics);
     if (msg.prompts) this._applyPrompts(msg.prompts);
     this._updateCamSelect();
+
+    // Render initial cards for checked cameras
+    for (const camName of Object.keys(this.cameras)) {
+      this._renderTbRow(camName);
+    }
+  },
+
+  onCameraFrame(msg) {
+    const { cam, thumbnail_b64 } = msg;
+    if (!this.cameras[cam]) return;
+    this.cameras[cam].thumbB64 = thumbnail_b64;
+
+    // If camera only has single thumbnail or none, update preview
+    if (!this.cameras[cam].thumbnailsB64 || this.cameras[cam].thumbnailsB64.length <= 1) {
+      this.cameras[cam].thumbnailsB64 = [thumbnail_b64];
+      const img = document.getElementById(`tb-img-${this._eid(cam)}`);
+      if (img) {
+        img.src = `data:image/jpeg;base64,${thumbnail_b64}`;
+      } else {
+        this._renderTbRow(cam);
+      }
+    }
   },
 
   onSysMetrics(msg) {
@@ -95,7 +145,7 @@ const App = {
   },
 
   onResultConcurrent(msg) {
-    const { cam, results, thumbnails_b64 } = msg;
+    const { cam, results, thumbnails_b64, drift, is_incident } = msg;
 
     if (!this.cameras[cam]) {
       this.cameras[cam] = { config: { name: cam }, results: [], lastTs: 0, thumbnailsB64: [] };
@@ -104,9 +154,20 @@ const App = {
 
     this.cameras[cam].results = results;
     this.cameras[cam].lastTs = Date.now() / 1000;
+    this.cameras[cam].drift = drift;
+    this.cameras[cam].is_incident = is_incident;
     if (thumbnails_b64) this.cameras[cam].thumbnailsB64 = thumbnails_b64;
 
     this._renderTbRow(cam);
+  },
+
+  onSceneShift(msg) {
+    const { cam, drift } = msg;
+    if (this.cameras[cam]) {
+      this.cameras[cam].drift = drift;
+      this.cameras[cam].is_incident = true;
+      this._renderTbRow(cam);
+    }
   },
 
   onAlert(msg) {
@@ -236,8 +297,9 @@ const App = {
       `;
     }
 
-    // Use double buffering for image to prevent flicker
-    let imgTag = `<div style="aspect-ratio:16/9; background:#1e1e1e; border-radius:4px;"></div>`;
+    let imgTag = cam.thumbB64 
+      ? `<img id="tb-img-${this._eid(name)}" src="data:image/jpeg;base64,${cam.thumbB64}" class="tb-cam-img">`
+      : `<div style="aspect-ratio:16/9; background:#1e1e1e; border-radius:4px; display:flex; align-items:center; justify-content:center; color:#888; font-size:13px;">Connecting to camera stream...</div>`;
     
     if (cam.thumbnailsB64 && cam.thumbnailsB64.length > 0) {
       if (cam.thumbnailsB64.length === 1) {
@@ -255,9 +317,20 @@ const App = {
       }
     }
 
+    const driftBadge = (cam.drift !== undefined && cam.drift !== null)
+      ? `<span class="badge badge-muted" style="margin-left: 8px; font-family: monospace;">Drift: ${cam.drift.toFixed(3)}</span>`
+      : '';
+    const incidentBadge = cam.is_incident
+      ? `<span class="badge badge-red" style="margin-left: 6px; animation: pulse 1.5s infinite;">⚡ SCENE TRIGGER</span>`
+      : `<span class="badge badge-green" style="margin-left: 6px;">HEARTBEAT</span>`;
+
     row.innerHTML = `
       <div class="tb-cam-col">
-        <div class="tb-cam-title">${this._esc(name)}</div>
+        <div class="tb-cam-title" style="display: flex; align-items: center; flex-wrap: wrap;">
+          <span>${this._esc(name)}</span>
+          ${driftBadge}
+          ${incidentBadge}
+        </div>
         ${imgTag}
       </div>
       <div class="tb-models-grid">

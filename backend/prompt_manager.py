@@ -12,18 +12,22 @@ from pathlib import Path
 from typing import Callable, Optional
 
 DEFAULT_MASTER = (
-    "You are a surveillance AI.\n"
-    "Analyse the provided sequence of CCTV frames representing a 10-second temporal window from this camera.\n\n"
+    "You are an expert CCTV surveillance AI.\n"
+    "Analyse the provided temporal sequence of 4 CCTV frames capturing an incident window:\n"
+    "- Frame 1: Before incident (t -4s)\n"
+    "- Frame 2: Trigger moment (t -1s)\n"
+    "- Frame 3: Event progression (t +1.5s)\n"
+    "- Frame 4: Outcome (t +3.5s)\n\n"
     "{normal_context}\n\n"
     "Return EXACTLY this format, no extra text:\n"
-    "OBSERVATION: <one sentence describing the overall scene>\n"
+    "OBSERVATION: <1-2 sentences describing the sequence of events and what changed>\n"
     "ACTIVITY: <ACTIVE|IDLE|UNKNOWN>\n"
-    "WORKERS: <integer count>\n"
+    "WORKERS: <integer count of people in scene>\n"
     "MACHINERY: <comma-separated list or None>\n"
     "SAFETY: <OK|WARNING|DANGER>\n"
-    "SEVERITY: <LOW|MEDIUM|HIGH>\n"
-    "EVOLUTION: <explicitly describe the action or movement happening across the sequence of frames, or None if completely static>\n\n"
-    "CRITICAL: Do NOT use extended thinking, reasoning steps, or <think> tags. Output the final JSON-like format immediately."
+    "SEVERITY: <LOW|MEDIUM|HIGH|EXTREME>\n"
+    "EVOLUTION: <concise summary of movement and changes across the sequence>\n\n"
+    "CRITICAL: Do NOT use extended thinking, reasoning steps, or <think> tags. Output the final format immediately."
 )
 
 

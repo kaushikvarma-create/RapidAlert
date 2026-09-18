@@ -62,7 +62,6 @@ class DeadlineScheduler:
         self.broadcast_fn = broadcast_fn
         self.storage = storage
 
-        # We want to fully utilize vLLM's internal continuous batching.
         # Throttling requests at the app level prevents vLLM from building
         # efficient batches. Pin workers to max_concurrency.
         self.MIN_WORKERS = max_concurrency
@@ -72,9 +71,14 @@ class DeadlineScheduler:
         self._last_analyzed: dict[str, float] = {}
         self._in_flight: set[str] = set()
         self._workers: list[asyncio.Task] = []
-        self._queue: Optional[asyncio.Queue] = None
+        self._queue: Optional[asyncio.PriorityQueue] = None
+        self._seq: int = 0
         self._latencies: list[float] = []
         self._total_analyzed = 0
+
+    def _next_seq(self) -> int:
+        self._seq += 1
+        return self._seq
 
     # ── Properties ─────────────────────────────────────────────────
 
@@ -93,7 +97,7 @@ class DeadlineScheduler:
     # ── Lifecycle ───────────────────────────────────────────────────
 
     async def start(self) -> None:
-        self._queue = asyncio.Queue(maxsize=0)
+        self._queue = asyncio.PriorityQueue()
         self._running = True
         self._workers = [
             asyncio.create_task(self._worker(i), name=f"vlm-worker-{i}")
@@ -123,15 +127,24 @@ class DeadlineScheduler:
         """Manually set target concurrency (dashboard override)."""
         self._max_concurrency = max(self.MIN_WORKERS, n)
 
-    # ── Feed loop ───────────────────────────────────────────────────
+    async def queue_incident(self, incident: dict) -> None:
+        """Enqueue a high-priority DINOv2 incident trigger."""
+        if not self._running or self._queue is None:
+            return
+        cam_name = incident.get("cam", "")
+        # Prevent piling up identical camera jobs in queue
+        if cam_name in self._in_flight:
+            return
+        self._in_flight.add(cam_name)
+        await self._queue.put((0, self._next_seq(), incident))
+        print(f"[Scheduler] 📥 Queued incident for {cam_name} (Priority 0)")
+
+    # ── Feed loop (Heartbeat check for quiet cameras) ───────────────
 
     async def _feed_loop(self) -> None:
-        """Continuously picks the most stale eligible camera and queues it.
-
-        Queue depth is capped at QUEUE_CAP_PER_WORKER × workers so cameras
-        don't pile up waiting behind each other when there are more cameras
-        than workers.  Without this, N cameras queued ahead of camera X means
-        X waits N/workers × latency ≈ 15-18 s between analyses.
+        """
+        Background heartbeat loop: checks for cameras that have been quiet
+        without an incident for >= 60 seconds and queues a low-priority refresh.
         """
         while self._running:
             cams = self.camera_manager.get_active_cameras()
@@ -143,17 +156,15 @@ class DeadlineScheduler:
                 and now - self._last_analyzed.get(c, 0) >= 15.0
             ]
 
-            # Don't flood the queue — workers should always have fresh work,
-            # not be processing a backlog from several seconds ago.
             queue_cap = max(1, len(self._workers)) * self.QUEUE_CAP_PER_WORKER
             if eligible and self._queue.qsize() < queue_cap:
-                now = time.monotonic()
                 cam = max(
                     eligible,
                     key=lambda c: now - self._last_analyzed.get(c, 0),
                 )
                 self._in_flight.add(cam)
-                await self._queue.put(cam)
+                job = {"cam": cam, "is_heartbeat": True}
+                await self._queue.put((1, self._next_seq(), job))
                 await asyncio.sleep(self.FEED_TICK)
             else:
                 await asyncio.sleep(self.IDLE_TICK)
@@ -163,59 +174,70 @@ class DeadlineScheduler:
     async def _worker(self, worker_id: int) -> None:
         while self._running:
             try:
-                cam = await asyncio.wait_for(self._queue.get(), timeout=1.0)
+                item = await asyncio.wait_for(self._queue.get(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
                 break
+            
+            priority, seq, job = item
+            cam = job.get("cam", "")
             try:
-                await self._analyze(cam)
+                await self._analyze_job(job)
             except Exception:
                 traceback.print_exc()
             finally:
                 self._in_flight.discard(cam)
                 self._queue.task_done()
 
-    async def _analyze(self, cam_name: str) -> None:
-        # Extract 4 frames across 10 seconds. Downscale to avoid exceeding token limits
-        frames_b64 = self.frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=10.0, max_w=512)
+    async def _analyze_job(self, job: dict) -> None:
+        cam_name = job["cam"]
+        is_incident = not job.get("is_heartbeat", False)
+        drift_score = job.get("drift", 0.0)
+
+        if is_incident and job.get("frames_b64"):
+            frames_b64 = job["frames_b64"]
+            thumbs_b64 = job.get("thumbs_b64", [])
+        else:
+            # Heartbeat fallback: extract 4 temporal frames across 10s
+            frames_b64 = self.frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=10.0, max_w=512)
+            thumbs_b64 = self.frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=10.0, max_w=320, quality=65)
+
         if not frames_b64:
             return
 
-        # Smaller thumbnails for WS broadcast (saves bandwidth). Extract all 4.
-        thumbs_b64 = self.frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=10.0, max_w=320, quality=65)
         prompt = self.prompt_manager.get_prompt(cam_name)
 
         t0 = time.monotonic()
-        results = await self.vlm_pool.analyze_concurrent(cam_name, frames_b64, prompt)
-        
-        # Extract latencies from results
-        for res in results:
-            self._latencies.append(res.get("latency", 0))
-            if len(self._latencies) > 100:
-                del self._latencies[0]
+        res = await self.vlm_pool.analyze(cam_name, frames_b64, prompt)
+        res["model"] = "vrfai/Cosmos-Reason2-8B-NVFP4"
+        latency = res.get("latency", time.monotonic() - t0)
+
+        self._latencies.append(latency)
+        if len(self._latencies) > 100:
+            del self._latencies[0]
 
         self._last_analyzed[cam_name] = time.monotonic()
         self._total_analyzed += 1
-        
-        if not results:
-            return
 
-        # We can just store the first result or the list. Since we are in testing branch,
-        # we bypass deep result_store and storage tracking for all models.
-        self.result_store.put(cam_name, results[0], results[0].get("latency", 0))
+        results = [res]
 
-        # Alert check based on the first model (or skip). Pass the latest thumbnail for alerts.
+        # Store result
+        self.result_store.put(cam_name, results, latency, thumbnails_b64=thumbs_b64)
+
+        # Alert check based on Cosmos 8B result
         latest_thumb = thumbs_b64[-1] if thumbs_b64 else None
-        await self.alert_engine.process(cam_name, results[0], thumbnail_b64=latest_thumb)
+        await self.alert_engine.process(cam_name, res, thumbnail_b64=latest_thumb)
 
-        # Broadcast ALL results and ALL thumbnails to dashboard for tensorboard
+        # Broadcast single Cosmos 8B result, thumbnails, drift score and incident flag to dashboard
         if self.broadcast_fn:
             await self.broadcast_fn({
                 "type": "result_concurrent",
                 "cam": cam_name,
                 "results": results,
                 "thumbnails_b64": thumbs_b64,
+                "drift": drift_score,
+                "is_incident": is_incident,
             })
 
     # ── Auto-tune ───────────────────────────────────────────────────

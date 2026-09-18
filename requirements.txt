@@ -5,3 +5,5 @@ aiohttp
 opencv-python-headless
 numpy
 Pillow
+torch
+transformers

@@ -38,6 +38,7 @@ from ws_manager import WSManager
 from storage import StorageManager
 from rtsp_scanner import RTSPScanner
 from metrics_monitor import metrics_loop
+from scene_trigger import SceneTriggerEngine
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -100,6 +101,17 @@ scheduler = DeadlineScheduler(
     storage           = storage,
 )
 alert_engine.set_broadcaster(ws_manager.broadcast)
+scene_trigger = SceneTriggerEngine(
+    frame_store=frame_store,
+    camera_manager=camera_manager,
+    on_incident_callback=scheduler.queue_incident,
+    broadcast_fn=ws_manager.broadcast,
+    model_name=SYS_CFG.get("dinov2_model", "facebook/dinov2-small"),
+    device="cuda",
+    default_threshold=SYS_CFG.get("scene_threshold", 0.033),
+    semantic_interval=SYS_CFG.get("semantic_interval", 0.5),
+    event_cooldown=SYS_CFG.get("event_cooldown", 15.0),
+)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -114,14 +126,17 @@ async def lifespan(app: FastAPI):
     camera_manager.sync()
     await vlm_pool.start()
     await scheduler.start()
+    scene_trigger.start()
     _bg_tasks.append(asyncio.create_task(prompt_manager.watch_loop()))
     _bg_tasks.append(asyncio.create_task(_config_sync_loop()))
     _bg_tasks.append(asyncio.create_task(metrics_loop(ws_manager.broadcast)))
+    _bg_tasks.append(asyncio.create_task(_snapshot_stream_loop()))
     print(f"\n[RapidAlert] ✅ Dashboard → http://localhost:{SYS_CFG.get('dashboard_port', 7000)}\n")
     yield
     # ── Shutdown ────────────────────────────────────────────────
     for task in _bg_tasks:
         task.cancel()
+    scene_trigger.stop()
     await scheduler.stop()
     await vlm_pool.stop()
     camera_manager.stop_all()
@@ -136,6 +151,21 @@ async def _config_sync_loop() -> None:
                 "type": "cameras",
                 "data": camera_manager.get_config(),
             })
+
+
+async def _snapshot_stream_loop() -> None:
+    """Broadcast live camera snapshots every 2 seconds so the dashboard preview stays live."""
+    while True:
+        await asyncio.sleep(2.0)
+        active = camera_manager.get_active_cameras()
+        for cam in active:
+            snap = frame_store.get_snapshot_b64(cam, max_w=320, quality=65)
+            if snap:
+                await ws_manager.broadcast({
+                    "type": "camera_frame",
+                    "cam": cam,
+                    "thumbnail_b64": snap,
+                })
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -153,11 +183,22 @@ app = FastAPI(title="RapidAlert", version="1.0.0", lifespan=lifespan)
 async def websocket_endpoint(ws: WebSocket):
     await ws_manager.connect(ws)
     try:
+        # Send live snapshots for all active cameras so preview is never blank
+        active_cams = camera_manager.get_active_cameras()
+        live_thumbs = {}
+        for c in active_cams:
+            snap = frame_store.get_snapshot_b64(c, max_w=320, quality=65)
+            if snap:
+                live_thumbs[c] = [snap]
+
         # Send full initial state so the dashboard can render immediately
         await ws.send_json({
             "type": "init",
             "cameras": camera_manager.get_config(),
             "results": result_store.get_all_latest(),
+            "concurrent_results": result_store.get_all_latest_concurrent(),
+            "thumbnails": live_thumbs,
+            "drifts": scene_trigger.latest_drifts,
             "alerts": alert_engine.get_recent(50),
             "metrics": {
                 **result_store.get_metrics(),
@@ -191,6 +232,11 @@ async def websocket_endpoint(ws: WebSocket):
 @app.get("/api/cameras")
 def api_get_cameras():
     return camera_manager.get_config()
+
+
+@app.get("/api/drifts")
+def api_get_drifts():
+    return scene_trigger.latest_drifts
 
 
 class CameraBody(BaseModel):

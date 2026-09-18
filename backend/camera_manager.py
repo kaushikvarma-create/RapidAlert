@@ -15,6 +15,7 @@ import cv2
 os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
 
 from frame_store import FrameStore
+from nvidia_ingest import NvidiaStreamCapture, is_nvidia_available
 
 
 class CameraThread(threading.Thread):
@@ -26,28 +27,53 @@ class CameraThread(threading.Thread):
         url: str,
         frame_store: FrameStore,
         stop_event: threading.Event,
+        use_nvidia: bool = True,
     ):
         super().__init__(name=f"cam-{cam_name}", daemon=True)
         self.cam_name = cam_name
         self.url = url
         self.frame_store = frame_store
         self.stop_event = stop_event
+        self.use_nvidia = use_nvidia and is_nvidia_available()
         self.connected = False
 
     def run(self) -> None:
         while not self.stop_event.is_set():
-            cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            cap = None
+            is_hw = False
+
+            if self.use_nvidia:
+                try:
+                    cap = NvidiaStreamCapture(self.url, width=1280, height=720)
+                    if cap.isOpened():
+                        is_hw = True
+                        print(f"[CamMgr] ⚡ {self.cam_name} using NVIDIA Hardware Decoder (NVDEC)")
+                    else:
+                        cap.release()
+                        cap = None
+                except Exception as e:
+                    print(f"[CamMgr] ⚠️  {self.cam_name} NVDEC init failed ({e}), falling back to OpenCV")
+                    cap = None
+
+            if cap is None:
+                cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
             got_frame = False
 
             while not self.stop_event.is_set():
-                ok, frame = cap.read()
-                if ok:
+                if is_hw:
+                    ok, frame = cap.read(timeout_sec=1.5)
+                else:
+                    ok, frame = cap.read()
+
+                if ok and frame is not None:
                     self.frame_store.put(self.cam_name, frame)
                     if not got_frame:
                         got_frame = True
                         self.connected = True
-                        print(f"[CamMgr] ✅ {self.cam_name} connected")
+                        mode = "NVDEC" if is_hw else "CPU-OpenCV"
+                        print(f"[CamMgr] ✅ {self.cam_name} connected ({mode})")
                 else:
                     if got_frame:
                         self.connected = False
@@ -58,7 +84,8 @@ class CameraThread(threading.Thread):
                         break
                     time.sleep(0.05)
 
-            cap.release()
+            if cap:
+                cap.release()
 
             # Retry backoff
             if not self.stop_event.is_set():
