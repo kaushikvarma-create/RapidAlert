@@ -10,7 +10,7 @@
   {
     "name": "1ST_ENTRANCE",
     "url": "rtsp://malliswar:Cl0ve%40123@10.91.87.35:554/cam/realmonitor?channel=2&subtype=0",
-    "enabled": true,
+    "enabled": false,
     "normal_context_day": "Detect crowd gathering.",
     "normal_context_night": "Detect crowd gathering.",
     "priority": "high"
@@ -18,7 +18,7 @@
   {
     "name": "PARKING",
     "url": "rtsp://malliswar:Cl0ve%40123@10.91.87.35:554/cam/realmonitor?channel=3&subtype=0",
-    "enabled": true,
+    "enabled": false,
     "normal_context_day": "",
     "normal_context_night": "",
     "priority": "normal"
@@ -26,7 +26,7 @@
   {
     "name": "1ST_OUT",
     "url": "rtsp://malliswar:Cl0ve%40123@10.91.87.35:554/cam/realmonitor?channel=4&subtype=0",
-    "enabled": true,
+    "enabled": false,
     "normal_context_day": "",
     "normal_context_night": "",
     "priority": "normal"
@@ -42,7 +42,7 @@
   {
     "name": "1ST_EXIT",
     "url": "rtsp://malliswar:Cl0ve%40123@10.91.87.35:554/cam/realmonitor?channel=6&subtype=0",
-    "enabled": true,
+    "enabled": false,
     "normal_context_day": "",
     "normal_context_night": "",
     "priority": "normal"
@@ -50,7 +50,7 @@
   {
     "name": "RECEPTION",
     "url": "rtsp://malliswar:Cl0ve%40123@10.91.87.35:554/cam/realmonitor?channel=7&subtype=0",
-    "enabled": true,
+    "enabled": false,
     "normal_context_day": "",
     "normal_context_night": "",
     "priority": "normal"

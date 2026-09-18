@@ -71,6 +71,16 @@ const App = {
     for (const cam of (msg.cameras || [])) {
       this.cameras[cam.name] = { config: cam, results: [], lastTs: 0, thumbB64: null };
     }
+    
+    if (msg.results) {
+      for (const [cam, res] of Object.entries(msg.results)) {
+        if (this.cameras[cam]) {
+          this.cameras[cam].results = [res];
+          this.cameras[cam].lastTs = res.ts || Date.now() / 1000;
+        }
+      }
+    }
+
     this._renderSidebar();
     
     if (msg.metrics) this._applyMetrics(msg.metrics);
@@ -97,14 +107,6 @@ const App = {
     if (thumbnail_b64) this.cameras[cam].thumbB64 = thumbnail_b64;
 
     this._renderTbRow(cam);
-  },
-
-    this.cameras[cam].result = result;
-    this.cameras[cam].lastTs = result.ts || Date.now() / 1000;
-    if (thumbnail_b64) this.cameras[cam].thumbB64 = thumbnail_b64;
-
-    this._applyResult(cam, result, thumbnail_b64);
-    this._updateCamCount();
   },
 
   onAlert(msg) {
@@ -205,16 +207,24 @@ const App = {
     const imgSrc = cam.thumbB64 ? `data:image/jpeg;base64,${cam.thumbB64}` : '';
     
     let modelsHtml = '';
-    for (const res of cam.results) {
-      const sevCls = { LOW: 'green', MEDIUM: 'amber', HIGH: 'red' }[(res.severity || 'LOW').toUpperCase()] || 'muted';
-      modelsHtml += `
-        <div class="tb-model-card">
-          <div class="tb-model-name">${this._esc(res.model || 'Unknown Model')}</div>
-          <div class="tb-model-obs">${this._esc(res.observation || '—')}</div>
-          <div class="tb-model-meta">
-            <span>Latency: ${res.latency ? res.latency.toFixed(2) + 's' : '—'}</span>
-            <span class="badge badge-${sevCls}">${this._esc(res.severity || 'LOW')}</span>
+    if (cam.results && cam.results.length > 0) {
+      for (const res of cam.results) {
+        const sevCls = { LOW: 'green', MEDIUM: 'amber', HIGH: 'red' }[(res.severity || 'LOW').toUpperCase()] || 'muted';
+        modelsHtml += `
+          <div class="tb-model-card">
+            <div class="tb-model-name">${this._esc(res.model || 'Unknown Model')}</div>
+            <div class="tb-model-obs">${this._esc(res.observation || '—')}</div>
+            <div class="tb-model-meta">
+              <span>Latency: ${res.latency ? res.latency.toFixed(2) + 's' : '—'}</span>
+              <span class="badge badge-${sevCls}">${this._esc(res.severity || 'LOW')}</span>
+            </div>
           </div>
+        `;
+      }
+    } else {
+      modelsHtml = `
+        <div class="tb-model-card" style="opacity: 0.5; display: flex; align-items: center; justify-content: center;">
+          <div class="tb-model-obs" style="margin: 0; text-align: center;">Awaiting Analysis...</div>
         </div>
       `;
     }

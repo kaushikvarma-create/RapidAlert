@@ -115,16 +115,17 @@ class VLMPool:
         url = f"{ep['url']}/v1/chat/completions"
         model = ep["model"]
 
-        content = [
-            {"type": "text", "text": system_prompt},
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{frame_b64}"},
-            },
-        ]
         payload = {
             "model": model,
-            "messages": [{"role": "user", "content": content}],
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{frame_b64}"},
+                    }
+                ]}
+            ],
             "temperature": 0.25,
             "max_tokens": 220,
             "stop": ["<think>", "</think>"]
