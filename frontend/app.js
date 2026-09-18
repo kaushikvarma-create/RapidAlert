@@ -95,16 +95,16 @@ const App = {
   },
 
   onResultConcurrent(msg) {
-    const { cam, results, thumbnail_b64 } = msg;
+    const { cam, results, thumbnails_b64 } = msg;
 
     if (!this.cameras[cam]) {
-      this.cameras[cam] = { config: { name: cam }, results: [], lastTs: 0, thumbB64: null };
+      this.cameras[cam] = { config: { name: cam }, results: [], lastTs: 0, thumbnailsB64: [] };
       this._renderSidebar();
     }
 
     this.cameras[cam].results = results;
     this.cameras[cam].lastTs = Date.now() / 1000;
-    if (thumbnail_b64) this.cameras[cam].thumbB64 = thumbnail_b64;
+    if (thumbnails_b64) this.cameras[cam].thumbnailsB64 = thumbnails_b64;
 
     this._renderTbRow(cam);
   },
@@ -214,6 +214,13 @@ const App = {
           <div class="tb-model-card">
             <div class="tb-model-name">${this._esc(res.model || 'Unknown Model')}</div>
             <div class="tb-model-obs">${this._esc(res.observation || '—')}</div>
+            <div class="tb-model-details" style="font-size: 0.85em; color: var(--text-muted); margin-top: 8px; margin-bottom: 8px; line-height: 1.4;">
+              <div><strong>Activity:</strong> ${this._esc(res.activity || 'UNKNOWN')}</div>
+              <div><strong>Workers:</strong> ${this._esc(res.workers || '0')}</div>
+              <div><strong>Machinery:</strong> ${this._esc(res.machinery || 'None')}</div>
+              <div><strong>Safety:</strong> ${this._esc(res.safety || 'UNKNOWN')}</div>
+              <div><strong>Evolution:</strong> ${this._esc(res.evolution || 'None')}</div>
+            </div>
             <div class="tb-model-meta">
               <span>Latency: ${res.latency ? res.latency.toFixed(2) + 's' : '—'}</span>
               <span class="badge badge-${sevCls}">${this._esc(res.severity || 'LOW')}</span>
@@ -231,8 +238,21 @@ const App = {
 
     // Use double buffering for image to prevent flicker
     let imgTag = `<div style="aspect-ratio:16/9; background:#1e1e1e; border-radius:4px;"></div>`;
-    if (imgSrc) {
-       imgTag = `<img id="tb-img-${this._eid(name)}" src="${imgSrc}" class="tb-cam-img">`;
+    
+    if (cam.thumbnailsB64 && cam.thumbnailsB64.length > 0) {
+      if (cam.thumbnailsB64.length === 1) {
+        imgTag = `<img id="tb-img-${this._eid(name)}" src="data:image/jpeg;base64,${cam.thumbnailsB64[0]}" class="tb-cam-img">`;
+      } else {
+        // Temporal grid of frames
+        const gridHtml = cam.thumbnailsB64.map(b64 => 
+          `<img src="data:image/jpeg;base64,${b64}" style="width: 100%; height: 100%; object-fit: cover; border-radius: 2px;">`
+        ).join('');
+        imgTag = `
+          <div style="display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 4px; aspect-ratio: 16/9; background: #1e1e1e; border-radius: 4px; overflow: hidden; padding: 4px;">
+            ${gridHtml}
+          </div>
+        `;
+      }
     }
 
     row.innerHTML = `

@@ -17,6 +17,7 @@ _PARSE_KEYS = {
     "machinery": "machinery",
     "safety": "safety",
     "severity": "severity",
+    "evolution": "evolution",
 }
 
 
@@ -75,7 +76,7 @@ class VLMPool:
         return results
 
     async def analyze(
-        self, cam_name: str, frame_b64: str, system_prompt: str
+        self, cam_name: str, frame_b64: str | list[str], system_prompt: str
     ) -> dict:
         # Least-connections: pick the endpoint with fewest in-flight requests
         async with self._lock:
@@ -88,7 +89,7 @@ class VLMPool:
             self._inflight[idx] -= 1
 
     async def analyze_concurrent(
-        self, cam_name: str, frame_b64: str, system_prompt: str
+        self, cam_name: str, frame_b64: str | list[str], system_prompt: str
     ) -> list[dict]:
         """Fire request to ALL endpoints simultaneously (Comparator mode)"""
         for i in range(len(self.endpoints)):
@@ -109,22 +110,26 @@ class VLMPool:
                 self._inflight[i] -= 1
 
     async def _analyze_single(
-        self, ep_idx: int, cam_name: str, frame_b64: str, system_prompt: str
+        self, ep_idx: int, cam_name: str, frame_b64: str | list[str], system_prompt: str
     ) -> dict:
         ep = self.endpoints[ep_idx]
         url = f"{ep['url']}/v1/chat/completions"
         model = ep["model"]
 
+        frames = [frame_b64] if isinstance(frame_b64, str) else frame_b64
+        
+        user_content = []
+        for b64 in frames:
+            user_content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+            })
+
         payload = {
             "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{frame_b64}"},
-                    }
-                ]}
+                {"role": "user", "content": user_content}
             ],
             "temperature": 0.25,
             "max_tokens": 220,
@@ -164,6 +169,7 @@ class VLMPool:
                 "machinery": "None",
                 "safety": "UNKNOWN",
                 "severity": "LOW",
+                "evolution": "None",
                 "error": True,
                 "latency": time.monotonic() - t0,
             }
@@ -176,6 +182,7 @@ class VLMPool:
                 "machinery": "None",
                 "safety": "UNKNOWN",
                 "severity": "LOW",
+                "evolution": "None",
                 "error": True,
                 "latency": time.monotonic() - t0,
             }
@@ -189,6 +196,7 @@ class VLMPool:
             "machinery": "None",
             "safety": "UNKNOWN",
             "severity": "LOW",
+            "evolution": "None",
         }
         for line in raw.split("\n"):
             if ":" not in line:

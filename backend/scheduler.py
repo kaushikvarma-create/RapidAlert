@@ -135,10 +135,12 @@ class DeadlineScheduler:
         """
         while self._running:
             cams = self.camera_manager.get_active_cameras()
+            now = time.monotonic()
             eligible = [
                 c for c in cams
                 if c not in self._in_flight
                 and self.frame_store.get_latest(c) is not None
+                and now - self._last_analyzed.get(c, 0) >= 15.0
             ]
 
             # Don't flood the queue — workers should always have fresh work,
@@ -175,17 +177,17 @@ class DeadlineScheduler:
                 self._queue.task_done()
 
     async def _analyze(self, cam_name: str) -> None:
-        # Full-res frame for VLM
-        frame_b64 = self.frame_store.get_snapshot_b64(cam_name)
-        if frame_b64 is None:
+        # Extract 4 frames across 10 seconds. Downscale to avoid exceeding token limits
+        frames_b64 = self.frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=10.0, max_w=512)
+        if not frames_b64:
             return
 
-        # Smaller thumbnail for WS broadcast (saves bandwidth)
-        thumb_b64 = self.frame_store.get_snapshot_b64(cam_name, max_w=320, quality=65)
+        # Smaller thumbnails for WS broadcast (saves bandwidth). Extract all 4.
+        thumbs_b64 = self.frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=10.0, max_w=320, quality=65)
         prompt = self.prompt_manager.get_prompt(cam_name)
 
         t0 = time.monotonic()
-        results = await self.vlm_pool.analyze_concurrent(cam_name, frame_b64, prompt)
+        results = await self.vlm_pool.analyze_concurrent(cam_name, frames_b64, prompt)
         
         # Extract latencies from results
         for res in results:
@@ -196,20 +198,24 @@ class DeadlineScheduler:
         self._last_analyzed[cam_name] = time.monotonic()
         self._total_analyzed += 1
         
+        if not results:
+            return
+
         # We can just store the first result or the list. Since we are in testing branch,
         # we bypass deep result_store and storage tracking for all models.
         self.result_store.put(cam_name, results[0], results[0].get("latency", 0))
 
-        # Alert check based on the first model (or skip)
-        await self.alert_engine.process(cam_name, results[0], thumbnail_b64=thumb_b64)
+        # Alert check based on the first model (or skip). Pass the latest thumbnail for alerts.
+        latest_thumb = thumbs_b64[-1] if thumbs_b64 else None
+        await self.alert_engine.process(cam_name, results[0], thumbnail_b64=latest_thumb)
 
-        # Broadcast ALL results to dashboard for tensorboard
+        # Broadcast ALL results and ALL thumbnails to dashboard for tensorboard
         if self.broadcast_fn:
             await self.broadcast_fn({
                 "type": "result_concurrent",
                 "cam": cam_name,
                 "results": results,
-                "thumbnail_b64": thumb_b64,
+                "thumbnails_b64": thumbs_b64,
             })
 
     # ── Auto-tune ───────────────────────────────────────────────────

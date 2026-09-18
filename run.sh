@@ -35,6 +35,7 @@ if command -v python3 &>/dev/null && [[ -f config/system.json ]]; then
   VLLM_MODEL=$(python3 -c "import json; d=json.load(open('config/system.json')); print(d.get('vllm_model', 'Qwen/Qwen3-VL-4B-Instruct'))" 2>/dev/null || echo "Qwen/Qwen3-VL-4B-Instruct")
   VLLM_MAX_MODEL_LEN=$(python3 -c "import json; d=json.load(open('config/system.json')); print(d.get('vllm_max_model_len', 10000))" 2>/dev/null || echo 10000)
   VLLM_GPU_UTILIZATION=$(python3 -c "import json; d=json.load(open('config/system.json')); print(d.get('vllm_gpu_utilization', 0.28))" 2>/dev/null || echo 0.28)
+  VLLM_MAX_SEQS=$(python3 -c "import json; d=json.load(open('config/system.json')); print(d.get('vllm_max_seqs', 4))" 2>/dev/null || echo 4)
   VLLM_QUANTIZATION=$(python3 -c "import json; d=json.load(open('config/system.json')); print(d.get('vllm_quantization', ''))" 2>/dev/null || echo "")
   AUTO_START_VLLM=$(python3 -c "import json; d=json.load(open('config/system.json')); print(str(d.get('auto_start_vllm', True)).lower())" 2>/dev/null || echo "true")
 fi
@@ -138,6 +139,7 @@ if [[ "$AUTO_START_VLLM" == "true" ]]; then
         # Extract the specific model for this endpoint
         EP_MODEL=$(python3 -c "import json; d=json.load(open('config/system.json')); eps=d.get('vllm_endpoints', []); print(eps[$i]['model'] if $i < len(eps) else d.get('vllm_model'))" 2>/dev/null || echo "$VLLM_MODEL")
         EP_TOKENIZER=$(python3 -c "import json; d=json.load(open('config/system.json')); eps=d.get('vllm_endpoints', []); print(eps[$i].get('tokenizer', '')) if $i < len(eps) else print('')" 2>/dev/null || echo "")
+        EP_QUANTIZATION=$(python3 -c "import json; d=json.load(open('config/system.json')); eps=d.get('vllm_endpoints', []); print(eps[$i].get('quantization', d.get('vllm_quantization', ''))) if $i < len(eps) else print(d.get('vllm_quantization', ''))" 2>/dev/null || echo "$VLLM_QUANTIZATION")
 
         # Check if running and serving correct model
         if curl -sf "${C_API_URL}" >/dev/null 2>&1; then
@@ -165,22 +167,32 @@ if [[ "$AUTO_START_VLLM" == "true" ]]; then
                 --runtime nvidia \
                 --network host \
                 --shm-size=4g \
+                -e HF_TOKEN="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" \
                 -e HF_HOME=/data/models/huggingface \
+                -e EP_MODEL="${EP_MODEL}" \
+                -e EP_QUANTIZATION="${EP_QUANTIZATION}" \
                 -v "${HF_CACHE}:/data/models/huggingface" \
                 "${VLLM_IMAGE}" \
-                bash -c "pip install --upgrade vllm transformers && \
-                    python3 -c \"from huggingface_hub import hf_hub_download; import json; p = hf_hub_download('${EP_MODEL}', 'tokenizer_config.json'); d = json.load(open(p)); d['extra_special_tokens'] = {} if isinstance(d.get('extra_special_tokens'), list) else d.get('extra_special_tokens'); json.dump(d, open(p, 'w'))\" 2>/dev/null || true && \
-                    vllm serve \"${EP_MODEL}\" \
+                bash -c " \
+                    TARGET_MODEL=\"\${EP_MODEL}\"; \
+                    if [[ \"\${EP_QUANTIZATION}\" == \"gguf\" ]]; then \
+                        TARGET_MODEL=\$(python3 -c \"import sys; from huggingface_hub import HfApi, hf_hub_download; r='\${EP_MODEL}'; fs=HfApi().list_repo_files(r); g=[f for f in fs if f.endswith('.gguf')]; print(hf_hub_download(r, g[0])) if g else print(r)\" 2>/dev/null || echo \"\${EP_MODEL}\"); \
+                    else \
+                        python3 -c \"from huggingface_hub import hf_hub_download; import json; p = hf_hub_download('\${EP_MODEL}', 'tokenizer_config.json'); d = json.load(open(p)); d['extra_special_tokens'] = {} if isinstance(d.get('extra_special_tokens'), list) else d.get('extra_special_tokens'); [d.pop('extra_special_tokens') for _ in [1] if d.get('extra_special_tokens') is None]; json.dump(d, open(p, 'w'))\" 2>/dev/null || true; \
+                    fi; \
+                    vllm serve \"\${TARGET_MODEL}\" \
                     --host 0.0.0.0 \
                     --port \"${PORT}\" \
                     ${EP_TOKENIZER:+--tokenizer \"${EP_TOKENIZER}\"} \
                     --max-model-len \"${VLLM_MAX_MODEL_LEN}\" \
                     --gpu-memory-utilization \"${VLLM_GPU_UTILIZATION}\" \
                     --dtype auto \
+                    --enforce-eager \
+                    --max-num-seqs \"${VLLM_MAX_SEQS}\" \
                     --trust-remote-code \
-                    ${VLLM_QUANTIZATION:+--quantization \"${VLLM_QUANTIZATION}\"} \
+                    ${EP_QUANTIZATION:+--quantization \"${EP_QUANTIZATION}\"} \
                     --disable-log-stats \
-                    --no-enable-log-requests >/dev/null"
+                    --no-enable-log-requests"
 
             # Stream logs while we wait
             docker logs -f "${CNAME}" 2>&1 | sed "s/^/  ${YELLOW}[${CNAME}]${NC} /" &

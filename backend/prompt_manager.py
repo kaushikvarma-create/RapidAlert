@@ -13,15 +13,16 @@ from typing import Callable, Optional
 
 DEFAULT_MASTER = (
     "You are a surveillance AI.\n"
-    "Analyse the provided CCTV frame from this camera.\n\n"
+    "Analyse the provided sequence of CCTV frames representing a 10-second temporal window from this camera.\n\n"
     "{normal_context}\n\n"
     "Return EXACTLY this format, no extra text:\n"
-    "OBSERVATION: <one sentence describing the scene>\n"
+    "OBSERVATION: <one sentence describing the overall scene>\n"
     "ACTIVITY: <ACTIVE|IDLE|UNKNOWN>\n"
     "WORKERS: <integer count>\n"
     "MACHINERY: <comma-separated list or None>\n"
     "SAFETY: <OK|WARNING|DANGER>\n"
-    "SEVERITY: <LOW|MEDIUM|HIGH>\n\n"
+    "SEVERITY: <LOW|MEDIUM|HIGH>\n"
+    "EVOLUTION: <explicitly describe the action or movement happening across the sequence of frames, or None if completely static>\n\n"
     "CRITICAL: Do NOT use extended thinking, reasoning steps, or <think> tags. Output the final JSON-like format immediately."
 )
 
