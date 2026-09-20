@@ -99,6 +99,7 @@ scheduler = DeadlineScheduler(
     max_concurrency     = SYS_CFG["max_concurrency"],
     broadcast_fn      = ws_manager.broadcast,
     storage           = storage,
+    default_heartbeat_sec = float(SYS_CFG.get("default_heartbeat_sec", 30.0)),
 )
 alert_engine.set_broadcaster(ws_manager.broadcast)
 scene_trigger = SceneTriggerEngine(
@@ -143,14 +144,51 @@ async def lifespan(app: FastAPI):
 
 
 async def _config_sync_loop() -> None:
-    """Poll cameras.json and notify WS clients on changes."""
+    """Poll cameras.json and system.json for changes, hot-apply to engines, and notify WS clients."""
+    global SYS_CFG
+    sys_path = CONFIG_DIR / "system.json"
+    last_sys_mtime = 0.0
+    try:
+        if sys_path.exists():
+            last_sys_mtime = os.path.getmtime(sys_path)
+    except Exception:
+        pass
+
     while True:
-        await asyncio.sleep(3)
+        await asyncio.sleep(2)
+        # 1. Camera changes
         if camera_manager.sync():
             await ws_manager.broadcast({
                 "type": "cameras",
                 "data": camera_manager.get_config(),
             })
+
+        # 2. System config changes
+        try:
+            if sys_path.exists():
+                mtime = os.path.getmtime(sys_path)
+                if mtime > last_sys_mtime:
+                    last_sys_mtime = mtime
+                    with open(sys_path) as f:
+                        new_cfg = json.load(f)
+                    SYS_CFG.update(new_cfg)
+                    if "default_threshold" in new_cfg or "scene_threshold" in new_cfg:
+                        t = float(new_cfg.get("default_threshold", new_cfg.get("scene_threshold", 0.033)))
+                        scene_trigger.set_default_threshold(t)
+                    if "default_heartbeat_sec" in new_cfg:
+                        scheduler.default_heartbeat_sec = float(new_cfg["default_heartbeat_sec"])
+                    if "event_cooldown" in new_cfg:
+                        scene_trigger.event_cooldown = float(new_cfg["event_cooldown"])
+                    if "semantic_interval" in new_cfg:
+                        scene_trigger.semantic_interval = float(new_cfg["semantic_interval"])
+                    print(f"[Main] 🔄 Hot-reloaded system.json (default_thresh: {SYS_CFG.get('default_threshold')}, hb: {SYS_CFG.get('default_heartbeat_sec')}s)")
+                    await ws_manager.broadcast({
+                        "type": "config_updated",
+                        "system": SYS_CFG,
+                        "cameras": camera_manager.get_config(),
+                    })
+        except Exception as e:
+            print(f"[Main] Error in system config sync: {e}")
 
 
 async def _snapshot_stream_loop() -> None:
@@ -200,6 +238,7 @@ async def websocket_endpoint(ws: WebSocket):
             "thumbnails": live_thumbs,
             "drifts": scene_trigger.latest_drifts,
             "alerts": alert_engine.get_recent(50),
+            "system": SYS_CFG,
             "metrics": {
                 **result_store.get_metrics(),
                 "concurrency": scheduler.concurrency,
@@ -241,11 +280,62 @@ def api_get_drifts():
 
 class CameraBody(BaseModel):
     name: str
-    url: str
+    url: str = ""
     enabled: bool = True
     normal_context_day: str = ""
     normal_context_night: str = ""
     priority: str = "normal"
+    threshold: Optional[float] = None
+    heartbeat_sec: Optional[float] = None
+
+
+class SystemConfigBody(BaseModel):
+    default_threshold: Optional[float] = None
+    default_heartbeat_sec: Optional[float] = None
+    event_cooldown: Optional[float] = None
+    semantic_interval: Optional[float] = None
+
+
+@app.get("/api/config")
+def api_get_config():
+    return {
+        "system": SYS_CFG,
+        "cameras": camera_manager.get_config(),
+    }
+
+
+@app.post("/api/config")
+async def api_update_system_config(body: SystemConfigBody):
+    global SYS_CFG
+    updates = body.model_dump(exclude_none=True)
+    if not updates:
+        return {"status": "ok", "system": SYS_CFG}
+
+    SYS_CFG.update(updates)
+    if "default_threshold" in updates:
+        SYS_CFG["scene_threshold"] = updates["default_threshold"]
+        scene_trigger.set_default_threshold(updates["default_threshold"])
+    if "default_heartbeat_sec" in updates:
+        scheduler.default_heartbeat_sec = float(updates["default_heartbeat_sec"])
+    if "event_cooldown" in updates:
+        scene_trigger.event_cooldown = float(updates["event_cooldown"])
+    if "semantic_interval" in updates:
+        scene_trigger.semantic_interval = float(updates["semantic_interval"])
+
+    # Persist to system.json
+    try:
+        sys_path = CONFIG_DIR / "system.json"
+        with open(sys_path, "w") as f:
+            json.dump(SYS_CFG, f, indent=2)
+    except Exception as e:
+        print(f"[Main] Error saving system.json: {e}")
+
+    await ws_manager.broadcast({
+        "type": "config_updated",
+        "system": SYS_CFG,
+        "cameras": camera_manager.get_config(),
+    })
+    return {"status": "ok", "system": SYS_CFG}
 
 
 @app.post("/api/cameras")
@@ -256,7 +346,19 @@ async def api_upsert_camera(cam: CameraBody):
         "type": "cameras",
         "data": camera_manager.get_config(),
     })
-    return {"status": "ok"}
+    return {"status": "ok", "cameras": camera_manager.get_config()}
+
+
+@app.post("/api/cameras/batch")
+async def api_batch_update_cameras(cams: list[CameraBody]):
+    for cam in cams:
+        camera_manager.update_camera(cam.model_dump())
+    _persist_cameras()
+    await ws_manager.broadcast({
+        "type": "cameras",
+        "data": camera_manager.get_config(),
+    })
+    return {"status": "ok", "cameras": camera_manager.get_config()}
 
 
 @app.delete("/api/cameras/{name}")

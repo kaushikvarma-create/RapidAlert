@@ -61,6 +61,13 @@ class StorageManager:
                 value TEXT
             );
         """)
+        # Add e2e_latency column if not present
+        try:
+            conn.execute("ALTER TABLE analyses ADD COLUMN e2e_latency REAL")
+            conn.commit()
+        except Exception:
+            pass
+
         # Store DB version
         conn.execute(
             "INSERT OR IGNORE INTO meta (key, value) VALUES ('db_version', ?)",
@@ -69,16 +76,17 @@ class StorageManager:
         conn.commit()
 
     # ── Write ────────────────────────────────────────────────────
-    def save(self, result: dict, latency: float = 0.0) -> int:
+    def save(self, result: dict, latency: float = 0.0, e2e_latency: Optional[float] = None) -> int:
         """Insert one analysis result. Returns new row id."""
         conn = self._conn()
         ts = result.get("ts") or time.time()
+        e2e = e2e_latency if e2e_latency is not None else result.get("e2e_latency")
         cur = conn.execute(
             """
             INSERT INTO analyses
               (cam, ts, observation, activity, workers, machinery,
-               safety, severity, latency, error)
-            VALUES (?,?,?,?,?,?,?,?,?,?)
+               safety, severity, latency, e2e_latency, error)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 result.get("cam", ""),
@@ -90,6 +98,7 @@ class StorageManager:
                 result.get("safety", "UNKNOWN"),
                 result.get("severity", "LOW"),
                 round(latency, 3),
+                round(e2e, 3) if e2e is not None else None,
                 1 if result.get("error") else 0,
             ),
         )

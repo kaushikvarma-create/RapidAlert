@@ -7,8 +7,16 @@
   <meta name="description" content="Real-time multi-camera AI surveillance with VLM analysis, alert management, and dynamic prompt control." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/style.css" />
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/style.css?v=15" />
+  <script>
+    (function() {
+      var saved = localStorage.getItem('rapidalert_theme') || localStorage.getItem('theme');
+      if (saved === 'light') {
+        document.documentElement.classList.add('light-mode');
+      }
+    })();
+  </script>
 </head>
 <body>
 
@@ -44,6 +52,9 @@
         <span class="ws-dot" id="ws-dot"></span>
         <span id="ws-status">Connecting</span>
       </div>
+      <button class="btn-icon" id="btn-theme-toggle" title="Toggle Light/Dark Theme" aria-label="Toggle Light/Dark Theme">
+        <span id="theme-toggle-icon" style="font-size: 1rem; line-height: 1;">☀️</span>
+      </button>
       <button class="btn-icon" id="btn-settings" title="Settings">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <circle cx="12" cy="12" r="3"/>
@@ -57,8 +68,12 @@
   <main class="tensorboard-layout">
     <!-- Camera Sidebar -->
     <aside class="sidebar-cams">
-      <div class="sidebar-header">
+      <div class="sidebar-header" style="display: flex; justify-content: space-between; align-items: center; padding-right: 8px;">
         <h2 class="sidebar-title">Cameras</h2>
+        <div style="display: flex; gap: 4px;">
+          <button class="btn-ghost" id="btn-sidebar-select-all" style="font-size: 0.7rem; padding: 2px 6px; cursor: pointer;" title="Select All View">All</button>
+          <button class="btn-ghost" id="btn-sidebar-clear-all" style="font-size: 0.7rem; padding: 2px 6px; cursor: pointer;" title="Clear View">None</button>
+        </div>
       </div>
       <div class="camera-list" id="camera-checkbox-list">
         <!-- Checkboxes injected here -->
@@ -107,12 +122,21 @@
       </div>
 
       <div class="cam-table-wrap">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; padding: 0 4px;">
+          <span style="font-size: 0.78rem; color: var(--text-muted);">Active Camera Feeds</span>
+          <div style="display: flex; gap: 8px;">
+            <button class="btn-ghost" id="btn-enable-all-cams" style="font-size: 0.75rem; padding: 3px 8px; cursor: pointer;">⚡ Enable All</button>
+            <button class="btn-ghost" id="btn-disable-all-cams" style="font-size: 0.75rem; padding: 3px 8px; cursor: pointer;">⏸️ Disable All</button>
+          </div>
+        </div>
         <table class="cam-table" id="cam-table">
           <thead>
             <tr>
               <th>Name</th>
               <th>URL</th>
               <th>On</th>
+              <th>Drift Thresh</th>
+              <th>Mandatory (s)</th>
               <th>Day Context</th>
               <th>Night Context</th>
               <th></th>
@@ -211,7 +235,7 @@
         <table class="cam-table" id="hist-table">
           <thead><tr>
             <th>Time</th><th>Camera</th><th>Observation</th>
-            <th>Activity</th><th>Safety</th><th>Severity</th><th>Latency</th>
+            <th>Activity</th><th>Safety</th><th>Severity</th><th>VLM Latency</th><th>Trigger→Post</th>
           </tr></thead>
           <tbody id="hist-table-body"></tbody>
         </table>
@@ -256,6 +280,34 @@
         <h3>VLM Health</h3>
         <div id="vlm-health-items"></div>
         <button class="btn-ghost" id="btn-check-vlm">🔄 Check now</button>
+      </div>
+
+      <!-- System Drift & Heartbeat Configuration -->
+      <div class="sys-settings-section" style="margin-top: 20px; padding: 16px; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);">
+        <h3 style="margin-bottom: 12px; font-size: 0.95rem; display: flex; align-items: center; gap: 8px;">
+          <span>⚡</span> DINOv2 Drift & Mandatory Heartbeat Configuration
+        </h3>
+        <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 14px;">
+          <div>
+            <label class="field-label" for="sys-input-thresh">Global Default Drift Threshold</label>
+            <input id="sys-input-thresh" type="number" step="0.005" min="0.005" max="0.5" class="input" placeholder="0.033" />
+            <small style="color: var(--text-3); font-size: 0.68rem; display:block; margin-top:4px;">Cosine shift to trigger Cosmos analysis</small>
+          </div>
+          <div>
+            <label class="field-label" for="sys-input-hb">Global Mandatory Interval (sec)</label>
+            <input id="sys-input-hb" type="number" step="5" min="5" max="600" class="input" placeholder="30" />
+            <small style="color: var(--text-3); font-size: 0.68rem; display:block; margin-top:4px;">Forced analysis even without scene drift</small>
+          </div>
+          <div>
+            <label class="field-label" for="sys-input-cooldown">Trigger Cooldown (sec)</label>
+            <input id="sys-input-cooldown" type="number" step="1" min="2" max="120" class="input" placeholder="15" />
+            <small style="color: var(--text-3); font-size: 0.68rem; display:block; margin-top:4px;">Minimum gap between event triggers</small>
+          </div>
+        </div>
+        <div style="display:flex; align-items:center; gap:12px;">
+          <button class="btn-primary" id="btn-save-sys-config">💾 Save & Hot-Reload</button>
+          <span id="sys-config-saved" style="font-size: 0.75rem; color: var(--green); display: none;">✅ Hot-reloaded!</span>
+        </div>
       </div>
     </div>
   </div>
@@ -317,6 +369,6 @@
   <!-- ═══════════════════════════════════════════════════════════ TOAST -->
   <div class="toast-container" id="toast-container"></div>
 
-  <script src="/app.js?v=9"></script>
+  <script src="/app.js?v=15"></script>
 </body>
 </html>

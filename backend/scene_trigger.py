@@ -111,13 +111,14 @@ class SceneTriggerEngine:
 
                         if distance >= threshold and cooldown_elapsed:
                             self._last_event_time[cam_name] = now
+                            t_trigger = time.monotonic()
                             print(
                                 f"[SceneTrigger] 🚨 SCENE SHIFT on {cam_name}! "
                                 f"Drift: {distance:.4f} (threshold: {threshold:.4f})"
                             )
                             # Start asynchronous post-trigger collection
                             self._active_collectors[cam_name] = asyncio.create_task(
-                                self._collect_incident(cam_name, distance, frame_ts)
+                                self._collect_incident(cam_name, distance, frame_ts, trigger_time=t_trigger)
                             )
 
                 # Broadcast live drift metrics to dashboard every 1s
@@ -151,20 +152,35 @@ class SceneTriggerEngine:
             print(f"[SceneTrigger] Embedding error: {e}")
             return None
 
+    def set_default_threshold(self, val: float) -> None:
+        self.default_threshold = float(val)
+        print(f"[SceneTrigger] Global default drift threshold updated to: {self.default_threshold:.4f}")
+
     def _get_cam_threshold(self, cam_name: str) -> float:
         cams = self.camera_manager.get_config()
         for c in cams:
-            if c.get("name") == cam_name:
-                return float(c.get("threshold", self.default_threshold))
-        return self.default_threshold
+            if c.get("name") == cam_name and c.get("threshold") is not None:
+                try:
+                    return float(c["threshold"])
+                except (ValueError, TypeError):
+                    pass
+        return float(self.default_threshold)
 
-    async def _collect_incident(self, cam_name: str, drift_score: float, trigger_ts: float) -> None:
+    async def _collect_incident(
+        self,
+        cam_name: str,
+        drift_score: float,
+        trigger_ts: float,
+        trigger_time: Optional[float] = None,
+    ) -> None:
         """
         Asynchronously collects pre-trigger and post-trigger frames.
         t0 (pre-trigger):  t-4.0s, t-1.0s
         t1 (post-trigger): awaits t+1.5s, t+3.5s
         Total 4 temporal frames representing the full incident evolution.
         """
+        if trigger_time is None:
+            trigger_time = time.monotonic()
         try:
             # Extract t0 pre-trigger frames from rolling buffer
             t0_frames = self.frame_store.get_pre_trigger_frames(
@@ -208,6 +224,7 @@ class SceneTriggerEngine:
                 "drift": drift_score,
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "epoch": time.time(),
+                "trigger_time": trigger_time,
                 "frames_b64": frames_b64,
                 "thumbs_b64": thumbs_b64,
                 "labels": labels,

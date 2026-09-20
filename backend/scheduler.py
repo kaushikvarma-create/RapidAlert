@@ -52,6 +52,7 @@ class DeadlineScheduler:
         max_concurrency: int = 16,
         broadcast_fn: Optional[Callable] = None,
         storage=None,   # StorageManager | None
+        default_heartbeat_sec: float = 30.0,
     ):
         self.camera_manager = camera_manager
         self.frame_store = frame_store
@@ -61,6 +62,7 @@ class DeadlineScheduler:
         self.alert_engine = alert_engine
         self.broadcast_fn = broadcast_fn
         self.storage = storage
+        self.default_heartbeat_sec = float(default_heartbeat_sec)
 
         # Throttling requests at the app level prevents vLLM from building
         # efficient batches. Pin workers to max_concurrency.
@@ -73,8 +75,20 @@ class DeadlineScheduler:
         self._workers: list[asyncio.Task] = []
         self._queue: Optional[asyncio.PriorityQueue] = None
         self._seq: int = 0
+
         self._latencies: list[float] = []
         self._total_analyzed = 0
+
+    def get_cam_heartbeat_interval(self, cam_name: str) -> float:
+        """Returns the mandatory analysis interval in seconds for the given camera."""
+        cams = self.camera_manager.get_config()
+        for c in cams:
+            if c.get("name") == cam_name and c.get("heartbeat_sec") is not None:
+                try:
+                    return float(c["heartbeat_sec"])
+                except (ValueError, TypeError):
+                    pass
+        return float(self.default_heartbeat_sec)
 
     def _next_seq(self) -> int:
         self._seq += 1
@@ -153,7 +167,7 @@ class DeadlineScheduler:
                 c for c in cams
                 if c not in self._in_flight
                 and self.frame_store.get_latest(c) is not None
-                and now - self._last_analyzed.get(c, 0) >= 15.0
+                and now - self._last_analyzed.get(c, 0) >= self.get_cam_heartbeat_interval(c)
             ]
 
             queue_cap = max(1, len(self._workers)) * self.QUEUE_CAP_PER_WORKER
@@ -213,6 +227,18 @@ class DeadlineScheduler:
         res["model"] = "vrfai/Cosmos-Reason2-8B-NVFP4"
         latency = res.get("latency", time.monotonic() - t0)
 
+        if is_incident:
+            trigger_time = job.get("trigger_time", t0)
+            e2e_latency = round(time.monotonic() - trigger_time, 2)
+            res["e2e_latency"] = e2e_latency
+            res["trigger_to_post"] = e2e_latency
+            res["is_incident"] = True
+        else:
+            e2e_latency = None
+            res["e2e_latency"] = None
+            res["trigger_to_post"] = None
+            res["is_incident"] = False
+
         self._latencies.append(latency)
         if len(self._latencies) > 100:
             del self._latencies[0]
@@ -223,7 +249,13 @@ class DeadlineScheduler:
         results = [res]
 
         # Store result
-        self.result_store.put(cam_name, results, latency, thumbnails_b64=thumbs_b64)
+        self.result_store.put(cam_name, results, latency, thumbnails_b64=thumbs_b64, e2e_latency=e2e_latency)
+
+        if self.storage:
+            try:
+                self.storage.save(dict(res, cam=cam_name), latency=latency, e2e_latency=e2e_latency)
+            except Exception:
+                pass
 
         # Alert check based on Cosmos 8B result
         latest_thumb = thumbs_b64[-1] if thumbs_b64 else None
@@ -238,6 +270,9 @@ class DeadlineScheduler:
                 "thumbnails_b64": thumbs_b64,
                 "drift": drift_score,
                 "is_incident": is_incident,
+                "latency": latency,
+                "e2e_latency": e2e_latency,
+                "trigger_to_post": e2e_latency,
             })
 
     # ── Auto-tune ───────────────────────────────────────────────────

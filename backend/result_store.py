@@ -18,6 +18,7 @@ class ResultStore:
         self._latest_thumbnails: dict[str, list[str]] = {}
         self._history: dict[str, deque] = {}
         self._latencies: deque = deque(maxlen=100)
+        self._e2e_latencies: deque = deque(maxlen=100)
         self._analysis_times: deque = deque(maxlen=500)
         self._lock = threading.Lock()
 
@@ -27,11 +28,18 @@ class ResultStore:
         results: Union[dict, List[dict]],
         latency: float,
         thumbnails_b64: Optional[List[str]] = None,
+        e2e_latency: Optional[float] = None,
     ) -> None:
         ts = time.time()
         res_list = results if isinstance(results, list) else [results]
         primary = res_list[0] if res_list else {}
         record = dict(primary, ts=ts, latency=round(latency, 2))
+        if e2e_latency is not None:
+            record["e2e_latency"] = round(e2e_latency, 2)
+            record["trigger_to_post"] = round(e2e_latency, 2)
+        else:
+            record["e2e_latency"] = None
+            record["trigger_to_post"] = None
 
         with self._lock:
             self._latest[cam_name] = record
@@ -42,6 +50,8 @@ class ResultStore:
                 self._history[cam_name] = deque(maxlen=self.HISTORY_LEN)
             self._history[cam_name].append(record)
             self._latencies.append(latency)
+            if e2e_latency is not None:
+                self._e2e_latencies.append(e2e_latency)
             self._analysis_times.append(ts)
 
     def get_latest(self, cam_name: str) -> Optional[dict]:
@@ -80,9 +90,16 @@ class ResultStore:
             p50 = round(lats[int(n * 0.50)], 2) if n else 0
             p95 = round(lats[min(int(n * 0.95), n - 1)], 2) if n else 0
 
+            e2es = sorted(self._e2e_latencies)
+            m = len(e2es)
+            p50_e2e = round(e2es[int(m * 0.50)], 2) if m else 0
+            p95_e2e = round(e2es[min(int(m * 0.95), m - 1)], 2) if m else 0
+
             return {
                 "analyses_per_sec": analyses_per_sec,
                 "p50_latency": p50,
                 "p95_latency": p95,
+                "p50_e2e_latency": p50_e2e,
+                "p95_e2e_latency": p95_e2e,
                 "total_analyses": len(self._analysis_times),
             }

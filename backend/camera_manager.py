@@ -175,6 +175,9 @@ class CameraManager:
         with self._lock:
             existing = next((c for c in self._config if c["name"] == name), None)
             if existing:
+                if not url:
+                    url = existing.get("url", "")
+                    cam["url"] = url
                 existing.update(cam)
             else:
                 self._config.append(dict(cam))

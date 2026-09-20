@@ -17,9 +17,33 @@ const App = {
   //  Bootstrap
   // ════════════════════════════════════════════════════════════
   init() {
+    this.initTheme();
     this.bindUIEvents();
     this.connectWS();
     this.startTimestampTicker();
+  },
+
+  initTheme() {
+    const saved = localStorage.getItem('rapidalert_theme') || localStorage.getItem('theme');
+    const isLight = saved === 'light';
+    if (isLight) {
+      document.documentElement.classList.add('light-mode');
+      document.body.classList.add('light-mode');
+    } else {
+      document.documentElement.classList.remove('light-mode');
+      document.body.classList.remove('light-mode');
+    }
+    const icon = document.getElementById('theme-toggle-icon');
+    if (icon) icon.innerText = isLight ? '🌙' : '☀️';
+  },
+
+  toggleTheme() {
+    const isLight = document.body.classList.toggle('light-mode');
+    document.documentElement.classList.toggle('light-mode', isLight);
+    const icon = document.getElementById('theme-toggle-icon');
+    if (icon) icon.innerText = isLight ? '🌙' : '☀️';
+    localStorage.setItem('rapidalert_theme', isLight ? 'light' : 'dark');
+    localStorage.setItem('theme', isLight ? 'light' : 'dark');
   },
 
   // ════════════════════════════════════════════════════════════
@@ -61,6 +85,7 @@ const App = {
       case 'metrics': return this.onMetrics(msg);
       case 'cameras': return this.onCameras(msg);
       case 'prompts': return this.onPrompts(msg);
+      case 'config_updated': return this.onConfigUpdated(msg);
       case 'ping':    break; // keep-alive, no-op
     }
   },
@@ -113,12 +138,43 @@ const App = {
     
     if (msg.metrics) this._applyMetrics(msg.metrics);
     if (msg.prompts) this._applyPrompts(msg.prompts);
+    if (msg.system) {
+      this.systemConfig = msg.system;
+      const elThresh = document.getElementById('sys-input-thresh');
+      const elHb = document.getElementById('sys-input-hb');
+      const elCooldown = document.getElementById('sys-input-cooldown');
+      if (elThresh) elThresh.value = msg.system.default_threshold || msg.system.scene_threshold || 0.033;
+      if (elHb) elHb.value = msg.system.default_heartbeat_sec || 30;
+      if (elCooldown) elCooldown.value = msg.system.event_cooldown || 15;
+    }
     this._updateCamSelect();
 
     // Render initial cards for checked cameras
     for (const camName of Object.keys(this.cameras)) {
       this._renderTbRow(camName);
     }
+  },
+
+  onConfigUpdated(msg) {
+    if (msg.system) {
+      this.systemConfig = msg.system;
+      const elThresh = document.getElementById('sys-input-thresh');
+      const elHb = document.getElementById('sys-input-hb');
+      const elCooldown = document.getElementById('sys-input-cooldown');
+      if (elThresh) elThresh.value = msg.system.default_threshold || msg.system.scene_threshold || 0.033;
+      if (elHb) elHb.value = msg.system.default_heartbeat_sec || 30;
+      if (elCooldown) elCooldown.value = msg.system.event_cooldown || 15;
+    }
+    if (msg.cameras) {
+      for (const c of msg.cameras) {
+        if (this.cameras[c.name]) this.cameras[c.name].config = c;
+      }
+      this._syncCamTable(msg.cameras);
+      for (const camName of Object.keys(this.cameras)) {
+        this._renderTbRow(camName);
+      }
+    }
+    this._showToast('Configuration hot-reloaded!', 'ok');
   },
 
   onCameraFrame(msg) {
@@ -158,6 +214,9 @@ const App = {
     this.cameras[cam].is_incident = is_incident;
     if (thumbnails_b64) this.cameras[cam].thumbnailsB64 = thumbnails_b64;
 
+    const sideDrift = document.getElementById(`side-drift-${this._eid(cam)}`);
+    if (sideDrift && drift !== undefined) sideDrift.textContent = Number(drift).toFixed(4);
+
     this._renderTbRow(cam);
   },
 
@@ -166,6 +225,8 @@ const App = {
     if (this.cameras[cam]) {
       this.cameras[cam].drift = drift;
       this.cameras[cam].is_incident = true;
+      const sideDrift = document.getElementById(`side-drift-${this._eid(cam)}`);
+      if (sideDrift && drift !== undefined) sideDrift.textContent = Number(drift).toFixed(4);
       this._renderTbRow(cam);
     }
   },
@@ -207,6 +268,7 @@ const App = {
     this._updateCamSelect();
     this._syncEmptyState();
     this._syncCamTable(cams);
+    this._renderSidebar();
   },
 
   onPrompts(msg) {
@@ -220,18 +282,46 @@ const App = {
     const list = document.getElementById('camera-checkbox-list');
     if (!list) return;
     list.innerHTML = '';
-    for (const name of Object.keys(this.cameras)) {
-      const isChecked = document.getElementById(`tb-row-${this._eid(name)}`) ? 'checked' : '';
+    for (const [name, cam] of Object.entries(this.cameras)) {
+      const existingCb = document.querySelector(`.cam-checkbox-label input[data-cam="${name}"]`);
+      // If user had already checked or unchecked it in this session, keep that. Otherwise default active cams to checked
+      let isChecked = false;
+      if (existingCb) {
+        isChecked = existingCb.checked;
+      } else {
+        isChecked = cam.config?.enabled !== false;
+      }
+
+      const isEnabled = cam.config?.enabled !== false;
+      const dotColor = isEnabled ? 'var(--green)' : 'var(--text-3)';
+      const driftVal = cam.drift !== undefined ? Number(cam.drift).toFixed(4) : '—';
+
       const lbl = document.createElement('label');
       lbl.className = 'cam-checkbox-label';
-      lbl.innerHTML = `<input type="checkbox" data-cam="${this._esc(name)}" ${isChecked}> ${this._esc(name)}`;
+      lbl.style.display = 'flex';
+      lbl.style.alignItems = 'center';
+      lbl.style.gap = '8px';
+      lbl.style.padding = '5px 8px';
+      lbl.style.cursor = 'pointer';
+      lbl.style.borderRadius = '4px';
+      lbl.innerHTML = `
+        <input type="checkbox" data-cam="${this._esc(name)}" ${isChecked ? 'checked' : ''}>
+        <span style="width: 8px; height: 8px; border-radius: 50%; background: ${dotColor}; flex-shrink: 0;" title="${isEnabled ? 'Ingest Active' : 'Ingest Disabled'}"></span>
+        <span style="flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 0.82rem;">${this._esc(name)}</span>
+        <span id="side-drift-${this._eid(name)}" style="font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-3);">${driftVal}</span>
+      `;
       lbl.querySelector('input').addEventListener('change', (e) => {
         if (e.target.checked) this._renderTbRow(name);
         else document.getElementById(`tb-row-${this._eid(name)}`)?.remove();
         this._syncTbEmptyState();
       });
       list.appendChild(lbl);
+
+      if (isChecked) {
+        this._renderTbRow(name);
+      }
     }
+    this._syncTbEmptyState();
   },
 
   _syncTbEmptyState() {
@@ -275,15 +365,16 @@ const App = {
           <div class="tb-model-card">
             <div class="tb-model-name">${this._esc(res.model || 'Unknown Model')}</div>
             <div class="tb-model-obs">${this._esc(res.observation || '—')}</div>
-            <div class="tb-model-details" style="font-size: 0.85em; color: var(--text-muted); margin-top: 8px; margin-bottom: 8px; line-height: 1.4;">
-              <div><strong>Activity:</strong> ${this._esc(res.activity || 'UNKNOWN')}</div>
-              <div><strong>Workers:</strong> ${this._esc(res.workers || '0')}</div>
-              <div><strong>Machinery:</strong> ${this._esc(res.machinery || 'None')}</div>
-              <div><strong>Safety:</strong> ${this._esc(res.safety || 'UNKNOWN')}</div>
-              <div><strong>Evolution:</strong> ${this._esc(res.evolution || 'None')}</div>
+            <div class="tb-model-details" style="font-size: 0.82em; color: var(--text-2); margin-top: 8px; margin-bottom: 8px; line-height: 1.45;">
+              <div><strong style="color: var(--text);">Activity:</strong> ${this._esc(res.activity || 'UNKNOWN')}</div>
+              <div><strong style="color: var(--text);">Workers:</strong> ${this._esc(res.workers || '0')}</div>
+              <div><strong style="color: var(--text);">Machinery:</strong> ${this._esc(res.machinery || 'None')}</div>
+              <div><strong style="color: var(--text);">Safety:</strong> ${this._esc(res.safety || 'UNKNOWN')}</div>
+              <div><strong style="color: var(--text);">Evolution:</strong> ${this._esc(res.evolution || 'None')}</div>
             </div>
             <div class="tb-model-meta">
-              <span>Latency: ${res.latency ? res.latency.toFixed(2) + 's' : '—'}</span>
+              <span>Latency: ${res.latency ? Number(res.latency).toFixed(2) + 's' : '—'}</span>
+              <span class="tb-e2e-badge" title="${res.e2e_latency != null ? 'DINOv2 Trigger-to-post latency' : 'Normal scheduled heartbeat (no DINO trigger)'}" style="color: ${res.e2e_latency != null ? 'var(--cyan)' : 'var(--text-3)'}; font-weight: 600;">Trig→Post: ${res.e2e_latency != null ? Number(res.e2e_latency).toFixed(2) + 's' : '--'}</span>
               <span class="badge badge-${sevCls}">${this._esc(res.severity || 'LOW')}</span>
             </div>
           </div>
@@ -299,7 +390,7 @@ const App = {
 
     let imgTag = cam.thumbB64 
       ? `<img id="tb-img-${this._eid(name)}" src="data:image/jpeg;base64,${cam.thumbB64}" class="tb-cam-img">`
-      : `<div style="aspect-ratio:16/9; background:#1e1e1e; border-radius:4px; display:flex; align-items:center; justify-content:center; color:#888; font-size:13px;">Connecting to camera stream...</div>`;
+      : `<div style="aspect-ratio:16/9; background:var(--bg-input); border:1px solid var(--border); border-radius:4px; display:flex; align-items:center; justify-content:center; color:var(--text-3); font-size:13px;">Connecting to camera stream...</div>`;
     
     if (cam.thumbnailsB64 && cam.thumbnailsB64.length > 0) {
       if (cam.thumbnailsB64.length === 1) {
@@ -310,7 +401,7 @@ const App = {
           `<img src="data:image/jpeg;base64,${b64}" style="width: 100%; height: 100%; object-fit: cover; border-radius: 2px;">`
         ).join('');
         imgTag = `
-          <div style="display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 4px; aspect-ratio: 16/9; background: #1e1e1e; border-radius: 4px; overflow: hidden; padding: 4px;">
+          <div style="display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 4px; aspect-ratio: 16/9; background: var(--bg-input); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; padding: 4px;">
             ${gridHtml}
           </div>
         `;
@@ -324,6 +415,10 @@ const App = {
       ? `<span class="badge badge-red" style="margin-left: 6px; animation: pulse 1.5s infinite;">⚡ SCENE TRIGGER</span>`
       : `<span class="badge badge-green" style="margin-left: 6px;">HEARTBEAT</span>`;
 
+    const camCfg = cam.config || {};
+    const camThresh = camCfg.threshold !== undefined ? camCfg.threshold : (this.systemConfig?.default_threshold || 0.033);
+    const camHb = camCfg.heartbeat_sec !== undefined ? camCfg.heartbeat_sec : (this.systemConfig?.default_heartbeat_sec || 30);
+
     row.innerHTML = `
       <div class="tb-cam-col">
         <div class="tb-cam-title" style="display: flex; align-items: center; flex-wrap: wrap;">
@@ -331,12 +426,43 @@ const App = {
           ${driftBadge}
           ${incidentBadge}
         </div>
+        <div class="cam-tune-bar">
+          <label style="display: flex; align-items: center; gap: 4px;" title="DINOv2 Drift Threshold for incident triggers">
+            <span style="color: var(--amber); font-weight: 600;">⚡ Thresh:</span>
+            <input type="number" step="0.005" min="0.005" max="0.5" value="${camThresh}" class="tune-input inline-cam-thresh" data-cam="${this._esc(name)}">
+          </label>
+          <label style="display: flex; align-items: center; gap: 4px;" title="Mandatory analysis interval in seconds">
+            <span style="color: var(--green); font-weight: 600;">💓 Sync:</span>
+            <input type="number" step="5" min="5" max="600" value="${camHb}" class="tune-input inline-cam-hb" data-cam="${this._esc(name)}">s
+          </label>
+          <span class="inline-save-ind" id="ind-${this._eid(name)}" style="font-size: 0.68rem; color: var(--green); margin-left: auto; display: none;">Saved</span>
+        </div>
         ${imgTag}
       </div>
       <div class="tb-models-grid">
         ${modelsHtml}
       </div>
     `;
+
+    // Bind inline quick tune inputs
+    const inpThresh = row.querySelector('.inline-cam-thresh');
+    const inpHb = row.querySelector('.inline-cam-hb');
+    const ind = row.querySelector(`#ind-${this._eid(name)}`);
+    const saveTune = async () => {
+      const t = parseFloat(inpThresh?.value);
+      const h = parseFloat(inpHb?.value);
+      const currentCfg = { ...(this.cameras[name]?.config || { name: name, url: '' }) };
+      if (!isNaN(t)) currentCfg.threshold = t;
+      if (!isNaN(h)) currentCfg.heartbeat_sec = h;
+      this.cameras[name].config = currentCfg;
+      await this._apiUpsertCamera(currentCfg);
+      if (ind) {
+        ind.style.display = 'inline';
+        setTimeout(() => { ind.style.display = 'none'; }, 2000);
+      }
+    };
+    inpThresh?.addEventListener('change', saveTune);
+    inpHb?.addEventListener('change', saveTune);
     
     // Double buffering for non-flicker update if image already exists
     if (imgSrc) {
@@ -431,6 +557,8 @@ const App = {
     const rows = [
       ['Workers', alert.workers],
       ['Machinery', alert.machinery],
+      ['VLM Latency', alert.latency != null ? `${Number(alert.latency).toFixed(2)}s` : null],
+      ['Trigger→Post', alert.e2e_latency != null ? `${Number(alert.e2e_latency).toFixed(2)}s` : '--'],
     ].filter(([, v]) => v && v !== 'None' && v !== '0');
     meta.innerHTML = rows.map(([k, v]) => `<div><strong>${k}:</strong> ${this._esc(String(v))}</div>`).join('');
 
@@ -551,7 +679,8 @@ const App = {
       `;
       obsEl.textContent = result.observation || '—';
       metaEl.innerHTML = `
-        <span>Latency: ${result.latency ?? '—'}s</span>
+        <span>Latency: ${result.latency != null ? Number(result.latency).toFixed(2) + 's' : '—'}</span>
+        <span style="color: ${result.e2e_latency != null ? 'var(--cyan)' : 'var(--text-3)'}; font-weight: 500;">Trig→Post: ${result.e2e_latency != null ? Number(result.e2e_latency).toFixed(2) + 's' : '--'}</span>
         ${result.machinery && result.machinery !== 'None' ? `<span>Machinery: ${this._esc(result.machinery)}</span>` : ''}
         <span>At: ${result.ts ? new Date(result.ts * 1000).toLocaleString() : '—'}</span>
       `;
@@ -609,6 +738,10 @@ const App = {
             <span class="toggle-slider"></span>
           </label>
         </td>
+        <td><input type="number" step="0.005" min="0.005" max="0.5" class="input ctx-thresh" data-cam="${this._esc(cam.name)}"
+                   value="${cam.threshold !== undefined ? cam.threshold : (this.systemConfig?.default_threshold || 0.033)}" style="width: 75px; font-family: var(--font-mono);"></td>
+        <td><input type="number" step="5" min="5" max="600" class="input ctx-hb" data-cam="${this._esc(cam.name)}"
+                   value="${cam.heartbeat_sec !== undefined ? cam.heartbeat_sec : (this.systemConfig?.default_heartbeat_sec || 30)}" style="width: 65px; font-family: var(--font-mono);"></td>
         <td><input type="text" class="input ctx-day" data-cam="${this._esc(cam.name)}"
                    value="${this._esc(cam.normal_context_day || '')}" placeholder="Day context…"></td>
         <td><input type="text" class="input ctx-night" data-cam="${this._esc(cam.name)}"
@@ -617,24 +750,6 @@ const App = {
       `;
       tbody.appendChild(tr);
     }
-
-    // Bind inline events (delegated from tbody)
-    tbody.addEventListener('change', async e => {
-      const cam  = e.target.dataset.cam;
-      if (!cam) return;
-      const cfg  = { ...(this.cameras[cam]?.config || { name: cam, url: '' }) };
-      if (e.target.classList.contains('toggle-enabled')) cfg.enabled = e.target.checked;
-      if (e.target.classList.contains('ctx-day'))        cfg.normal_context_day   = e.target.value;
-      if (e.target.classList.contains('ctx-night'))      cfg.normal_context_night = e.target.value;
-      await this._apiUpsertCamera(cfg);
-    }, { once: true }); // rebinds each time table redraws
-
-    tbody.addEventListener('click', async e => {
-      const btn = e.target.closest('.btn-del');
-      if (!btn) return;
-      const cam = btn.dataset.cam;
-      if (cam && confirm(`Remove camera "${cam}"?`)) await this._apiDeleteCamera(cam);
-    }, { once: true });
   },
 
   // ════════════════════════════════════════════════════════════
@@ -974,7 +1089,7 @@ const App = {
     if (!tbody) return;
     tbody.innerHTML = '';
     if (!rows.length) {
-      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-3);padding:20px;">No records</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-3);padding:20px;">No records</td></tr>';
       return;
     }
     for (const row of rows) {
@@ -989,7 +1104,8 @@ const App = {
         <td>${this._esc(row.activity||'—')}</td>
         <td class="${safCls}">${this._esc(row.safety||'—')}</td>
         <td class="${sevCls}">${this._esc(row.severity||'—')}</td>
-        <td style="font-family:var(--font-mono);font-size:0.7rem">${row.latency != null ? row.latency + 's' : '—'}</td>
+        <td style="font-family:var(--font-mono);font-size:0.7rem">${row.latency != null ? Number(row.latency).toFixed(2) + 's' : '—'}</td>
+        <td style="font-family:var(--font-mono);font-size:0.7rem;color:${row.e2e_latency != null ? 'var(--cyan)' : 'var(--text-3)'};font-weight:500">${row.e2e_latency != null ? Number(row.e2e_latency).toFixed(2) + 's' : '--'}</td>
       `;
       tbody.appendChild(tr);
     }
@@ -1030,6 +1146,9 @@ const App = {
   //  Event binding
   // ════════════════════════════════════════════════════════════
   bindUIEvents() {
+    // Theme toggle
+    document.getElementById('btn-theme-toggle')?.addEventListener('click', () => this.toggleTheme());
+
     // Settings open/close
     document.getElementById('btn-settings')?.addEventListener('click', () => this._openSettings());
     document.getElementById('btn-close-settings')?.addEventListener('click', () => this._closeSettings());
@@ -1062,10 +1181,114 @@ const App = {
       if (e.key === 'Enter') this._addCamera();
     });
 
+    // Sidebar view controls (All / None)
+    document.getElementById('btn-sidebar-select-all')?.addEventListener('click', () => {
+      document.querySelectorAll('.cam-checkbox-label input').forEach(cb => {
+        cb.checked = true;
+        const cam = cb.dataset.cam;
+        if (cam) this._renderTbRow(cam);
+      });
+      this._syncTbEmptyState();
+    });
+
+    document.getElementById('btn-sidebar-clear-all')?.addEventListener('click', () => {
+      document.querySelectorAll('.cam-checkbox-label input').forEach(cb => {
+        cb.checked = false;
+        const cam = cb.dataset.cam;
+        if (cam) document.getElementById(`tb-row-${this._eid(cam)}`)?.remove();
+      });
+      this._syncTbEmptyState();
+    });
+
+    // Batch Camera actions in Settings (Enable All / Disable All)
+    document.getElementById('btn-enable-all-cams')?.addEventListener('click', async () => {
+      const cams = Object.values(this.cameras).map(c => ({
+        ...(c.config || { name: c.name }),
+        enabled: true
+      }));
+      try {
+        await fetch('/api/cameras/batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(cams)
+        });
+        this._showToast('Enabled all cameras!', 'ok');
+      } catch (err) {
+        console.error('Failed to enable all cameras:', err);
+      }
+    });
+
+    document.getElementById('btn-disable-all-cams')?.addEventListener('click', async () => {
+      const cams = Object.values(this.cameras).map(c => ({
+        ...(c.config || { name: c.name }),
+        enabled: false
+      }));
+      try {
+        await fetch('/api/cameras/batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(cams)
+        });
+        this._showToast('Disabled all cameras!', 'ok');
+      } catch (err) {
+        console.error('Failed to disable all cameras:', err);
+      }
+    });
+
+    // Delegated events for Settings Cameras Table
+    const camTableBody = document.getElementById('cam-table-body');
+    camTableBody?.addEventListener('change', async e => {
+      const cam = e.target.dataset.cam;
+      if (!cam) return;
+      const cfg = { ...(this.cameras[cam]?.config || { name: cam, url: '' }) };
+      if (e.target.classList.contains('toggle-enabled')) cfg.enabled = e.target.checked;
+      if (e.target.classList.contains('ctx-thresh'))     cfg.threshold = parseFloat(e.target.value);
+      if (e.target.classList.contains('ctx-hb'))         cfg.heartbeat_sec = parseFloat(e.target.value);
+      if (e.target.classList.contains('ctx-day'))        cfg.normal_context_day = e.target.value;
+      if (e.target.classList.contains('ctx-night'))      cfg.normal_context_night = e.target.value;
+      await this._apiUpsertCamera(cfg);
+      this._showToast(`Updated ${cam}`, 'ok');
+    });
+
+    camTableBody?.addEventListener('click', async e => {
+      const btn = e.target.closest('.btn-del');
+      if (!btn) return;
+      const cam = btn.dataset.cam;
+      if (cam && confirm(`Remove camera "${cam}"?`)) await this._apiDeleteCamera(cam);
+    });
+
     // Prompt actions
     document.getElementById('btn-save-master')?.addEventListener('click', () => this._saveMasterPrompt());
     document.getElementById('btn-save-cam-prompt')?.addEventListener('click', () => this._saveCamPrompt());
     document.getElementById('btn-clear-cam-prompt')?.addEventListener('click', () => this._clearCamPrompt());
+
+    // Save System Config (Threshold & Heartbeat)
+    document.getElementById('btn-save-sys-config')?.addEventListener('click', async () => {
+      const thresh = parseFloat(document.getElementById('sys-input-thresh')?.value);
+      const hb = parseFloat(document.getElementById('sys-input-hb')?.value);
+      const cooldown = parseFloat(document.getElementById('sys-input-cooldown')?.value);
+      try {
+        const res = await fetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            default_threshold: isNaN(thresh) ? undefined : thresh,
+            default_heartbeat_sec: isNaN(hb) ? undefined : hb,
+            event_cooldown: isNaN(cooldown) ? undefined : cooldown,
+          })
+        });
+        if (res.ok) {
+          const ind = document.getElementById('sys-config-saved');
+          if (ind) {
+            ind.style.display = 'inline';
+            setTimeout(() => { ind.style.display = 'none'; }, 2500);
+          }
+          this._showToast('System configuration hot-reloaded!', 'ok');
+        }
+      } catch (err) {
+        console.error('Error saving system config:', err);
+      }
+    });
 
     // Cam prompt select → load current override
     document.getElementById('cam-prompt-sel')?.addEventListener('change', e => {
