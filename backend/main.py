@@ -242,7 +242,7 @@ async def websocket_endpoint(ws: WebSocket):
             "concurrent_results": result_store.get_all_latest_concurrent(),
             "thumbnails": live_thumbs,
             "drifts": scene_trigger.latest_drifts,
-            "alerts": alert_engine.get_recent(25),
+            "alerts": alert_engine.get_recent(25, summary=True),
             "system": SYS_CFG,
             "metrics": {
                 **result_store.get_metrics(),
@@ -521,6 +521,14 @@ async def api_update_prompts(body: PromptBody):
 @app.get("/api/alerts")
 def api_get_alerts(n: int = 50):
     return alert_engine.get_recent(n)
+
+
+@app.get("/api/alerts/{alert_id}")
+def api_get_single_alert(alert_id: str):
+    alert = alert_engine.get_alert(alert_id)
+    if alert:
+        return alert
+    raise HTTPException(status_code=404, detail="Alert not found")
 
 
 @app.delete("/api/alerts")

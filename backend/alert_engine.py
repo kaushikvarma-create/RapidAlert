@@ -168,13 +168,29 @@ class AlertEngine:
 
         return alert
 
-    def get_recent(self, n: int = 50) -> list:
+    def get_alert(self, alert_id: str) -> Optional[dict]:
+        """Fetch full alert data by ID including multi-frame sequence."""
+        for a in self._alerts:
+            if a.get("id") == alert_id:
+                return a
+        return None
+
+    def get_recent(self, n: int = 50, summary: bool = False) -> list:
         # Filter out any legacy drift jargon alerts so only real VLM analyses are displayed
         alerts = [
             a for a in self._alerts
             if not a.get("is_drift") and not str(a.get("observation", "")).startswith("⚡ DINOv2")
         ]
-        return alerts[-n:] if len(alerts) > n else alerts
+        recent = alerts[-n:] if len(alerts) > n else alerts
+        if not summary:
+            return recent
+        summaries = []
+        for a in recent:
+            item = dict(a)
+            # Remove multi-frame temporal array to keep payload lightweight and prevent WS 1009 drops
+            item["thumbnails_b64"] = []
+            summaries.append(item)
+        return summaries
 
     def clear(self) -> None:
         self._alerts.clear()

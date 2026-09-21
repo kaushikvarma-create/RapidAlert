@@ -26,6 +26,7 @@ const App = {
     this.initTheme();
     this._initAudio();
     this.bindUIEvents();
+    this._fetchInitialAlerts();
     this.connectWS();
     this.startTimestampTicker();
   },
@@ -159,6 +160,49 @@ const App = {
     }
   },
 
+  async _fetchInitialAlerts() {
+    try {
+      const res = await fetch('/api/alerts?n=35');
+      if (res.ok) {
+        const alerts = await res.json();
+        if (Array.isArray(alerts) && alerts.length > 0) {
+          const valid = alerts.filter(a => !a.is_drift && !String(a.observation || '').startsWith('⚡ DINOv2'));
+          for (const a of valid) {
+            if (!this.alerts.some(existing => existing.id === a.id)) {
+              this.alerts.push(a);
+            }
+          }
+          this.alertCount = this.alerts.length;
+          this._syncAlertCount();
+          this._renderAllAlerts();
+        }
+      }
+    } catch (e) {
+      console.warn('Error fetching initial alerts via REST:', e);
+    }
+  },
+
+  _renderAllAlerts() {
+    const feed = document.getElementById('alerts-feed');
+    if (!feed) return;
+    // Remove only alert cards, preserving #alerts-empty
+    feed.querySelectorAll('.alert-item').forEach(el => el.remove());
+    let empty = document.getElementById('alerts-empty');
+    if (!empty) {
+      feed.insertAdjacentHTML('beforeend', `
+        <div class="alerts-empty" id="alerts-empty">
+          <div class="alerts-empty-icon">🛡️</div>
+          <p>System Normal</p>
+          <small>Real-time AI incidents and scene shifts will appear here.</small>
+        </div>
+      `);
+    }
+    for (const a of this.alerts) {
+      this._renderAlert(a, false);
+    }
+    this._applyAlertFilter();
+  },
+
   // ════════════════════════════════════════════════════════════
   //  Message handlers
   // ════════════════════════════════════════════════════════════
@@ -211,17 +255,15 @@ const App = {
     }
 
     if (msg.alerts && Array.isArray(msg.alerts)) {
-      this.alerts = msg.alerts.filter(a => !a.is_drift && !String(a.observation || '').startsWith('⚡ DINOv2'));
-      this.alertCount = this.alerts.length;
-      this._syncAlertCount();
-      const feed = document.getElementById('alerts-feed');
-      if (feed) {
-        feed.innerHTML = '';
-        for (const a of this.alerts) {
-          this._renderAlert(a, false);
+      const valid = msg.alerts.filter(a => !a.is_drift && !String(a.observation || '').startsWith('⚡ DINOv2'));
+      for (const a of valid) {
+        if (!this.alerts.some(existing => existing.id === a.id)) {
+          this.alerts.push(a);
         }
       }
-      this._applyAlertFilter();
+      this.alertCount = this.alerts.length;
+      this._syncAlertCount();
+      this._renderAllAlerts();
     }
 
     if (msg.metrics) this._applyMetrics(msg.metrics);
@@ -353,6 +395,7 @@ const App = {
     if (this.alerts.length > 200) this.alerts.pop();
     this.alertCount = this.alerts.length;
     this._renderAlert(alert, true);
+    this._applyAlertFilter();
     this._syncAlertCount();
     this._playAlertChime(alert.severity || 'high');
 
@@ -737,7 +780,7 @@ const App = {
     if (af === 'high') {
       matchFilter = (sev === 'high' || sev === 'extreme');
     } else if (af === 'medium') {
-      matchFilter = (sev === 'medium' || sev === 'high' || sev === 'extreme');
+      matchFilter = (sev === 'medium' || sev === 'high' || sev === 'extreme' || isIncident || isFollowup);
     } else if (af === 'drift' || af === 'trigger') {
       matchFilter = isIncident || isFollowup || isDrift;
     } else if (af === 'all') {
@@ -765,7 +808,7 @@ const App = {
       } else if (af === 'high') {
         show = (sev === 'high' || sev === 'extreme');
       } else if (af === 'medium') {
-        show = (sev === 'medium' || sev === 'high' || sev === 'extreme');
+        show = (sev === 'medium' || sev === 'high' || sev === 'extreme' || trigger === 'trigger' || trigger === 'followup');
       } else if (af === 'drift' || af === 'trigger') {
         show = (trigger === 'trigger' || trigger === 'followup' || isDrift);
       }
@@ -992,6 +1035,22 @@ const App = {
 
     document.getElementById('alert-modal-backdrop').hidden = false;
     document.getElementById('alert-modal').hidden = false;
+
+    // If multi-frame sequence isn't loaded (e.g. from compact WebSocket summary), fetch full detail
+    if (alert.id && (!alert.thumbnails_b64 || alert.thumbnails_b64.length <= 1)) {
+      fetch(`/api/alerts/${encodeURIComponent(alert.id)}`)
+        .then(r => r.ok ? r.json() : null)
+        .then(full => {
+          if (full && full.thumbnails_b64 && full.thumbnails_b64.length > 0) {
+            alert.thumbnails_b64 = full.thumbnails_b64;
+            if (full.thumbnail_b64) alert.thumbnail_b64 = full.thumbnail_b64;
+            if (this.activeAlert && this.activeAlert.id === alert.id) {
+              this.openAlertModal(alert);
+            }
+          }
+        })
+        .catch(err => console.warn('Failed to load full alert details:', err));
+    }
   },
 
   _renderPairBanner(alert) {
