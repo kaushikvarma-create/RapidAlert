@@ -1266,17 +1266,39 @@ body.light-mode .badge-muted,   html.light-mode body .badge-muted   { background
 .alert-item.sev-low    { border-left-color: var(--green); }
 .alert-item.sev-drift  { border-left-color: var(--cyan); }
 
-.alert-fault-tag {
+.alert-fault-tag,
+.alert-trigger-tag {
   font-size: 0.62rem;
   font-weight: 700;
-  padding: 1px 5px;
-  border-radius: 3px;
-  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 4px;
   letter-spacing: 0.04em;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  line-height: 1.4;
 }
-.fault-tag-incident { background: var(--red-dim); color: var(--red); }
-.fault-tag-drift    { background: var(--cyan-dim); color: var(--cyan); }
-.fault-tag-offline  { background: rgba(148, 163, 184, 0.15); color: var(--text-3); }
+.fault-tag-incident,
+.trigger-tag-incident {
+  background: rgba(234, 111, 62, 0.2);
+  color: var(--accent);
+  border: 1px solid rgba(234, 111, 62, 0.4);
+}
+.fault-tag-drift {
+  background: var(--cyan-dim);
+  color: var(--cyan);
+}
+.trigger-tag-periodic {
+  background: var(--bg-surface);
+  color: var(--text-2);
+  border: 1px solid var(--border);
+}
+.fault-tag-offline,
+.trigger-tag-offline {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+}
 
 .alert-enter { animation: slide-in 0.3s cubic-bezier(0.4,0,0.2,1); }
 @keyframes slide-in {

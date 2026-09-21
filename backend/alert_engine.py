@@ -29,28 +29,18 @@ class AlertEngine:
         thumbnails_b64: Optional[List[str]] = None,
         timestamp: Optional[str] = None,
     ) -> dict:
-        """Record an immediate alert when DINOv2 detects a scene drift exceeding threshold."""
-        alert = {
-            "id": f"drift_{cam_name}_{int(time.time() * 1000)}",
+        """Scene shift event from DINOv2. Dispatches scene_shift signal without polluting alerts with jargon."""
+        payload = {
+            "type": "scene_shift",
             "cam": cam_name,
-            "ts": time.time(),
-            "timestamp": timestamp or time.strftime("%Y-%m-%d %H:%M:%S"),
-            "severity": "MEDIUM",
-            "safety": "WARNING",
-            "is_drift": True,
-            "is_incident": True,
             "drift": round(drift_score, 4),
-            "observation": f"⚡ DINOv2 scene drift shift detected on {cam_name} (drift={drift_score:.4f}). Context dispatched for Cosmos VLM evaluation.",
-            "activity": "SCENE_SHIFT",
-            "workers": "—",
-            "machinery": "None",
-            "thumbnail_b64": thumbnail_b64 or (thumbnails_b64[-1] if thumbnails_b64 else None),
+            "timestamp": timestamp or time.strftime("%Y-%m-%d %H:%M:%S"),
+            "thumbnail_b64": thumbnail_b64,
             "thumbnails_b64": thumbnails_b64 or [],
         }
-        self._alerts.append(alert)
         if self._broadcast_fn:
-            await self._broadcast_fn({"type": "alert", "data": alert})
-        return alert
+            await self._broadcast_fn(payload)
+        return payload
 
     async def process(
         self,
@@ -63,7 +53,7 @@ class AlertEngine:
         e2e_latency: Optional[float] = None,
         latency: Optional[float] = None,
     ) -> Optional[dict]:
-        """Called for every VLM result. Fires alert when conditions are met."""
+        """Called for every VLM result. Fires alert with actual scene analysis when conditions are met."""
         raw_sev = (result.get("severity") or "LOW").upper()
         raw_safety = (result.get("safety") or "UNKNOWN").upper()
 
@@ -80,6 +70,9 @@ class AlertEngine:
         severity = raw_sev if raw_sev in _SEVERITY_TRIGGER else ("MEDIUM" if is_incident else "LOW")
         safety = raw_safety if raw_safety in _SAFETY_TRIGGER else ("WARNING" if is_incident else "OK")
 
+        trigger_mode = "TRIGGER" if is_incident else "PERIODIC"
+        trigger_badge = "⚡ TRIGGER" if is_incident else "⏱️ PERIODIC"
+
         alert = {
             "id": f"alert_{cam_name}_{int(time.time() * 1000)}",
             "cam": cam_name,
@@ -87,6 +80,8 @@ class AlertEngine:
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             "severity": severity,
             "safety": safety,
+            "trigger_mode": trigger_mode,
+            "trigger_badge": trigger_badge,
             "observation": result.get("observation", ""),
             "activity": result.get("activity", "UNKNOWN"),
             "workers": result.get("workers", "0"),
@@ -94,6 +89,7 @@ class AlertEngine:
             "evolution": result.get("evolution", ""),
             "model": result.get("model", "vrfai/Cosmos-Reason2-8B-NVFP4"),
             "is_incident": is_incident,
+            "is_periodic": not is_incident,
             "is_drift": False,
             "drift": drift,
             "latency": latency or result.get("latency"),
@@ -109,7 +105,11 @@ class AlertEngine:
         return alert
 
     def get_recent(self, n: int = 50) -> list:
-        alerts = list(self._alerts)
+        # Filter out any legacy drift jargon alerts so only real VLM analyses are displayed
+        alerts = [
+            a for a in self._alerts
+            if not a.get("is_drift") and not str(a.get("observation", "")).startswith("⚡ DINOv2")
+        ]
         return alerts[-n:] if len(alerts) > n else alerts
 
     def clear(self) -> None:

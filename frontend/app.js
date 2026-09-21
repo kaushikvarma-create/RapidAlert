@@ -210,7 +210,7 @@ const App = {
     }
 
     if (msg.alerts && Array.isArray(msg.alerts)) {
-      this.alerts = [...msg.alerts];
+      this.alerts = msg.alerts.filter(a => !a.is_drift && !String(a.observation || '').startsWith('⚡ DINOv2'));
       this.alertCount = this.alerts.length;
       this._syncAlertCount();
       const feed = document.getElementById('alerts-feed');
@@ -639,22 +639,24 @@ const App = {
     const ts  = alert.ts ? new Date(alert.ts * 1000).toLocaleTimeString() : '—';
     const sevCls = { low: 'green', medium: 'amber', high: 'red' }[sev] || 'muted';
 
-    let faultTagHtml = `<span class="alert-fault-tag fault-tag-incident">AI INCIDENT</span>`;
-    if (alert.is_drift) {
-      faultTagHtml = `<span class="alert-fault-tag fault-tag-drift">SCENE SHIFT</span>`;
-    } else if (alert.is_fault) {
-      faultTagHtml = `<span class="alert-fault-tag fault-tag-offline">FEED FAULT</span>`;
+    const isIncident = Boolean(alert.is_incident || alert.trigger_mode === 'TRIGGER');
+    let triggerTagHtml = isIncident
+      ? `<span class="alert-trigger-tag trigger-tag-incident" title="Triggered by DINOv2 Scene Drift Incident">⚡ TRIGGER</span>`
+      : `<span class="alert-trigger-tag trigger-tag-periodic" title="Scheduled Periodic AI Inspection">⏱️ PERIODIC</span>`;
+
+    if (alert.is_fault) {
+      triggerTagHtml = `<span class="alert-trigger-tag trigger-tag-offline">FEED FAULT</span>`;
     }
 
     const item = document.createElement('div');
-    item.className = `alert-item sev-${alert.is_drift ? 'drift' : sev}${animate ? ' alert-enter' : ''}`;
+    item.className = `alert-item sev-${isIncident ? 'high' : sev}${animate ? ' alert-enter' : ''}`;
     item.setAttribute('data-sev', sev);
-    item.setAttribute('data-is-drift', alert.is_drift ? 'true' : 'false');
-    item.title = 'Click to open camera inspection & prompt controls';
+    item.setAttribute('data-trigger', isIncident ? 'trigger' : 'periodic');
+    item.title = 'Click to inspect this particular alert and incident history';
     item.innerHTML = `
       <div class="alert-header">
         <span class="alert-cam">${this._esc(alert.cam || 'System')}</span>
-        ${faultTagHtml}
+        ${triggerTagHtml}
         <span class="badge badge-${sevCls} badge-sm">${sev.toUpperCase()}</span>
         <span class="alert-ts">${ts}</span>
       </div>
@@ -737,17 +739,17 @@ const App = {
     document.getElementById('alert-modal-cam').textContent = alert.cam || 'System Alert';
     document.getElementById('alert-modal-ts').textContent = `${fullDate} ${ts} • ${timeAgo}`;
 
+    const isIncident = Boolean(alert.is_incident || alert.trigger_mode === 'TRIGGER');
     const typeBadge = document.getElementById('alert-modal-badge-type');
     if (typeBadge) {
-      if (alert.is_drift) {
-        typeBadge.textContent = '⚡ SCENE SHIFT';
-        typeBadge.className = 'badge badge-cyan';
-      } else if (sev === 'high') {
-        typeBadge.textContent = '🚨 HIGH INCIDENT';
-        typeBadge.className = 'badge badge-red';
-      } else {
-        typeBadge.textContent = '⚠️ AI ALERT';
+      if (isIncident) {
+        typeBadge.textContent = '⚡ TRIGGER';
         typeBadge.className = 'badge badge-amber';
+        typeBadge.title = 'Incident triggered by DINOv2 scene drift';
+      } else {
+        typeBadge.textContent = '⏱️ PERIODIC';
+        typeBadge.className = 'badge badge-neutral';
+        typeBadge.title = 'Scheduled periodic surveillance check';
       }
     }
 
@@ -757,16 +759,26 @@ const App = {
       sevBadge.className = `badge badge-${sevCls}`;
     }
 
-    // Observation of THIS particular alert
-    document.getElementById('alert-modal-obs').textContent = alert.observation || 'No observation recorded for this alert.';
+    // Observation of THIS particular alert (clean scene analysis, fallback if legacy jargon)
+    let obsText = alert.observation || 'No observation recorded for this alert.';
+    if (obsText.startsWith('⚡ DINOv2 scene drift')) {
+      const camRes = this.cameras[alert.cam]?.results?.[0];
+      if (camRes?.observation) {
+        obsText = camRes.observation;
+      } else {
+        obsText = `Scene movement and visual activity detected on ${alert.cam || 'camera feed'}.`;
+      }
+    }
+    document.getElementById('alert-modal-obs').textContent = obsText;
 
     // Badges of THIS particular alert
     const badges = document.getElementById('alert-modal-badges');
     if (badges) {
       badges.innerHTML = [
+        `<span class="badge badge-${isIncident ? 'amber' : 'neutral'}">${isIncident ? '⚡ TRIGGER' : '⏱️ PERIODIC'}</span>`,
         `<span class="badge badge-${sevCls}">⚠ ${sev.toUpperCase()}</span>`,
         alert.safety ? `<span class="badge badge-${safeCls}">🛡 ${this._esc(alert.safety)}</span>` : '',
-        alert.activity && alert.activity !== 'UNKNOWN' ? `<span class="badge badge-muted">⚡ ${this._esc(alert.activity)}</span>` : '',
+        alert.activity && alert.activity !== 'UNKNOWN' && alert.activity !== 'SCENE_SHIFT' ? `<span class="badge badge-muted">⚡ ${this._esc(alert.activity)}</span>` : '',
         alert.workers && alert.workers !== '0' && alert.workers !== '—' ? `<span class="badge badge-neutral">👷 ${this._esc(alert.workers)} workers</span>` : '',
       ].filter(Boolean).join(' ');
     }
@@ -775,10 +787,10 @@ const App = {
     const meta = document.getElementById('alert-modal-meta');
     if (meta) {
       const rows = [
-        ['Alert Type', alert.is_drift ? 'DINOv2 Scene Drift Shift' : (alert.is_incident ? 'AI Incident Trigger' : 'Cosmos VLM Alert')],
+        ['Trigger Mode', isIncident ? `⚡ DINOv2 Incident Trigger ${alert.drift ? `(Drift: ${Number(alert.drift).toFixed(4)})` : ''}` : '⏱️ Scheduled Periodic Inspection'],
         ['Camera Feed', alert.cam],
         ['Detected At', alert.ts ? new Date(alert.ts * 1000).toLocaleString() : '—'],
-        ['Workers Present', alert.workers && alert.workers !== '0' ? alert.workers : null],
+        ['Workers Present', alert.workers && alert.workers !== '0' && alert.workers !== '—' ? alert.workers : null],
         ['Machinery', alert.machinery && alert.machinery !== 'None' ? alert.machinery : null],
         ['Cosmos Model', alert.model || 'vrfai/Cosmos-Reason2-8B-NVFP4'],
         ['Evolution', alert.evolution && alert.evolution !== 'None' ? alert.evolution : null],
@@ -888,6 +900,8 @@ const App = {
 
     const related = this.alerts.filter(a =>
       a.cam === currentAlert.cam &&
+      !a.is_drift &&
+      !String(a.observation || '').startsWith('⚡ DINOv2') &&
       (a.id ? a.id !== currentAlert.id : (a.ts !== currentAlert.ts || a.observation !== currentAlert.observation))
     );
 
@@ -907,13 +921,16 @@ const App = {
       const sev = (r.severity || 'LOW').toLowerCase();
       const rSevCls = { low: 'green', medium: 'amber', high: 'red' }[sev] || 'muted';
       const rTs = r.ts ? new Date(r.ts * 1000).toLocaleTimeString() : '—';
-      const tag = r.is_drift ? '⚡ SHIFT' : (sev === 'high' ? '🚨 INCIDENT' : '⚠️ ALERT');
+      const rIsIncident = Boolean(r.is_incident || r.trigger_mode === 'TRIGGER');
+      const tag = rIsIncident ? '⚡ TRIGGER' : '⏱️ PERIODIC';
+      const tagCls = rIsIncident ? 'amber' : 'neutral';
 
       item.innerHTML = `
         ${r.thumbnail_b64 ? `<img src="data:image/jpeg;base64,${r.thumbnail_b64}" class="alert-related-thumb" alt="">` : ''}
         <div class="alert-related-info">
           <div class="alert-related-row">
-            <span class="badge badge-${rSevCls} badge-sm">${tag}</span>
+            <span class="badge badge-${tagCls} badge-sm">${tag}</span>
+            <span class="badge badge-${rSevCls} badge-sm">${sev.toUpperCase()}</span>
             <span class="alert-related-ts">${rTs}</span>
           </div>
           <span class="alert-related-obs" title="${this._esc(r.observation || '')}">${this._esc(r.observation || '—')}</span>

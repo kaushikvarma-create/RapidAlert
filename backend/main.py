@@ -238,7 +238,7 @@ async def websocket_endpoint(ws: WebSocket):
             "concurrent_results": result_store.get_all_latest_concurrent(),
             "thumbnails": live_thumbs,
             "drifts": scene_trigger.latest_drifts,
-            "alerts": alert_engine.get_recent(50),
+            "alerts": alert_engine.get_recent(25),
             "system": SYS_CFG,
             "metrics": {
                 **result_store.get_metrics(),
@@ -524,8 +524,8 @@ async def api_trigger_test_alert(cam: Optional[str] = None):
     """Trigger an immediate test alert to verify notification feed and inspector."""
     active = camera_manager.get_active_cameras()
     cam_name = cam if (cam and cam in active) else (active[0] if active else "TEST_CAM")
-    snap = frame_store.get_snapshot_b64(cam_name, max_w=1280, quality=85)
-    temporal_snaps = frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=10.0, max_w=960, quality=82)
+    snap = frame_store.get_snapshot_b64(cam_name, max_w=960, quality=78)
+    temporal_snaps = frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=10.0, max_w=480, quality=68)
     alert = await alert_engine.process(
         cam_name=cam_name,
         result={

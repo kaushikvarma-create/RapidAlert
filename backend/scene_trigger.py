@@ -216,10 +216,10 @@ class SceneTriggerEngine:
 
             # Base64 encode for VLM (downscaled to 512 for fast multi-frame processing)
             frames_b64 = self.frame_store.encode_frames(frames, max_w=512, quality=75)
-            # High-definition temporal sequence frames (960px) for event timeline inspection
-            thumbs_b64 = self.frame_store.encode_frames(frames, max_w=960, quality=82)
-            # Full native resolution snapshot (1280px, quality 85) for crisp incident inspector
-            high_res_snap = self.frame_store.encode_frames([frames[-1]], max_w=1280, quality=85)[0] if frames else (thumbs_b64[-1] if thumbs_b64 else None)
+            # Crisp temporal sequence frames (480px) for event timeline inspection
+            thumbs_b64 = self.frame_store.encode_frames(frames, max_w=480, quality=68)
+            # High resolution snapshot (960px, quality 78) for sharp incident inspector
+            high_res_snap = self.frame_store.encode_frames([frames[-1]], max_w=960, quality=78)[0] if frames else (thumbs_b64[-1] if thumbs_b64 else None)
 
             labels = ["t -4.0s (Before)", "t -1.0s (Trigger)", "t +1.5s (Action)", "t +3.5s (Outcome)"]
 
@@ -236,15 +236,7 @@ class SceneTriggerEngine:
                 "priority": 0,  # High priority incident
             }
 
-            # Notify dashboard and record alert in alert_engine
-            if self.alert_engine:
-                await self.alert_engine.record_scene_shift(
-                    cam_name=cam_name,
-                    drift_score=drift_score,
-                    thumbnail_b64=high_res_snap,
-                    thumbnails_b64=thumbs_b64,
-                    timestamp=incident_data["timestamp"],
-                )
+            # Broadcast live scene drift shift to dashboard for live card pulse
             if self.broadcast_fn:
                 await self.broadcast_fn({
                     "type": "scene_shift",
