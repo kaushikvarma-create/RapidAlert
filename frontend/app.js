@@ -6,21 +6,88 @@
 const App = {
   ws: null,
   wsReady: false,
-  cameras: {},      // { name: { config, result, lastTs, thumbB64 } }
+  cameras: {},      // { name: { config, results, lastTs, thumbB64, eventPhotos, drift, is_incident } }
   alerts: [],
   metrics: {},
   prompts: { master: '', cameras: {} },
   alertCount: 0,
   activeFilter: 'all',
+  activeAlertFilter: 'all',
+  audioMuted: false,
+  audioCtx: null,
+  activeCamModal: null,
+  modalViewMode: 'live', // 'live' | 'event'
+  selectedEventIdx: null,
 
   // ════════════════════════════════════════════════════════════
   //  Bootstrap
   // ════════════════════════════════════════════════════════════
   init() {
     this.initTheme();
+    this._initAudio();
     this.bindUIEvents();
     this.connectWS();
     this.startTimestampTicker();
+  },
+
+  _initAudio() {
+    this.audioMuted = localStorage.getItem('rapidalert_audio_mute') === 'true';
+    const btn = document.getElementById('btn-audio-toggle');
+    const icon = document.getElementById('audio-toggle-icon');
+    if (icon) icon.textContent = this.audioMuted ? '🔇' : '🔊';
+    if (btn) {
+      btn.title = this.audioMuted ? 'Alert Audio Muted (Click to Unmute)' : 'Alert Audio Active (Click to Mute)';
+      btn.addEventListener('click', () => {
+        this.audioMuted = !this.audioMuted;
+        localStorage.setItem('rapidalert_audio_mute', this.audioMuted ? 'true' : 'false');
+        if (icon) icon.textContent = this.audioMuted ? '🔇' : '🔊';
+        btn.title = this.audioMuted ? 'Alert Audio Muted (Click to Unmute)' : 'Alert Audio Active (Click to Mute)';
+        this._showToast(this.audioMuted ? 'Audio chime muted' : 'Audio chime enabled', 'ok');
+        if (!this.audioMuted) {
+          this._playAlertChime('medium');
+        }
+      });
+    }
+  },
+
+  _playAlertChime(severity = 'high') {
+    if (this.audioMuted) return;
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return;
+      if (!this.audioCtx) this.audioCtx = new AudioCtx();
+      if (this.audioCtx.state === 'suspended') {
+        this.audioCtx.resume();
+      }
+      const now = this.audioCtx.currentTime;
+      const osc = this.audioCtx.createOscillator();
+      const gain = this.audioCtx.createGain();
+
+      const sev = (severity || 'low').toLowerCase();
+      if (sev === 'high') {
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(880, now);
+        osc.frequency.exponentialRampToValueAtTime(587, now + 0.18);
+        gain.gain.setValueAtTime(0.18, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.35);
+        osc.connect(gain);
+        gain.connect(this.audioCtx.destination);
+        osc.start(now);
+        osc.stop(now + 0.35);
+      } else if (sev === 'medium') {
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(587, now);
+        osc.frequency.exponentialRampToValueAtTime(784, now + 0.12);
+        gain.gain.setValueAtTime(0.12, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
+        osc.connect(gain);
+        gain.connect(this.audioCtx.destination);
+        osc.start(now);
+        osc.stop(now + 0.25);
+      }
+    } catch (e) {
+      console.debug('Web audio chime silenced:', e);
+    }
   },
 
   initTheme() {
@@ -96,13 +163,20 @@ const App = {
   onInit(msg) {
     this.cameras = {};
     for (const cam of (msg.cameras || [])) {
-      this.cameras[cam.name] = { config: cam, results: [], lastTs: 0, thumbB64: null, thumbnailsB64: [] };
+      this.cameras[cam.name] = {
+        config: cam,
+        results: [],
+        lastTs: 0,
+        thumbB64: null,
+        eventPhotos: [],
+        drift: null,
+        is_incident: false
+      };
     }
 
     if (msg.thumbnails) {
       for (const [cam, thumbs] of Object.entries(msg.thumbnails)) {
         if (this.cameras[cam] && thumbs && thumbs.length > 0) {
-          this.cameras[cam].thumbnailsB64 = thumbs;
           this.cameras[cam].thumbB64 = thumbs[0];
         }
       }
@@ -115,7 +189,7 @@ const App = {
             this.cameras[cam].results = data.results;
           }
           if (data.thumbnails_b64 && data.thumbnails_b64.length > 0) {
-            this.cameras[cam].thumbnailsB64 = data.thumbnails_b64;
+            this.cameras[cam].eventPhotos = data.thumbnails_b64;
           }
         }
       }
@@ -134,8 +208,19 @@ const App = {
       }
     }
 
-    this._renderSidebar();
-    
+    if (msg.alerts && Array.isArray(msg.alerts)) {
+      this.alerts = [...msg.alerts];
+      this.alertCount = this.alerts.length;
+      this._syncAlertCount();
+      const feed = document.getElementById('alerts-feed');
+      if (feed) {
+        feed.innerHTML = '';
+        for (const a of this.alerts) {
+          this._renderAlert(a, false);
+        }
+      }
+    }
+
     if (msg.metrics) this._applyMetrics(msg.metrics);
     if (msg.prompts) this._applyPrompts(msg.prompts);
     if (msg.system) {
@@ -149,10 +234,8 @@ const App = {
     }
     this._updateCamSelect();
 
-    // Render initial cards for checked cameras
-    for (const camName of Object.keys(this.cameras)) {
-      this._renderTbRow(camName);
-    }
+    // Render fixed camera grid
+    this._renderCameraGrid();
   },
 
   onConfigUpdated(msg) {
@@ -170,9 +253,7 @@ const App = {
         if (this.cameras[c.name]) this.cameras[c.name].config = c;
       }
       this._syncCamTable(msg.cameras);
-      for (const camName of Object.keys(this.cameras)) {
-        this._renderTbRow(camName);
-      }
+      this._renderCameraGrid();
     }
     this._showToast('Configuration hot-reloaded!', 'ok');
   },
@@ -182,14 +263,21 @@ const App = {
     if (!this.cameras[cam]) return;
     this.cameras[cam].thumbB64 = thumbnail_b64;
 
-    // If camera only has single thumbnail or none, update preview
-    if (!this.cameras[cam].thumbnailsB64 || this.cameras[cam].thumbnailsB64.length <= 1) {
-      this.cameras[cam].thumbnailsB64 = [thumbnail_b64];
-      const img = document.getElementById(`tb-img-${this._eid(cam)}`);
-      if (img) {
-        img.src = `data:image/jpeg;base64,${thumbnail_b64}`;
-      } else {
-        this._renderTbRow(cam);
+    // 1. Direct in-place update of live feed image in grid (no card re-render / screen tearing)
+    const cardImg = document.getElementById(`cam-card-img-${this._eid(cam)}`);
+    if (cardImg) {
+      cardImg.src = `data:image/jpeg;base64,${thumbnail_b64}`;
+    } else {
+      this._renderCamCard(cam);
+    }
+
+    // 2. Direct update of modal frame if viewing live stream
+    if (this.activeCamModal === cam && this.modalViewMode === 'live') {
+      const modalImg = document.getElementById('modal-frame');
+      if (modalImg) {
+        modalImg.src = `data:image/jpeg;base64,${thumbnail_b64}`;
+        const loading = document.getElementById('modal-frame-loading');
+        if (loading) loading.style.display = 'none';
       }
     }
   },
@@ -204,20 +292,20 @@ const App = {
     const { cam, results, thumbnails_b64, drift, is_incident } = msg;
 
     if (!this.cameras[cam]) {
-      this.cameras[cam] = { config: { name: cam }, results: [], lastTs: 0, thumbnailsB64: [] };
-      this._renderSidebar();
+      this.cameras[cam] = { config: { name: cam }, results: [], lastTs: 0, thumbB64: null, eventPhotos: [] };
     }
 
     this.cameras[cam].results = results;
     this.cameras[cam].lastTs = Date.now() / 1000;
     this.cameras[cam].drift = drift;
     this.cameras[cam].is_incident = is_incident;
-    if (thumbnails_b64) this.cameras[cam].thumbnailsB64 = thumbnails_b64;
 
-    const sideDrift = document.getElementById(`side-drift-${this._eid(cam)}`);
-    if (sideDrift && drift !== undefined) sideDrift.textContent = Number(drift).toFixed(4);
+    // Store event-based photos captured for AI analysis
+    if (thumbnails_b64 && thumbnails_b64.length > 0) {
+      this.cameras[cam].eventPhotos = thumbnails_b64;
+    }
 
-    this._renderTbRow(cam);
+    this._renderCamCard(cam);
   },
 
   onSceneShift(msg) {
@@ -225,10 +313,24 @@ const App = {
     if (this.cameras[cam]) {
       this.cameras[cam].drift = drift;
       this.cameras[cam].is_incident = true;
-      const sideDrift = document.getElementById(`side-drift-${this._eid(cam)}`);
-      if (sideDrift && drift !== undefined) sideDrift.textContent = Number(drift).toFixed(4);
-      this._renderTbRow(cam);
+      if (this.cameras[cam].thumbB64 && (!this.cameras[cam].eventPhotos || this.cameras[cam].eventPhotos.length === 0)) {
+        this.cameras[cam].eventPhotos = [this.cameras[cam].thumbB64];
+      }
+      this._renderCamCard(cam);
     }
+    const alertObj = {
+      cam: cam,
+      observation: `DINOv2 scene drift shift detected (drift=${Number(drift).toFixed(4)}). Event dispatched to Cosmos VLM.`,
+      severity: 'MEDIUM',
+      safety: 'WARNING',
+      is_drift: true,
+      ts: Date.now() / 1000,
+      thumbnail_b64: this.cameras[cam]?.thumbB64 || null
+    };
+    this.alerts.unshift(alertObj);
+    this._renderAlert(alertObj, true);
+    this._syncAlertCount();
+    this._playAlertChime('medium');
   },
 
   onAlert(msg) {
@@ -236,6 +338,7 @@ const App = {
     this.alerts.unshift(alert);
     this._renderAlert(alert, true);
     this._syncAlertCount();
+    this._playAlertChime(alert.severity || 'high');
   },
 
   onMetrics(msg) {
@@ -276,223 +379,258 @@ const App = {
   },
 
   // ════════════════════════════════════════════════════════════
-  //  Tensorboard Rendering
+  //  Camera Grid Rendering
   // ════════════════════════════════════════════════════════════
-  _renderSidebar() {
-    const list = document.getElementById('camera-checkbox-list');
-    if (!list) return;
-    list.innerHTML = '';
-    for (const [name, cam] of Object.entries(this.cameras)) {
-      const existingCb = document.querySelector(`.cam-checkbox-label input[data-cam="${name}"]`);
-      // If user had already checked or unchecked it in this session, keep that. Otherwise default active cams to checked
-      let isChecked = false;
-      if (existingCb) {
-        isChecked = existingCb.checked;
-      } else {
-        isChecked = cam.config?.enabled !== false;
-      }
+  _renderCameraGrid() {
+    const grid = document.getElementById('camera-grid');
+    const empty = document.getElementById('empty-camera-grid');
+    const badge = document.getElementById('cams-active-badge');
+    if (!grid) return;
 
+    const camNames = Object.keys(this.cameras);
+    let activeCount = 0;
+    let visibleCount = 0;
+
+    for (const name of camNames) {
+      const cam = this.cameras[name];
       const isEnabled = cam.config?.enabled !== false;
-      const dotColor = isEnabled ? 'var(--green)' : 'var(--text-3)';
-      const driftVal = cam.drift !== undefined ? Number(cam.drift).toFixed(4) : '—';
+      if (isEnabled) activeCount++;
 
-      const lbl = document.createElement('label');
-      lbl.className = 'cam-checkbox-label';
-      lbl.style.display = 'flex';
-      lbl.style.alignItems = 'center';
-      lbl.style.gap = '8px';
-      lbl.style.padding = '5px 8px';
-      lbl.style.cursor = 'pointer';
-      lbl.style.borderRadius = '4px';
-      lbl.innerHTML = `
-        <input type="checkbox" data-cam="${this._esc(name)}" ${isChecked ? 'checked' : ''}>
-        <span style="width: 8px; height: 8px; border-radius: 50%; background: ${dotColor}; flex-shrink: 0;" title="${isEnabled ? 'Ingest Active' : 'Ingest Disabled'}"></span>
-        <span style="flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 0.82rem;">${this._esc(name)}</span>
-        <span id="side-drift-${this._eid(name)}" style="font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-3);">${driftVal}</span>
-      `;
-      lbl.querySelector('input').addEventListener('change', (e) => {
-        if (e.target.checked) this._renderTbRow(name);
-        else document.getElementById(`tb-row-${this._eid(name)}`)?.remove();
-        this._syncTbEmptyState();
-      });
-      list.appendChild(lbl);
-
-      if (isChecked) {
-        this._renderTbRow(name);
+      this._renderCamCard(name);
+      
+      const card = document.getElementById(`cam-card-${this._eid(name)}`);
+      if (card) {
+        const isVisible = this._shouldShowCamCard(name);
+        card.style.display = isVisible ? 'flex' : 'none';
+        if (isVisible) visibleCount++;
       }
     }
-    this._syncTbEmptyState();
-  },
 
-  _syncTbEmptyState() {
-    const stage = document.getElementById('tensorboard-stage');
-    const empty = document.getElementById('empty-tensorboard');
-    if (!stage || !empty) return;
-    if (stage.querySelectorAll('.tb-row').length === 0) {
-      empty.style.display = 'block';
-    } else {
-      empty.style.display = 'none';
+    if (badge) {
+      badge.textContent = `${activeCount} / ${camNames.length} Active`;
+    }
+
+    if (empty) {
+      empty.style.display = visibleCount === 0 ? 'flex' : 'none';
     }
   },
 
-  _renderTbRow(name) {
-    const stage = document.getElementById('tensorboard-stage');
-    if (!stage) return;
-    
-    // Check if the checkbox is checked before rendering/updating
-    const checkbox = document.querySelector(`.cam-checkbox-label input[data-cam="${name}"]`);
-    if (!checkbox || !checkbox.checked) return;
-    
-    this._syncTbEmptyState();
+  _shouldShowCamCard(name) {
+    const filter = this.activeFilter || 'all';
+    if (filter === 'all') return true;
+    const cam = this.cameras[name];
+    if (!cam) return false;
+
+    const isEnabled = cam.config?.enabled !== false;
+    if (filter === 'offline') return !isEnabled;
+
+    const topResult = cam.results?.[0];
+    const sev = (topResult?.severity || 'LOW').toUpperCase();
+    const saf = (topResult?.safety || 'OK').toUpperCase();
+
+    if (filter === 'incident') {
+      return sev === 'HIGH' || saf === 'DANGER' || cam.is_incident;
+    }
+    if (filter === 'drift') {
+      const thresh = cam.config?.threshold ?? (this.systemConfig?.default_threshold || 0.033);
+      return (cam.drift !== undefined && cam.drift >= thresh) || cam.is_incident;
+    }
+    return true;
+  },
+
+  _renderCamCard(name) {
+    const grid = document.getElementById('camera-grid');
+    if (!grid) return;
 
     const cam = this.cameras[name];
-    let row = document.getElementById(`tb-row-${this._eid(name)}`);
-    
-    if (!row) {
-      row = document.createElement('div');
-      row.className = 'tb-row';
-      row.id = `tb-row-${this._eid(name)}`;
-      stage.appendChild(row);
+    if (!cam) return;
+
+    let card = document.getElementById(`cam-card-${this._eid(name)}`);
+    if (!card) {
+      card = document.createElement('div');
+      card.className = 'cam-card';
+      card.id = `cam-card-${this._eid(name)}`;
+      grid.appendChild(card);
     }
 
-    const imgSrc = cam.thumbB64 ? `data:image/jpeg;base64,${cam.thumbB64}` : '';
-    
-    let modelsHtml = '';
-    if (cam.results && cam.results.length > 0) {
-      for (const res of cam.results) {
-        const sevCls = { LOW: 'green', MEDIUM: 'amber', HIGH: 'red' }[(res.severity || 'LOW').toUpperCase()] || 'muted';
-        modelsHtml += `
-          <div class="tb-model-card">
-            <div class="tb-model-name">${this._esc(res.model || 'Unknown Model')}</div>
-            <div class="tb-model-obs">${this._esc(res.observation || '—')}</div>
-            <div class="tb-model-details" style="font-size: 0.82em; color: var(--text-2); margin-top: 8px; margin-bottom: 8px; line-height: 1.45;">
-              <div><strong style="color: var(--text);">Activity:</strong> ${this._esc(res.activity || 'UNKNOWN')}</div>
-              <div><strong style="color: var(--text);">Workers:</strong> ${this._esc(res.workers || '0')}</div>
-              <div><strong style="color: var(--text);">Machinery:</strong> ${this._esc(res.machinery || 'None')}</div>
-              <div><strong style="color: var(--text);">Safety:</strong> ${this._esc(res.safety || 'UNKNOWN')}</div>
-              <div><strong style="color: var(--text);">Evolution:</strong> ${this._esc(res.evolution || 'None')}</div>
-            </div>
-            <div class="tb-model-meta">
-              <span>Latency: ${res.latency ? Number(res.latency).toFixed(2) + 's' : '—'}</span>
-              <span class="tb-e2e-badge" title="${res.e2e_latency != null ? 'DINOv2 Trigger-to-post latency' : 'Normal scheduled heartbeat (no DINO trigger)'}" style="color: ${res.e2e_latency != null ? 'var(--cyan)' : 'var(--text-3)'}; font-weight: 600;">Trig→Post: ${res.e2e_latency != null ? Number(res.e2e_latency).toFixed(2) + 's' : '--'}</span>
-              <span class="badge badge-${sevCls}">${this._esc(res.severity || 'LOW')}</span>
-            </div>
-          </div>
-        `;
-      }
+    const isEnabled = cam.config?.enabled !== false;
+    const topResult = cam.results?.[0];
+    const sev = (topResult?.severity || 'LOW').toUpperCase();
+    const saf = (topResult?.safety || 'OK').toUpperCase();
+    const driftVal = cam.drift !== undefined ? Number(cam.drift).toFixed(4) : '—';
+    const thresh = cam.config?.threshold ?? (this.systemConfig?.default_threshold || 0.033);
+
+    // Fault classification & visual glow rings
+    card.classList.remove('fault-danger', 'fault-drift', 'fault-offline');
+    let statusText = 'LIVE';
+    let statusBadgeClass = 'badge-green';
+
+    if (!isEnabled) {
+      card.classList.add('fault-offline');
+      statusText = 'OFFLINE';
+      statusBadgeClass = 'badge-muted';
+    } else if (sev === 'HIGH' || saf === 'DANGER') {
+      card.classList.add('fault-danger');
+      statusText = '🚨 INCIDENT';
+      statusBadgeClass = 'badge-red';
+    } else if (cam.is_incident || (cam.drift !== undefined && cam.drift >= thresh)) {
+      card.classList.add('fault-drift');
+      statusText = '⚡ SCENE SHIFT';
+      statusBadgeClass = 'badge-cyan';
     } else {
-      modelsHtml = `
-        <div class="tb-model-card" style="opacity: 0.5; display: flex; align-items: center; justify-content: center;">
-          <div class="tb-model-obs" style="margin: 0; text-align: center;">Awaiting Analysis...</div>
+      statusText = '💓 HEALTHY';
+      statusBadgeClass = 'badge-green';
+    }
+
+    // 1. Continuous Live Video Viewport (NEVER static screenshots)
+    const liveSrc = cam.thumbB64
+      ? `data:image/jpeg;base64,${cam.thumbB64}`
+      : `/api/cameras/${encodeURIComponent(name)}/frame?t=${Date.now()}`;
+
+    // 2. Dedicated Event-Based Photos Strip (Trigger sequence captured for AI analysis)
+    let eventPhotosHtml = '';
+    const hasEvents = cam.eventPhotos && cam.eventPhotos.length > 0;
+    if (hasEvents) {
+      const count = cam.eventPhotos.length;
+      const isInc = (sev === 'HIGH' || saf === 'DANGER' || cam.is_incident);
+      const isDrift = (cam.drift !== undefined && cam.drift >= thresh);
+      const tagLabel = isInc ? '🚨 INCIDENT' : (isDrift ? '⚡ SHIFT' : '📸 CAPTURE');
+      const tagCls = isInc ? 'tag-incident' : (isDrift ? 'tag-drift' : 'tag-periodic');
+
+      eventPhotosHtml = `
+        <div class="cam-event-strip">
+          <div class="cam-event-strip-header">
+            <div class="cam-event-title-wrap">
+              <span class="cam-event-icon">📸</span>
+              <span class="cam-event-title">Event Photos</span>
+              <span class="cam-event-count">(${count} captured)</span>
+            </div>
+            <span class="cam-event-tag ${tagCls}">${tagLabel}</span>
+          </div>
+          <div class="cam-event-thumbs-grid">
+            ${cam.eventPhotos.slice(0, 4).map((b64, idx) => `
+              <div class="cam-event-thumb-item" data-cam="${this._esc(name)}" data-idx="${idx}" title="Event Frame #${idx + 1} (t-${count - 1 - idx}) — Click to view in Theater">
+                <img src="data:image/jpeg;base64,${b64}" alt="Event Frame ${idx + 1}" />
+                <span class="cam-event-thumb-badge">t-${count - 1 - idx}</span>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `;
+    } else {
+      eventPhotosHtml = `
+        <div class="cam-card-no-events">
+          <span>📸 Event Photos: No triggers recorded yet</span>
+          <span class="cam-monitoring-pill">● Monitoring</span>
         </div>
       `;
     }
 
-    let imgTag = cam.thumbB64 
-      ? `<img id="tb-img-${this._eid(name)}" src="data:image/jpeg;base64,${cam.thumbB64}" class="tb-cam-img">`
-      : `<div style="aspect-ratio:16/9; background:var(--bg-input); border:1px solid var(--border); border-radius:4px; display:flex; align-items:center; justify-content:center; color:var(--text-3); font-size:13px;">Connecting to camera stream...</div>`;
-    
-    if (cam.thumbnailsB64 && cam.thumbnailsB64.length > 0) {
-      if (cam.thumbnailsB64.length === 1) {
-        imgTag = `<img id="tb-img-${this._eid(name)}" src="data:image/jpeg;base64,${cam.thumbnailsB64[0]}" class="tb-cam-img">`;
-      } else {
-        // Temporal grid of frames
-        const gridHtml = cam.thumbnailsB64.map(b64 => 
-          `<img src="data:image/jpeg;base64,${b64}" style="width: 100%; height: 100%; object-fit: cover; border-radius: 2px;">`
-        ).join('');
-        imgTag = `
-          <div style="display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 4px; aspect-ratio: 16/9; background: var(--bg-input); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; padding: 4px;">
-            ${gridHtml}
-          </div>
-        `;
-      }
-    }
+    const sevCls = { LOW: 'green', MEDIUM: 'amber', HIGH: 'red' }[sev] || 'muted';
+    const safCls = { OK: 'green', WARNING: 'amber', DANGER: 'red' }[saf] || 'muted';
+    const obsText = topResult?.observation || 'Awaiting VLM scene understanding analysis…';
+    const latencyText = topResult?.latency ? `${Number(topResult.latency).toFixed(2)}s` : '—';
+    const e2eText = topResult?.e2e_latency != null ? `${Number(topResult.e2e_latency).toFixed(2)}s` : '--';
+    const hasOverride = !!(this.prompts.cameras?.[name]);
 
-    const driftBadge = (cam.drift !== undefined && cam.drift !== null)
-      ? `<span class="badge badge-muted" style="margin-left: 8px; font-family: monospace;">Drift: ${cam.drift.toFixed(3)}</span>`
-      : '';
-    const incidentBadge = cam.is_incident
-      ? `<span class="badge badge-red" style="margin-left: 6px; animation: pulse 1.5s infinite;">⚡ SCENE TRIGGER</span>`
-      : `<span class="badge badge-green" style="margin-left: 6px;">HEARTBEAT</span>`;
-
-    const camCfg = cam.config || {};
-    const camThresh = camCfg.threshold !== undefined ? camCfg.threshold : (this.systemConfig?.default_threshold || 0.033);
-    const camHb = camCfg.heartbeat_sec !== undefined ? camCfg.heartbeat_sec : (this.systemConfig?.default_heartbeat_sec || 30);
-
-    row.innerHTML = `
-      <div class="tb-cam-col">
-        <div class="tb-cam-title" style="display: flex; align-items: center; flex-wrap: wrap;">
-          <span>${this._esc(name)}</span>
-          ${driftBadge}
-          ${incidentBadge}
+    card.innerHTML = `
+      <div class="cam-card-header">
+        <div class="cam-card-title-wrap">
+          <span class="cam-live-dot" style="${!isEnabled ? 'background:var(--text-3); box-shadow:none;' : ''}"></span>
+          <span class="cam-card-title">${this._esc(name)}</span>
+          ${hasOverride ? `<span title="Custom requirement prompt active" style="color:var(--accent); font-size:0.7rem; font-weight:700; background:var(--accent-glow); padding:1px 5px; border-radius:3px;">✎ CUSTOM</span>` : ''}
         </div>
-        <div class="cam-tune-bar">
-          <label style="display: flex; align-items: center; gap: 4px;" title="DINOv2 Drift Threshold for incident triggers">
-            <span style="color: var(--amber); font-weight: 600;">⚡ Thresh:</span>
-            <input type="number" step="0.005" min="0.005" max="0.5" value="${camThresh}" class="tune-input inline-cam-thresh" data-cam="${this._esc(name)}">
-          </label>
-          <label style="display: flex; align-items: center; gap: 4px;" title="Mandatory analysis interval in seconds">
-            <span style="color: var(--green); font-weight: 600;">💓 Sync:</span>
-            <input type="number" step="5" min="5" max="600" value="${camHb}" class="tune-input inline-cam-hb" data-cam="${this._esc(name)}">s
-          </label>
-          <span class="inline-save-ind" id="ind-${this._eid(name)}" style="font-size: 0.68rem; color: var(--green); margin-left: auto; display: none;">Saved</span>
+        <div class="cam-card-header-tags">
+          <span class="cam-drift-badge" title="DINOv2 Drift Cosine Metric">⚡ ${driftVal}</span>
+          <span class="badge ${statusBadgeClass} badge-sm">${statusText}</span>
         </div>
-        ${imgTag}
       </div>
-      <div class="tb-models-grid">
-        ${modelsHtml}
+
+      <div class="cam-card-video" id="cam-video-${this._eid(name)}">
+        <img id="cam-card-img-${this._eid(name)}" src="${liveSrc}" class="cam-card-img" alt="${this._esc(name)}" onerror="this.style.opacity='0.4'">
+        <div class="cam-live-indicator">
+          <span class="cam-live-dot ${isEnabled ? 'pulsing' : 'offline'}"></span>
+          <span>${isEnabled ? 'LIVE RTSP' : 'OFFLINE'}</span>
+        </div>
+        <div class="cam-hover-overlay">
+          <span>🔍 Inspect Live Feed &amp; Set Prompts</span>
+        </div>
+      </div>
+
+      ${eventPhotosHtml}
+
+      <div class="cam-card-info">
+        <div class="cam-card-badges-row">
+          <div style="display: flex; gap: 4px;">
+            <span class="badge badge-${safCls} badge-sm">🛡 ${saf}</span>
+            <span class="badge badge-${sevCls} badge-sm">⚠ ${sev}</span>
+          </div>
+          <span style="font-size: 0.68rem; color: var(--text-3); font-family: var(--font-mono);">
+            ${topResult?.workers ? `👷 ${this._esc(topResult.workers)}` : ''}
+          </span>
+        </div>
+        <p class="cam-card-obs" title="${this._esc(obsText)}">${this._esc(obsText)}</p>
+        <div class="cam-card-footer">
+          <span>Infer: ${latencyText}</span>
+          <span title="DINOv2 Trigger-to-post latency" style="color:${topResult?.e2e_latency != null ? 'var(--cyan)' : 'var(--text-3)'}; font-weight:600;">
+            Trig→Post: ${e2eText}
+          </span>
+        </div>
       </div>
     `;
 
-    // Bind inline quick tune inputs
-    const inpThresh = row.querySelector('.inline-cam-thresh');
-    const inpHb = row.querySelector('.inline-cam-hb');
-    const ind = row.querySelector(`#ind-${this._eid(name)}`);
-    const saveTune = async () => {
-      const t = parseFloat(inpThresh?.value);
-      const h = parseFloat(inpHb?.value);
-      const currentCfg = { ...(this.cameras[name]?.config || { name: name, url: '' }) };
-      if (!isNaN(t)) currentCfg.threshold = t;
-      if (!isNaN(h)) currentCfg.heartbeat_sec = h;
-      this.cameras[name].config = currentCfg;
-      await this._apiUpsertCamera(currentCfg);
-      if (ind) {
-        ind.style.display = 'inline';
-        setTimeout(() => { ind.style.display = 'none'; }, 2000);
-      }
-    };
-    inpThresh?.addEventListener('change', saveTune);
-    inpHb?.addEventListener('change', saveTune);
-    
-    // Double buffering for non-flicker update if image already exists
-    if (imgSrc) {
-       const existingImg = document.getElementById(`tb-img-${this._eid(name)}`);
-       if (existingImg && existingImg.src !== imgSrc) {
-           const tempImg = new Image();
-           tempImg.onload = () => { existingImg.src = imgSrc; };
-           tempImg.src = imgSrc;
-       }
+    // Click handlers: Video or header/footer clicks open Live Stream Theater
+    const videoEl = card.querySelector('.cam-card-video');
+    if (videoEl) {
+      videoEl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this._openCamModal(name, null); // Live stream mode
+      });
+    }
+
+    const headerEl = card.querySelector('.cam-card-header');
+    if (headerEl) {
+      headerEl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this._openCamModal(name, null);
+      });
+    }
+
+    const infoEl = card.querySelector('.cam-card-info');
+    if (infoEl) {
+      infoEl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this._openCamModal(name, null);
+      });
+    }
+
+    // Click handlers: Clicking any event photo thumbnail opens that specific event photo in Theater!
+    card.querySelectorAll('.cam-event-thumb-item').forEach(thumb => {
+      thumb.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const idx = parseInt(thumb.getAttribute('data-idx'), 10);
+        this._openCamModal(name, idx); // Event photo inspection mode
+      });
+    });
+
+    // If modal is open for this camera, refresh its live frame/stats
+    if (this.activeCamModal === name) {
+      this._updateModalLiveContent(name);
     }
   },
 
+  // Legacy aliases for backward compatibility
+  _renderTbRow(name) { this._renderCamCard(name); },
+  _renderSidebar() { this._renderCameraGrid(); },
 
-  _applyFilter(card, name) {
-    const f = this.activeFilter;
-    if (f === 'all') { card.style.display = ''; return; }
-    const cam = this.cameras[name];
-    const sev = cam?.result?.severity?.toUpperCase() || 'LOW';
-    const act = cam?.result?.activity?.toUpperCase() || 'UNKNOWN';
-    let show = false;
-    if (f === 'high'   && sev === 'HIGH')   show = true;
-    if (f === 'medium' && sev === 'MEDIUM')  show = true;
-    if (f === 'active' && act === 'ACTIVE')  show = true;
-    card.style.display = show ? '' : 'none';
+  _applyFilter() {
+    this._renderCameraGrid();
   },
 
   // ════════════════════════════════════════════════════════════
   //  Alerts
   // ════════════════════════════════════════════════════════════
-  _renderAlert(alert, animate) {
+  _renderAlert(alert, animate = false) {
     const feed = document.getElementById('alerts-feed');
     if (!feed) return;
 
@@ -503,84 +641,276 @@ const App = {
     const ts  = alert.ts ? new Date(alert.ts * 1000).toLocaleTimeString() : '—';
     const sevCls = { low: 'green', medium: 'amber', high: 'red' }[sev] || 'muted';
 
+    let faultTagHtml = `<span class="alert-fault-tag fault-tag-incident">AI INCIDENT</span>`;
+    if (alert.is_drift) {
+      faultTagHtml = `<span class="alert-fault-tag fault-tag-drift">SCENE SHIFT</span>`;
+    } else if (alert.is_fault) {
+      faultTagHtml = `<span class="alert-fault-tag fault-tag-offline">FEED FAULT</span>`;
+    }
+
     const item = document.createElement('div');
-    item.className = `alert-item sev-${sev}${animate ? ' alert-enter' : ''}`;
-    item.style.cursor = 'pointer';
-    item.title = 'Click to expand';
+    item.className = `alert-item sev-${alert.is_drift ? 'drift' : sev}${animate ? ' alert-enter' : ''}`;
+    item.setAttribute('data-sev', sev);
+    item.setAttribute('data-is-drift', alert.is_drift ? 'true' : 'false');
+    item.title = 'Click to open camera inspection & prompt controls';
     item.innerHTML = `
       <div class="alert-header">
-        <span class="alert-cam">${this._esc(alert.cam)}</span>
-        <span class="badge badge-${sevCls} badge-sm">⚠ ${sev.toUpperCase()}</span>
+        <span class="alert-cam">${this._esc(alert.cam || 'System')}</span>
+        ${faultTagHtml}
+        <span class="badge badge-${sevCls} badge-sm">${sev.toUpperCase()}</span>
         <span class="alert-ts">${ts}</span>
       </div>
-      ${alert.thumbnail_b64 ? `<img class="alert-thumb" src="data:image/jpeg;base64,${alert.thumbnail_b64}" alt="">` : ''}
-      <p class="alert-obs">${this._esc((alert.observation || '').slice(0, 120))}${(alert.observation || '').length > 120 ? '…' : ''}</p>
+      ${alert.thumbnail_b64 ? `
+        <div class="alert-thumb-wrap" style="position:relative; margin-bottom:6px;">
+          <img class="alert-thumb" src="data:image/jpeg;base64,${alert.thumbnail_b64}" alt="Event photo" style="margin-bottom:0;">
+          <span style="position:absolute; bottom:4px; right:4px; background:rgba(0,0,0,0.78); color:#f1f5f9; font-size:0.58rem; font-family:var(--font-mono); font-weight:600; padding:1px 5px; border-radius:3px;">📸 Event Photo</span>
+        </div>
+      ` : ''}
+      <p class="alert-obs">${this._esc(alert.observation || '—')}</p>
     `;
 
-    item.addEventListener('click', () => this.openAlertModal(alert));
+    item.addEventListener('click', () => {
+      this.openAlertModal(alert);
+    });
 
     if (animate && sev === 'high') {
       item.classList.add('alert-shake');
       setTimeout(() => item.classList.remove('alert-shake'), 800);
     }
 
+    // Filter check
+    const af = this.activeAlertFilter || 'all';
+    if (af === 'high' && sev !== 'high') item.style.display = 'none';
+    else if (af === 'medium' && sev !== 'medium') item.style.display = 'none';
+    else if (af === 'drift' && !alert.is_drift) item.style.display = 'none';
+
     feed.insertBefore(item, feed.firstChild);
 
-    // Cap DOM at 60 items
-    while (feed.children.length > 60) feed.removeChild(feed.lastChild);
+    while (feed.children.length > 80) feed.removeChild(feed.lastChild);
+  },
 
-    this.alertCount++;
-    this._syncAlertCount();
+  _applyAlertFilter() {
+    const af = this.activeAlertFilter || 'all';
+    const items = document.querySelectorAll('#alerts-feed .alert-item');
+    let visible = 0;
+    items.forEach(item => {
+      const sev = item.getAttribute('data-sev');
+      const isDrift = item.getAttribute('data-is-drift') === 'true';
+      let show = false;
+      if (af === 'all') show = true;
+      else if (af === 'high' && sev === 'high') show = true;
+      else if (af === 'medium' && sev === 'medium') show = true;
+      else if (af === 'drift' && isDrift) show = true;
+
+      item.style.display = show ? '' : 'none';
+      if (show) visible++;
+    });
+    const empty = document.getElementById('alerts-empty');
+    if (empty && items.length > 0) {
+      empty.style.display = visible === 0 ? 'flex' : 'none';
+    }
+  },
+
+  _timeAgo(epochTs) {
+    if (!epochTs) return '';
+    const sec = Math.max(1, Math.floor(Date.now() / 1000 - epochTs));
+    if (sec < 60) return `${sec}s ago`;
+    const min = Math.floor(sec / 60);
+    if (min < 60) return `${min}m ago`;
+    const hrs = Math.floor(min / 60);
+    if (hrs < 24) return `${hrs}h ago`;
+    const days = Math.floor(hrs / 24);
+    return `${days}d ago`;
   },
 
   openAlertModal(alert) {
-    const sev    = (alert.severity || 'LOW').toLowerCase();
-    const safety = (alert.safety  || '').toLowerCase();
-    const ts     = alert.ts ? new Date(alert.ts * 1000).toLocaleString() : '—';
+    if (!alert) return;
+    this.activeAlert = alert;
+
+    const sev = (alert.severity || 'LOW').toLowerCase();
+    const safety = (alert.safety || '').toLowerCase();
+    const ts = alert.ts ? new Date(alert.ts * 1000).toLocaleTimeString() : '—';
+    const fullDate = alert.ts ? new Date(alert.ts * 1000).toLocaleDateString() : '';
+    const timeAgo = alert.ts ? this._timeAgo(alert.ts) : '';
     const sevCls = { low: 'green', medium: 'amber', high: 'red' }[sev] || 'muted';
     const safeCls = { danger: 'red', warning: 'amber', ok: 'green' }[safety] || 'muted';
 
-    document.getElementById('alert-modal-cam').textContent = alert.cam || 'Alert';
-    document.getElementById('alert-modal-ts').textContent = ts;
-    document.getElementById('alert-modal-obs').textContent = alert.observation || '—';
+    // Header info
+    document.getElementById('alert-modal-cam').textContent = alert.cam || 'System Alert';
+    document.getElementById('alert-modal-ts').textContent = `${fullDate} ${ts} • ${timeAgo}`;
 
-    // Badges
+    const typeBadge = document.getElementById('alert-modal-badge-type');
+    if (typeBadge) {
+      if (alert.is_drift) {
+        typeBadge.textContent = '⚡ SCENE SHIFT';
+        typeBadge.className = 'badge badge-cyan';
+      } else if (sev === 'high') {
+        typeBadge.textContent = '🚨 HIGH INCIDENT';
+        typeBadge.className = 'badge badge-red';
+      } else {
+        typeBadge.textContent = '⚠️ AI ALERT';
+        typeBadge.className = 'badge badge-amber';
+      }
+    }
+
+    const sevBadge = document.getElementById('alert-modal-badge-sev');
+    if (sevBadge) {
+      sevBadge.textContent = `SEV: ${sev.toUpperCase()}`;
+      sevBadge.className = `badge badge-${sevCls}`;
+    }
+
+    // Observation of THIS particular alert
+    document.getElementById('alert-modal-obs').textContent = alert.observation || 'No observation recorded for this alert.';
+
+    // Badges of THIS particular alert
     const badges = document.getElementById('alert-modal-badges');
-    badges.innerHTML = [
-      `<span class="badge badge-${sevCls}">⚠ ${sev.toUpperCase()}</span>`,
-      alert.safety ? `<span class="badge badge-${safeCls}">🛡 ${alert.safety}</span>` : '',
-      alert.activity ? `<span class="badge badge-muted">${this._esc(alert.activity)}</span>` : '',
-    ].join('');
+    if (badges) {
+      badges.innerHTML = [
+        `<span class="badge badge-${sevCls}">⚠ ${sev.toUpperCase()}</span>`,
+        alert.safety ? `<span class="badge badge-${safeCls}">🛡 ${this._esc(alert.safety)}</span>` : '',
+        alert.activity && alert.activity !== 'UNKNOWN' ? `<span class="badge badge-muted">⚡ ${this._esc(alert.activity)}</span>` : '',
+        alert.workers && alert.workers !== '0' && alert.workers !== '—' ? `<span class="badge badge-neutral">👷 ${this._esc(alert.workers)} workers</span>` : '',
+      ].filter(Boolean).join(' ');
+    }
 
-    // Meta
+    // Metadata of THIS particular alert
     const meta = document.getElementById('alert-modal-meta');
-    const rows = [
-      ['Workers', alert.workers],
-      ['Machinery', alert.machinery],
-      ['VLM Latency', alert.latency != null ? `${Number(alert.latency).toFixed(2)}s` : null],
-      ['Trigger→Post', alert.e2e_latency != null ? `${Number(alert.e2e_latency).toFixed(2)}s` : '--'],
-    ].filter(([, v]) => v && v !== 'None' && v !== '0');
-    meta.innerHTML = rows.map(([k, v]) => `<div><strong>${k}:</strong> ${this._esc(String(v))}</div>`).join('');
+    if (meta) {
+      const rows = [
+        ['Alert Type', alert.is_drift ? 'DINOv2 Scene Drift Shift' : (alert.is_incident ? 'AI Incident Trigger' : 'Cosmos VLM Alert')],
+        ['Camera Feed', alert.cam],
+        ['Detected At', alert.ts ? new Date(alert.ts * 1000).toLocaleString() : '—'],
+        ['Workers Present', alert.workers && alert.workers !== '0' ? alert.workers : null],
+        ['Machinery', alert.machinery && alert.machinery !== 'None' ? alert.machinery : null],
+        ['Cosmos Model', alert.model || 'vrfai/Cosmos-Reason2-8B-NVFP4'],
+        ['Evolution', alert.evolution && alert.evolution !== 'None' ? alert.evolution : null],
+      ].filter(([, v]) => v != null);
+      meta.innerHTML = rows.map(([k, v]) => `<div><strong>${k}:</strong> ${this._esc(String(v))}</div>`).join('');
+    }
 
-    // Thumbnail
-    const img   = document.getElementById('alert-modal-img');
+    // Diagnostic bar for THIS particular alert
+    this._setText('alert-stat-drift', alert.drift != null ? Number(alert.drift).toFixed(4) : '—');
+    this._setText('alert-stat-latency', alert.latency != null ? `${Number(alert.latency).toFixed(2)}s` : '—');
+    this._setText('alert-stat-e2e', alert.e2e_latency != null ? `${Number(alert.e2e_latency).toFixed(2)}s` : '--');
+    this._setText('alert-stat-safety', alert.safety || (alert.is_drift ? 'WARNING' : '—'));
+
+    // Primary Image for THIS particular alert
+    const img = document.getElementById('alert-modal-img');
     const noThumb = document.getElementById('alert-modal-no-thumb');
-    if (alert.thumbnail_b64) {
-      img.src = `data:image/jpeg;base64,${alert.thumbnail_b64}`;
+    const indicator = document.getElementById('alert-modal-indicator');
+    if (indicator) {
+      indicator.innerHTML = `📸 CAPTURED AT INCIDENT (${alert.cam || 'Camera'})`;
+    }
+
+    const primaryThumb = alert.thumbnail_b64 || (alert.thumbnails_b64 && alert.thumbnails_b64[0]);
+    if (primaryThumb) {
+      img.src = `data:image/jpeg;base64,${primaryThumb}`;
       img.style.display = 'block';
-      noThumb.style.display = 'none';
+      if (noThumb) noThumb.style.display = 'none';
     } else {
       img.style.display = 'none';
-      noThumb.style.display = 'flex';
+      if (noThumb) noThumb.style.display = 'flex';
+    }
+
+    // Multi-frame Sequence for THIS particular alert (if available)
+    const framesWrap = document.getElementById('alert-modal-frames-wrap');
+    const framesStrip = document.getElementById('alert-modal-frames-strip');
+    if (framesWrap && framesStrip) {
+      if (alert.thumbnails_b64 && alert.thumbnails_b64.length > 1) {
+        framesWrap.style.display = 'block';
+        framesStrip.innerHTML = '';
+        const count = alert.thumbnails_b64.length;
+        const labels = ['t -4.0s (Before)', 't -1.0s (Trigger)', 't +1.5s (Action)', 't +3.5s (Outcome)'];
+        alert.thumbnails_b64.forEach((b64, idx) => {
+          const thumbWrap = document.createElement('div');
+          thumbWrap.className = `temporal-strip-thumb-wrap ${idx === 0 ? 'active' : ''}`;
+          const labelText = labels[idx] || `Frame ${idx + 1} (t-${count - 1 - idx})`;
+          thumbWrap.title = `${labelText} — Click to inspect`;
+          thumbWrap.innerHTML = `
+            <img src="data:image/jpeg;base64,${b64}" class="temporal-strip-thumb" alt="${labelText}">
+            <span class="temporal-strip-label">${labelText}</span>
+          `;
+          thumbWrap.addEventListener('click', () => {
+            img.src = `data:image/jpeg;base64,${b64}`;
+            framesStrip.querySelectorAll('.temporal-strip-thumb-wrap').forEach(w => w.classList.remove('active'));
+            thumbWrap.classList.add('active');
+            if (indicator) {
+              indicator.innerHTML = `📸 INCIDENT FRAME #${idx + 1} • ${labelText}`;
+            }
+          });
+          framesStrip.appendChild(thumbWrap);
+        });
+      } else {
+        framesWrap.style.display = 'none';
+      }
+    }
+
+    // Render RELATED ALERTS for this camera
+    this._renderRelatedAlerts(alert);
+
+    // Wire up "Switch to Live Feed" button
+    const jumpBtn = document.getElementById('btn-alert-jump-live');
+    if (jumpBtn) {
+      jumpBtn.onclick = () => {
+        this.closeAlertModal();
+        if (alert.cam) this._openCamModal(alert.cam, null);
+      };
     }
 
     document.getElementById('alert-modal-backdrop').hidden = false;
     document.getElementById('alert-modal').hidden = false;
   },
 
+  _renderRelatedAlerts(currentAlert) {
+    const listEl = document.getElementById('alert-related-list');
+    const countBadge = document.getElementById('alert-related-count');
+    if (!listEl) return;
+
+    const related = this.alerts.filter(a =>
+      a.cam === currentAlert.cam &&
+      (a.id ? a.id !== currentAlert.id : (a.ts !== currentAlert.ts || a.observation !== currentAlert.observation))
+    );
+
+    if (countBadge) {
+      countBadge.textContent = `${related.length} Related`;
+    }
+
+    if (related.length === 0) {
+      listEl.innerHTML = `<div class="alert-related-empty">No other recorded alerts on ${this._esc(currentAlert.cam || 'this camera')}.</div>`;
+      return;
+    }
+
+    listEl.innerHTML = '';
+    for (const r of related) {
+      const item = document.createElement('div');
+      item.className = 'alert-related-item';
+      const sev = (r.severity || 'LOW').toLowerCase();
+      const rSevCls = { low: 'green', medium: 'amber', high: 'red' }[sev] || 'muted';
+      const rTs = r.ts ? new Date(r.ts * 1000).toLocaleTimeString() : '—';
+      const tag = r.is_drift ? '⚡ SHIFT' : (sev === 'high' ? '🚨 INCIDENT' : '⚠️ ALERT');
+
+      item.innerHTML = `
+        ${r.thumbnail_b64 ? `<img src="data:image/jpeg;base64,${r.thumbnail_b64}" class="alert-related-thumb" alt="">` : ''}
+        <div class="alert-related-info">
+          <div class="alert-related-row">
+            <span class="badge badge-${rSevCls} badge-sm">${tag}</span>
+            <span class="alert-related-ts">${rTs}</span>
+          </div>
+          <span class="alert-related-obs" title="${this._esc(r.observation || '')}">${this._esc(r.observation || '—')}</span>
+        </div>
+      `;
+      item.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.openAlertModal(r);
+      });
+      listEl.appendChild(item);
+    }
+  },
+
   closeAlertModal() {
     document.getElementById('alert-modal-backdrop').hidden = true;
     document.getElementById('alert-modal').hidden = true;
+    this.activeAlert = null;
   },
 
   _syncAlertCount() {
@@ -632,74 +962,233 @@ const App = {
   },
 
   // ════════════════════════════════════════════════════════════
-  //  Modal
+  //  Camera Theater Modal & Prompt Controls
   // ════════════════════════════════════════════════════════════
-  _openModal(name) {
+  _openCamModal(name, selectedEventIdx = null) {
     const cam = this.cameras[name];
     if (!cam) return;
 
+    this.activeCamModal = name;
+    this.modalViewMode = (selectedEventIdx !== null) ? 'event' : 'live';
+    this.selectedEventIdx = selectedEventIdx;
+
+    const modal = document.getElementById('cam-modal');
+    const backdrop = document.getElementById('modal-backdrop');
+    if (!modal || !backdrop) return;
+
     document.getElementById('modal-cam-name').textContent = name;
+    this._updateModalFrameView(name);
+    this._updateModalLiveContent(name);
 
-    const ts = cam.lastTs ? new Date(cam.lastTs * 1000).toLocaleTimeString() : '—';
-    document.getElementById('modal-cam-ts').textContent = `Last analysis: ${ts}`;
-
-    // Load full-res frame via REST
-    const img  = document.getElementById('modal-frame');
-    const loading = document.getElementById('modal-frame-loading');
-    img.style.display = 'none';
-    loading.style.display = 'flex';
-    fetch(`/api/cameras/${encodeURIComponent(name)}/frame?width=1280`)
-      .then(r => r.ok ? r.blob() : null)
-      .then(blob => {
-        if (!blob) return;
-        img.src = URL.createObjectURL(blob);
-        img.style.display = 'block';
-        loading.style.display = 'none';
-      })
-      .catch(() => { loading.textContent = 'Frame unavailable'; });
-
-    // Analysis
-    const result = cam.result;
-    const badgesEl = document.getElementById('modal-badges');
-    const obsEl    = document.getElementById('modal-obs');
-    const metaEl   = document.getElementById('modal-meta');
-
-    if (result) {
-      const sev = (result.severity || 'LOW').toUpperCase();
-      const saf = (result.safety   || 'UNKNOWN').toUpperCase();
-      const act = (result.activity || 'UNKNOWN').toUpperCase();
-      const actCls = { ACTIVE: 'green', IDLE: 'amber', UNKNOWN: 'muted' }[act] || 'muted';
-      const safCls = { OK: 'green', WARNING: 'amber', DANGER: 'red', UNKNOWN: 'muted' }[saf] || 'muted';
-      const sevCls = { LOW: 'green', MEDIUM: 'amber', HIGH: 'red' }[sev] || 'muted';
-      badgesEl.innerHTML = `
-        <span class="badge badge-${actCls}">⚡ ${act}</span>
-        <span class="badge badge-neutral">👷 ${this._esc(result.workers || '0')} workers</span>
-        <span class="badge badge-${safCls}">🛡 ${saf}</span>
-        <span class="badge badge-${sevCls}">⚠ ${sev}</span>
-      `;
-      obsEl.textContent = result.observation || '—';
-      metaEl.innerHTML = `
-        <span>Latency: ${result.latency != null ? Number(result.latency).toFixed(2) + 's' : '—'}</span>
-        <span style="color: ${result.e2e_latency != null ? 'var(--cyan)' : 'var(--text-3)'}; font-weight: 500;">Trig→Post: ${result.e2e_latency != null ? Number(result.e2e_latency).toFixed(2) + 's' : '--'}</span>
-        ${result.machinery && result.machinery !== 'None' ? `<span>Machinery: ${this._esc(result.machinery)}</span>` : ''}
-        <span>At: ${result.ts ? new Date(result.ts * 1000).toLocaleString() : '—'}</span>
-      `;
-    } else {
-      badgesEl.innerHTML = '';
-      obsEl.textContent = 'No analysis yet';
-      metaEl.innerHTML = '';
+    // Populate Per-Camera Prompt Override
+    const promptTa = document.getElementById('modal-cam-prompt-ta');
+    const promptStatusTag = document.getElementById('modal-prompt-status-tag');
+    const currentOverride = this.prompts.cameras?.[name] || '';
+    if (promptTa) promptTa.value = currentOverride;
+    if (promptStatusTag) {
+      if (currentOverride) {
+        promptStatusTag.textContent = 'CUSTOM OVERRIDE';
+        promptStatusTag.className = 'badge badge-accent';
+      } else {
+        promptStatusTag.textContent = 'INHERITING MASTER';
+        promptStatusTag.className = 'badge badge-muted';
+      }
     }
 
-    document.getElementById('modal-backdrop').removeAttribute('hidden');
-    document.getElementById('cam-modal').removeAttribute('hidden');
+    // Populate Quick Tune Fields
+    const camCfg = cam.config || {};
+    const inpThresh = document.getElementById('modal-cam-thresh');
+    const inpHb = document.getElementById('modal-cam-hb');
+    if (inpThresh) inpThresh.value = camCfg.threshold !== undefined ? camCfg.threshold : (this.systemConfig?.default_threshold || 0.033);
+    if (inpHb) inpHb.value = camCfg.heartbeat_sec !== undefined ? camCfg.heartbeat_sec : (this.systemConfig?.default_heartbeat_sec || 30);
+
+    backdrop.removeAttribute('hidden');
+    modal.removeAttribute('hidden');
+  },
+
+  _updateModalFrameView(name) {
+    const cam = this.cameras[name];
+    if (!cam) return;
+
+    const img = document.getElementById('modal-frame');
+    const loading = document.getElementById('modal-frame-loading');
+    const liveIndicator = document.getElementById('modal-live-indicator');
+    const btnReturnLive = document.getElementById('btn-modal-return-live');
+    const btnLive = document.getElementById('modal-btn-live');
+    const btnEvents = document.getElementById('modal-btn-events');
+
+    if (this.modalViewMode === 'event' && cam.eventPhotos && cam.eventPhotos.length > 0) {
+      const idx = (this.selectedEventIdx != null && this.selectedEventIdx < cam.eventPhotos.length)
+        ? this.selectedEventIdx
+        : (cam.eventPhotos.length - 1);
+      const b64 = cam.eventPhotos[idx];
+      if (img) {
+        img.src = `data:image/jpeg;base64,${b64}`;
+        img.style.display = 'block';
+      }
+      if (loading) loading.style.display = 'none';
+      if (liveIndicator) {
+        liveIndicator.innerHTML = `📸 EVENT FRAME #${idx + 1} (t-${cam.eventPhotos.length - 1 - idx})`;
+        liveIndicator.className = 'stream-live-indicator event-mode';
+      }
+      if (btnReturnLive) btnReturnLive.style.display = 'inline-flex';
+      if (btnLive) btnLive.classList.remove('active');
+      if (btnEvents) btnEvents.classList.add('active');
+    } else {
+      this.modalViewMode = 'live';
+      this.selectedEventIdx = null;
+      if (img) {
+        if (cam.thumbB64) {
+          img.src = `data:image/jpeg;base64,${cam.thumbB64}`;
+          img.style.display = 'block';
+          if (loading) loading.style.display = 'none';
+        } else {
+          img.src = `/api/cameras/${encodeURIComponent(name)}/frame?t=${Date.now()}`;
+          img.style.display = 'block';
+          if (loading) loading.style.display = 'none';
+        }
+      }
+      if (liveIndicator) {
+        liveIndicator.innerHTML = `<span class="live-pulse-dot"></span> LIVE RTSP`;
+        liveIndicator.className = 'stream-live-indicator';
+      }
+      if (btnReturnLive) btnReturnLive.style.display = 'none';
+      if (btnLive) btnLive.classList.add('active');
+      if (btnEvents) btnEvents.classList.remove('active');
+
+      // Refresh full-resolution snapshot in parallel
+      fetch(`/api/cameras/${encodeURIComponent(name)}/frame?width=1280`)
+        .then(r => r.ok ? r.blob() : null)
+        .then(blob => {
+          if (!blob || this.activeCamModal !== name || this.modalViewMode !== 'live') return;
+          if (img) img.src = URL.createObjectURL(blob);
+        })
+        .catch(() => {});
+    }
+  },
+
+  _updateModalLiveContent(name) {
+    const cam = this.cameras[name];
+    if (!cam) return;
+
+    const isEnabled = cam.config?.enabled !== false;
+    const topResult = cam.results?.[0] || cam.result;
+    const sev = (topResult?.severity || 'LOW').toUpperCase();
+    const saf = (topResult?.safety || 'OK').toUpperCase();
+    const act = (topResult?.activity || 'UNKNOWN').toUpperCase();
+
+    // Badges in title row
+    const statusBadge = document.getElementById('modal-cam-status');
+    if (statusBadge) {
+      if (!isEnabled) {
+        statusBadge.textContent = 'OFFLINE';
+        statusBadge.className = 'badge badge-muted';
+      } else if (cam.is_incident) {
+        statusBadge.textContent = '⚡ SCENE TRIGGER';
+        statusBadge.className = 'badge badge-red';
+      } else {
+        statusBadge.textContent = 'LIVE STREAM';
+        statusBadge.className = 'badge badge-green';
+      }
+    }
+
+    const driftBadge = document.getElementById('modal-cam-drift-badge');
+    if (driftBadge) {
+      driftBadge.textContent = `Drift: ${cam.drift !== undefined ? Number(cam.drift).toFixed(4) : '0.000'}`;
+    }
+
+    const ts = cam.lastTs ? new Date(cam.lastTs * 1000).toLocaleTimeString() : '—';
+    const tsEl = document.getElementById('modal-cam-ts');
+    if (tsEl) tsEl.textContent = `Last analysis: ${ts}`;
+
+    // Event Photos counter
+    const countBadge = document.getElementById('modal-event-photos-count');
+    if (countBadge) {
+      countBadge.textContent = `${cam.eventPhotos?.length || 0}`;
+    }
+
+    // Temporal / Event Photos Strip
+    const strip = document.getElementById('modal-temporal-strip');
+    if (strip) {
+      strip.innerHTML = '';
+      if (cam.eventPhotos && cam.eventPhotos.length > 0) {
+        const count = cam.eventPhotos.length;
+        cam.eventPhotos.forEach((b64, idx) => {
+          const isSelected = (this.modalViewMode === 'event' && this.selectedEventIdx === idx);
+          const thumbWrap = document.createElement('div');
+          thumbWrap.className = `temporal-strip-thumb-wrap ${isSelected ? 'active' : ''}`;
+          thumbWrap.title = `Event Photo #${idx + 1} (t-${count - 1 - idx}) — Click to inspect`;
+          thumbWrap.innerHTML = `
+            <img src="data:image/jpeg;base64,${b64}" class="temporal-strip-thumb" alt="Event Frame ${idx + 1}">
+            <span class="temporal-strip-label">Frame ${idx + 1} (t-${count - 1 - idx})</span>
+          `;
+          thumbWrap.addEventListener('click', () => {
+            this.modalViewMode = 'event';
+            this.selectedEventIdx = idx;
+            this._updateModalFrameView(name);
+            this._updateModalLiveContent(name);
+          });
+          strip.appendChild(thumbWrap);
+        });
+      } else {
+        strip.innerHTML = `<div class="temporal-strip-empty">No trigger event photos captured for this feed yet.</div>`;
+      }
+    }
+
+    // Diagnostic bar
+    this._setText('modal-stat-drift', cam.drift !== undefined ? Number(cam.drift).toFixed(4) : '—');
+    this._setText('modal-stat-latency', topResult?.latency != null ? `${Number(topResult.latency).toFixed(2)}s` : '—');
+    this._setText('modal-stat-e2e', topResult?.e2e_latency != null ? `${Number(topResult.e2e_latency).toFixed(2)}s` : '--');
+    this._setText('modal-stat-safety', saf);
+
+    // Scene understanding badges
+    const sevBadge = document.getElementById('modal-scene-sev');
+    if (sevBadge) {
+      const sevCls = { LOW: 'green', MEDIUM: 'amber', HIGH: 'red' }[sev] || 'muted';
+      sevBadge.textContent = `⚠ ${sev}`;
+      sevBadge.className = `badge badge-${sevCls}`;
+    }
+
+    const badgesEl = document.getElementById('modal-badges');
+    if (badgesEl) {
+      const actCls = { ACTIVE: 'green', IDLE: 'amber', UNKNOWN: 'muted' }[act] || 'muted';
+      const safCls = { OK: 'green', WARNING: 'amber', DANGER: 'red' }[saf] || 'muted';
+      badgesEl.innerHTML = `
+        <span class="badge badge-${actCls}">⚡ ${act}</span>
+        <span class="badge badge-neutral">👷 ${this._esc(topResult?.workers || '0')} workers</span>
+        <span class="badge badge-${safCls}">🛡 ${saf}</span>
+      `;
+    }
+
+    // Observation
+    const obsEl = document.getElementById('modal-obs');
+    if (obsEl) {
+      obsEl.textContent = topResult?.observation || 'No VLM analysis received yet.';
+    }
+
+    // Meta
+    const metaEl = document.getElementById('modal-meta');
+    if (metaEl && topResult) {
+      metaEl.innerHTML = `
+        <span>Model: ${this._esc(topResult.model || 'Cosmos-Nemotron')}</span>
+        ${topResult.machinery && topResult.machinery !== 'None' ? `<span>Machinery: ${this._esc(topResult.machinery)}</span>` : ''}
+        ${topResult.evolution && topResult.evolution !== 'None' ? `<span>Evolution: ${this._esc(topResult.evolution)}</span>` : ''}
+        <span>Timestamp: ${topResult.ts ? new Date(topResult.ts * 1000).toLocaleString() : '—'}</span>
+      `;
+    }
+  },
+
+  _openModal(name) {
+    this._openCamModal(name);
   },
 
   _closeModal() {
-    document.getElementById('modal-backdrop').setAttribute('hidden', '');
-    document.getElementById('cam-modal').setAttribute('hidden', '');
+    this.activeCamModal = null;
+    document.getElementById('modal-backdrop')?.setAttribute('hidden', '');
+    document.getElementById('cam-modal')?.setAttribute('hidden', '');
     const img = document.getElementById('modal-frame');
-    if (img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
-    img.src = '';
+    if (img && img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
+    if (img) img.src = '';
   },
 
   // ════════════════════════════════════════════════════════════
@@ -895,9 +1384,9 @@ const App = {
   },
 
   _syncEmptyState() {
-    const empty = document.getElementById('empty-cameras');
+    const empty = document.getElementById('empty-camera-grid');
     if (!empty) return;
-    empty.style.display = Object.keys(this.cameras).length === 0 ? '' : 'none';
+    empty.style.display = Object.keys(this.cameras).length === 0 ? 'flex' : 'none';
   },
 
   _flashSaveFeedback(id, msg) {
@@ -1181,25 +1670,6 @@ const App = {
       if (e.key === 'Enter') this._addCamera();
     });
 
-    // Sidebar view controls (All / None)
-    document.getElementById('btn-sidebar-select-all')?.addEventListener('click', () => {
-      document.querySelectorAll('.cam-checkbox-label input').forEach(cb => {
-        cb.checked = true;
-        const cam = cb.dataset.cam;
-        if (cam) this._renderTbRow(cam);
-      });
-      this._syncTbEmptyState();
-    });
-
-    document.getElementById('btn-sidebar-clear-all')?.addEventListener('click', () => {
-      document.querySelectorAll('.cam-checkbox-label input').forEach(cb => {
-        cb.checked = false;
-        const cam = cb.dataset.cam;
-        if (cam) document.getElementById(`tb-row-${this._eid(cam)}`)?.remove();
-      });
-      this._syncTbEmptyState();
-    });
-
     // Batch Camera actions in Settings (Enable All / Disable All)
     document.getElementById('btn-enable-all-cams')?.addEventListener('click', async () => {
       const cams = Object.values(this.cameras).map(c => ({
@@ -1297,18 +1767,192 @@ const App = {
       if (ta) ta.value = name ? (this.prompts.cameras?.[name] || '') : '';
     });
 
-    // Filter buttons
-    document.querySelectorAll('.filter-btn').forEach(btn => {
+    // Camera Matrix Filter buttons
+    document.querySelectorAll('.filter-chip').forEach(btn => {
       btn.addEventListener('click', () => {
-        document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.filter-chip').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         this.activeFilter = btn.dataset.filter;
-        // Re-apply to all cards
-        for (const name of Object.keys(this.cameras)) {
-          const card = document.getElementById(`card-${this._eid(name)}`);
-          if (card) this._applyFilter(card, name);
+        this._renderCameraGrid();
+      });
+    });
+
+    // Alerts Feed Filter tabs
+    document.querySelectorAll('.alert-filter-tab').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.alert-filter-tab').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        this.activeAlertFilter = btn.dataset.alertFilter;
+        this._applyAlertFilter();
+      });
+    });
+
+    // Theater Modal Prompt Presets
+    const presetPrompts = {
+      ppe: 'Strictly inspect and flag any worker or visitor without hard hats, high-visibility reflective safety vests, or required PPE. Note worker count and exact locations.',
+      forklift: 'Monitor industrial forklift and heavy machinery movements. Alert immediately on excessive speed, pedestrian proximity within 3 meters, or blocked safety aisles.',
+      restricted: 'Detect unauthorized personnel entry into designated red hazard zones or restricted areas. Report intrusion timestamp and person count.',
+      crowd: 'Detect crowd gathering or loitering exceeding 4 persons in one cluster. Flag unauthorized assemblies or blocked emergency exit paths.',
+      fire: 'Identify any visual indicators of smoke, open flame, electrical sparks, or hazardous gas plumes immediately.'
+    };
+
+    document.querySelectorAll('.preset-chip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        const key = chip.dataset.preset;
+        const text = presetPrompts[key];
+        const ta = document.getElementById('modal-cam-prompt-ta');
+        if (text && ta) {
+          if (ta.value.trim().length > 0) {
+            ta.value = ta.value.trim() + ' ' + text;
+          } else {
+            ta.value = text;
+          }
+          ta.focus();
+          this._showToast(`Added ${chip.textContent.trim()} preset`, 'ok');
         }
       });
+    });
+
+    // Theater Modal Save Custom Prompt Override
+    document.getElementById('btn-modal-save-prompt')?.addEventListener('click', async () => {
+      const name = this.activeCamModal;
+      if (!name) return;
+      const ta = document.getElementById('modal-cam-prompt-ta');
+      const val = ta ? ta.value.trim() : '';
+      const fb = document.getElementById('modal-prompt-fb');
+      const tag = document.getElementById('modal-prompt-status-tag');
+      try {
+        const res = await fetch('/api/prompts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            cam_name: name,
+            cam_prompt: val || ''
+          })
+        });
+        if (res.ok) {
+          if (!this.prompts.cameras) this.prompts.cameras = {};
+          if (val) {
+            this.prompts.cameras[name] = val;
+            if (tag) {
+              tag.textContent = 'CUSTOM OVERRIDE';
+              tag.className = 'badge badge-accent';
+            }
+          } else {
+            delete this.prompts.cameras[name];
+            if (tag) {
+              tag.textContent = 'INHERITING MASTER';
+              tag.className = 'badge badge-muted';
+            }
+          }
+          if (fb) {
+            fb.textContent = '✅ Saved & Hot-applied!';
+            fb.style.color = 'var(--green)';
+            setTimeout(() => { fb.textContent = ''; }, 3000);
+          }
+          this._showToast(`Saved custom prompt for ${name}`, 'ok');
+          this._renderCamCard(name);
+          this._updateCamSelect();
+        }
+      } catch (err) {
+        console.error('Error saving cam prompt:', err);
+        if (fb) {
+          fb.textContent = '❌ Failed to save';
+          fb.style.color = 'var(--red)';
+        }
+      }
+    });
+
+    // Theater Modal Clear Prompt (Reset to Master)
+    document.getElementById('btn-modal-clear-prompt')?.addEventListener('click', async () => {
+      const name = this.activeCamModal;
+      if (!name) return;
+      const ta = document.getElementById('modal-cam-prompt-ta');
+      const fb = document.getElementById('modal-prompt-fb');
+      const tag = document.getElementById('modal-prompt-status-tag');
+      try {
+        const res = await fetch('/api/prompts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            cam_name: name,
+            cam_prompt: ''
+          })
+        });
+        if (res.ok) {
+          if (this.prompts.cameras) delete this.prompts.cameras[name];
+          if (ta) ta.value = '';
+          if (tag) {
+            tag.textContent = 'INHERITING MASTER';
+            tag.className = 'badge badge-muted';
+          }
+          if (fb) {
+            fb.textContent = '✅ Reverted to Master';
+            fb.style.color = 'var(--green)';
+            setTimeout(() => { fb.textContent = ''; }, 3000);
+          }
+          this._showToast(`Reverted ${name} to master prompt`, 'ok');
+          this._renderCamCard(name);
+          this._updateCamSelect();
+        }
+      } catch (err) {
+        console.error('Error clearing cam prompt:', err);
+      }
+    });
+
+    // Theater Modal Save Drift/Heartbeat Tune
+    document.getElementById('btn-modal-save-tune')?.addEventListener('click', async () => {
+      const name = this.activeCamModal;
+      if (!name) return;
+      const thresh = parseFloat(document.getElementById('modal-cam-thresh')?.value);
+      const hb = parseFloat(document.getElementById('modal-cam-hb')?.value);
+      const fb = document.getElementById('modal-tune-fb');
+      const currentCfg = { ...(this.cameras[name]?.config || { name: name, url: '' }) };
+      if (!isNaN(thresh)) currentCfg.threshold = thresh;
+      if (!isNaN(hb)) currentCfg.heartbeat_sec = hb;
+      this.cameras[name].config = currentCfg;
+      await this._apiUpsertCamera(currentCfg);
+      if (fb) {
+        fb.textContent = '✅ Applied';
+        fb.style.color = 'var(--green)';
+        setTimeout(() => { fb.textContent = ''; }, 2500);
+      }
+      this._showToast(`Updated tuning for ${name}`, 'ok');
+      this._renderCamCard(name);
+    });
+
+    // Modal Close handlers & View Switcher handlers
+    document.getElementById('btn-close-modal')?.addEventListener('click', () => this._closeModal());
+    document.getElementById('modal-backdrop')?.addEventListener('click', () => this._closeModal());
+
+    document.getElementById('modal-btn-live')?.addEventListener('click', () => {
+      this.modalViewMode = 'live';
+      this.selectedEventIdx = null;
+      if (this.activeCamModal) {
+        this._updateModalFrameView(this.activeCamModal);
+        this._updateModalLiveContent(this.activeCamModal);
+      }
+    });
+
+    document.getElementById('modal-btn-events')?.addEventListener('click', () => {
+      const cam = this.cameras[this.activeCamModal];
+      if (cam && cam.eventPhotos && cam.eventPhotos.length > 0) {
+        this.modalViewMode = 'event';
+        this.selectedEventIdx = 0;
+        this._updateModalFrameView(this.activeCamModal);
+        this._updateModalLiveContent(this.activeCamModal);
+      } else {
+        this._showToast('No event photos recorded for this feed yet', 'info');
+      }
+    });
+
+    document.getElementById('btn-modal-return-live')?.addEventListener('click', () => {
+      this.modalViewMode = 'live';
+      this.selectedEventIdx = null;
+      if (this.activeCamModal) {
+        this._updateModalFrameView(this.activeCamModal);
+        this._updateModalLiveContent(this.activeCamModal);
+      }
     });
 
     // Scanner actions
@@ -1333,15 +1977,32 @@ const App = {
 
     // Clear alerts
     document.getElementById('btn-clear-alerts')?.addEventListener('click', () => {
+      this.alerts = [];
       const feed = document.getElementById('alerts-feed');
       if (feed) feed.innerHTML = `
         <div class="alerts-empty" id="alerts-empty">
-          <div class="alerts-empty-icon">✅</div><p>No alerts</p>
+          <div class="alerts-empty-icon">🛡️</div>
+          <p>System Normal</p>
+          <small>Real-time AI incidents and scene shifts will appear here.</small>
         </div>
       `;
       this.alertCount = 0;
       this._syncAlertCount();
       fetch('/api/alerts', { method: 'DELETE' }).catch(() => {});
+    });
+
+    // Trigger Test Alert
+    document.getElementById('btn-test-alert')?.addEventListener('click', async () => {
+      try {
+        const res = await fetch('/api/alerts/test', { method: 'POST' });
+        if (res.ok) {
+          this._showToast('⚡ Triggered test incident alert!', 'ok');
+        } else {
+          this._showToast('Failed to trigger test alert', 'err');
+        }
+      } catch (e) {
+        this._showToast(`Error: ${e.message}`, 'err');
+      }
     });
 
     // VLM health check button

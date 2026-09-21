@@ -22,6 +22,7 @@ class SceneTriggerEngine:
         camera_manager,
         on_incident_callback: Callable,
         broadcast_fn: Optional[Callable] = None,
+        alert_engine = None,
         model_name: str = "facebook/dinov2-small",
         device: str = "cuda",
         default_threshold: float = 0.033,
@@ -32,6 +33,7 @@ class SceneTriggerEngine:
         self.camera_manager = camera_manager
         self.on_incident_callback = on_incident_callback
         self.broadcast_fn = broadcast_fn
+        self.alert_engine = alert_engine
         self.model_name = model_name
         self.device = device if torch.cuda.is_available() else "cpu"
         self.default_threshold = default_threshold
@@ -231,13 +233,23 @@ class SceneTriggerEngine:
                 "priority": 0,  # High priority incident
             }
 
-            # Notify dashboard immediately that an incident has been triggered
-            if self.broadcast_fn:
+            # Notify dashboard and record alert in alert_engine
+            if self.alert_engine:
+                await self.alert_engine.record_scene_shift(
+                    cam_name=cam_name,
+                    drift_score=drift_score,
+                    thumbnail_b64=thumbs_b64[-1] if thumbs_b64 else None,
+                    thumbnails_b64=thumbs_b64,
+                    timestamp=incident_data["timestamp"],
+                )
+            elif self.broadcast_fn:
                 await self.broadcast_fn({
                     "type": "scene_shift",
                     "cam": cam_name,
                     "drift": drift_score,
                     "timestamp": incident_data["timestamp"],
+                    "thumbnail_b64": thumbs_b64[-1] if thumbs_b64 else None,
+                    "thumbnails_b64": thumbs_b64,
                 })
 
             # Queue for Cosmos Reason2 8B evaluation

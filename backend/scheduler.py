@@ -259,7 +259,16 @@ class DeadlineScheduler:
 
         # Alert check based on Cosmos 8B result
         latest_thumb = thumbs_b64[-1] if thumbs_b64 else None
-        await self.alert_engine.process(cam_name, res, thumbnail_b64=latest_thumb)
+        await self.alert_engine.process(
+            cam_name=cam_name,
+            result=res,
+            thumbnail_b64=latest_thumb,
+            thumbnails_b64=thumbs_b64,
+            is_incident=is_incident,
+            drift=drift_score,
+            e2e_latency=e2e_latency,
+            latency=latency,
+        )
 
         # Broadcast single Cosmos 8B result, thumbnails, drift score and incident flag to dashboard
         if self.broadcast_fn:

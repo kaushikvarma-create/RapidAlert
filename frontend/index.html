@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/style.css?v=15" />
+  <link rel="stylesheet" href="/style.css?v=18" />
   <script>
     (function() {
       var saved = localStorage.getItem('rapidalert_theme') || localStorage.getItem('theme');
@@ -64,30 +64,74 @@
     </div>
   </header>
 
-  <!-- ═══════════════════════════════════════════════════════════ MAIN -->
-  <main class="tensorboard-layout">
-    <!-- Camera Sidebar -->
-    <aside class="sidebar-cams">
-      <div class="sidebar-header" style="display: flex; justify-content: space-between; align-items: center; padding-right: 8px;">
-        <h2 class="sidebar-title">Cameras</h2>
-        <div style="display: flex; gap: 4px;">
-          <button class="btn-ghost" id="btn-sidebar-select-all" style="font-size: 0.7rem; padding: 2px 6px; cursor: pointer;" title="Select All View">All</button>
-          <button class="btn-ghost" id="btn-sidebar-clear-all" style="font-size: 0.7rem; padding: 2px 6px; cursor: pointer;" title="Clear View">None</button>
+  <!-- ═══════════════════════════════════════════════════════════ MAIN DASHBOARD -->
+  <main class="dashboard-layout">
+    <!-- Camera Matrix (Left ~75%) -->
+    <section class="camera-matrix-section">
+      <div class="matrix-toolbar">
+        <div class="matrix-toolbar-left">
+          <div class="section-heading">
+            <span class="matrix-title">Live Camera Streams</span>
+            <span class="active-count-badge" id="cams-active-badge">0 / 0 Active</span>
+          </div>
+          <div class="matrix-filters">
+            <button class="filter-chip active" data-filter="all">All Feeds</button>
+            <button class="filter-chip chip-incident" data-filter="incident">🚨 Incidents</button>
+            <button class="filter-chip chip-drift" data-filter="drift">⚡ Scene Shift</button>
+            <button class="filter-chip chip-offline" data-filter="offline">⚠️ Offline</button>
+          </div>
+        </div>
+        <div class="matrix-toolbar-right">
+          <span class="grid-hint">Click any feed to inspect scene &amp; override prompts</span>
         </div>
       </div>
-      <div class="camera-list" id="camera-checkbox-list">
-        <!-- Checkboxes injected here -->
-      </div>
-    </aside>
 
-    <!-- Main Stage -->
-    <section class="tensorboard-stage" id="tensorboard-stage">
-      <div class="empty-state" id="empty-tensorboard">
-        <div class="empty-icon">🧪</div>
-        <p>No cameras selected.</p>
-        <small>Select cameras from the sidebar to begin VLM A/B/C testing.</small>
+      <div class="camera-grid" id="camera-grid">
+        <!-- Live camera cards injected dynamically -->
+      </div>
+
+      <div class="empty-state" id="empty-camera-grid" style="display: none;">
+        <div class="empty-icon">📷</div>
+        <p>No active cameras found</p>
+        <small>Add cameras in Settings or run Network Scanner to start monitoring.</small>
       </div>
     </section>
+
+    <!-- Alerts Sidebar (Right ~25% / 360px) -->
+    <aside class="dashboard-alerts-sidebar" id="dashboard-alerts-sidebar">
+      <div class="alerts-sidebar-header">
+        <div class="alerts-title-wrap">
+          <span class="alerts-title">Live Alerts</span>
+          <span class="alerts-counter-pill" id="alert-count">0</span>
+        </div>
+        <div class="alerts-actions">
+          <button class="btn-icon-subtle" id="btn-test-alert" title="Trigger Test Incident Alert" aria-label="Trigger Test Alert">
+            <span>⚡</span>
+          </button>
+          <button class="btn-icon-subtle" id="btn-audio-toggle" title="Toggle Alert Sound" aria-label="Toggle Alert Sound">
+            <span id="audio-toggle-icon">🔊</span>
+          </button>
+          <button class="btn-icon-subtle" id="btn-clear-alerts" title="Clear alerts feed" aria-label="Clear alerts">
+            <span>🗑️</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="alerts-filter-bar">
+        <button class="alert-filter-tab active" data-alert-filter="all">All</button>
+        <button class="alert-filter-tab" data-alert-filter="high">🚨 High</button>
+        <button class="alert-filter-tab" data-alert-filter="medium">⚠️ Med</button>
+        <button class="alert-filter-tab" data-alert-filter="drift">⚡ Shift</button>
+      </div>
+
+      <div class="alerts-feed" id="alerts-feed">
+        <div class="alerts-empty" id="alerts-empty">
+          <div class="alerts-empty-icon">🛡️</div>
+          <p>System Normal</p>
+          <small>Real-time AI incidents and scene shifts will appear here.</small>
+        </div>
+      </div>
+    </aside>
   </main>
 
   <!-- ═══════════════════════════════════════════════════════════ SETTINGS PANEL -->
@@ -312,13 +356,17 @@
     </div>
   </div>
 
-  <!-- ═══════════════════════════════════════════════════════════ CAMERA MODAL -->
+  <!-- ═══════════════════════════════════════════════════════════ THEATER CAMERA MODAL -->
   <div class="modal-backdrop" id="modal-backdrop" hidden></div>
-  <div class="modal" id="cam-modal" hidden>
+  <div class="modal modal-theater" id="cam-modal" hidden>
     <div class="modal-header">
-      <div>
-        <h2 id="modal-cam-name">Camera</h2>
-        <span class="modal-cam-ts" id="modal-cam-ts"></span>
+      <div class="modal-title-group">
+        <div class="modal-cam-badge-row">
+          <h2 id="modal-cam-name">Camera</h2>
+          <span class="badge badge-green" id="modal-cam-status">LIVE STREAM</span>
+          <span class="badge badge-muted" id="modal-cam-drift-badge">Drift: 0.000</span>
+        </div>
+        <span class="modal-cam-ts" id="modal-cam-ts">Last analysis: —</span>
       </div>
       <button class="btn-icon btn-close-panel" id="btn-close-modal">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
@@ -326,42 +374,221 @@
         </svg>
       </button>
     </div>
-    <div class="modal-body">
-      <div class="modal-frame-wrap">
-        <img id="modal-frame" src="" alt="Camera frame" />
-        <div class="modal-frame-loading" id="modal-frame-loading">Loading frame...</div>
+
+    <div class="modal-theater-body">
+      <!-- Left: High-Res Stream View & Event Photo Gallery -->
+      <div class="theater-stream-pane">
+        <div class="theater-stream-top-bar">
+          <div class="theater-view-switcher">
+            <button type="button" class="theater-switcher-btn active" id="modal-btn-live">
+              <span class="live-pulse-dot"></span> 🔴 Live Stream
+            </button>
+            <button type="button" class="theater-switcher-btn" id="modal-btn-events">
+              📸 Event Photos (<span id="modal-event-photos-count">0</span>)
+            </button>
+          </div>
+          <button type="button" class="theater-return-live-btn" id="btn-modal-return-live" style="display:none;">
+            <span>🔴 Return to Live Stream</span>
+          </button>
+        </div>
+
+        <div class="modal-frame-wrap" id="theater-frame-wrap">
+          <img id="modal-frame" src="" alt="Camera stream" />
+          <div class="modal-frame-loading" id="modal-frame-loading">Loading live stream...</div>
+          <div class="stream-live-indicator" id="modal-live-indicator"><span class="live-pulse-dot"></span> LIVE RTSP</div>
+        </div>
+
+        <!-- Event Photos Captured at Trigger -->
+        <div class="theater-temporal-section">
+          <div class="theater-strip-header-row">
+            <span class="section-sub-label">📸 Event-Based Photos (Captured Trigger Sequence)</span>
+            <span class="temporal-strip-hint">Click any frame to inspect AI trigger capture</span>
+          </div>
+          <div class="temporal-strip" id="modal-temporal-strip">
+            <!-- Dynamic thumbnails injected here -->
+          </div>
+        </div>
+
+        <!-- Camera Diagnostic Stats -->
+        <div class="theater-diag-bar">
+          <div class="diag-stat">
+            <span class="diag-label">DINOv2 Drift</span>
+            <span class="diag-val" id="modal-stat-drift">—</span>
+          </div>
+          <div class="diag-stat">
+            <span class="diag-label">VLM Latency</span>
+            <span class="diag-val" id="modal-stat-latency">—</span>
+          </div>
+          <div class="diag-stat">
+            <span class="diag-label">Trigger→Post</span>
+            <span class="diag-val" id="modal-stat-e2e">—</span>
+          </div>
+          <div class="diag-stat">
+            <span class="diag-label">Safety Status</span>
+            <span class="diag-val" id="modal-stat-safety">—</span>
+          </div>
+        </div>
       </div>
-      <div class="modal-analysis" id="modal-analysis">
-        <div class="modal-badges" id="modal-badges"></div>
-        <p class="modal-observation" id="modal-obs">—</p>
-        <div class="modal-meta" id="modal-meta"></div>
+
+      <!-- Right: Live Scene Understanding & Per-Camera Requirement Prompts -->
+      <div class="theater-controls-pane">
+        <!-- Live Scene Understanding -->
+        <div class="theater-box">
+          <div class="theater-box-header">
+            <span class="theater-box-title">🧠 Live Scene Understanding</span>
+            <span class="badge" id="modal-scene-sev">SEVERITY</span>
+          </div>
+          <div class="modal-badges" id="modal-badges"></div>
+          <div class="modal-obs-wrap">
+            <span class="obs-sub-label">VLM Observation:</span>
+            <p class="modal-observation" id="modal-obs">—</p>
+          </div>
+          <div class="modal-meta" id="modal-meta"></div>
+        </div>
+
+        <!-- Per-Camera Custom Prompt Box -->
+        <div class="theater-box theater-prompt-box">
+          <div class="theater-box-header">
+            <div>
+              <span class="theater-box-title">🎯 Per-Camera Requirements Prompt</span>
+              <span class="prompt-hint-small">Overrides master prompt with camera-specific safety rules</span>
+            </div>
+            <span class="badge badge-accent" id="modal-prompt-status-tag">INHERITED</span>
+          </div>
+
+          <!-- Quick Preset Chips -->
+          <div class="prompt-presets-row">
+            <span class="preset-label">Quick Presets:</span>
+            <button type="button" class="preset-chip" data-preset="ppe">+ 🦺 PPE Check</button>
+            <button type="button" class="preset-chip" data-preset="forklift">+ 🚜 Forklift / Machinery</button>
+            <button type="button" class="preset-chip" data-preset="restricted">+ 🚧 Restricted Area</button>
+            <button type="button" class="preset-chip" data-preset="crowd">+ 👥 Crowd / Loitering</button>
+            <button type="button" class="preset-chip" data-preset="fire">+ 🔥 Fire &amp; Smoke</button>
+          </div>
+
+          <textarea id="modal-cam-prompt-ta" class="theater-prompt-ta" spellcheck="false" placeholder="Enter custom prompt for this specific camera feed... (e.g. Verify hard hats and hi-vis vests on all personnel). Leave blank to inherit master prompt."></textarea>
+
+          <div class="theater-prompt-actions">
+            <button class="btn-primary btn-sm" id="btn-modal-save-prompt">💾 Save &amp; Hot-Apply</button>
+            <button class="btn-ghost btn-sm" id="btn-modal-clear-prompt">✕ Reset to Master</button>
+            <span class="save-feedback" id="modal-prompt-fb"></span>
+          </div>
+        </div>
+
+        <!-- Inline Drift & Heartbeat Tuning -->
+        <div class="theater-box theater-tune-box">
+          <span class="theater-box-title">⚡ Quick Drift &amp; Heartbeat Tune</span>
+          <div class="theater-tune-row">
+            <label class="tune-field">
+              <span>Drift Thresh:</span>
+              <input type="number" step="0.005" min="0.005" max="0.5" id="modal-cam-thresh" class="tune-input" />
+            </label>
+            <label class="tune-field">
+              <span>Heartbeat:</span>
+              <input type="number" step="5" min="5" max="600" id="modal-cam-hb" class="tune-input" />s
+            </label>
+            <button class="btn-ghost btn-sm" id="btn-modal-save-tune">Apply</button>
+            <span class="save-feedback" id="modal-tune-fb"></span>
+          </div>
+        </div>
       </div>
     </div>
   </div>
 
-  <!-- ═══════════════════════════════════════════════════════════ ALERT MODAL -->
+  <!-- ═══════════════════════════════════════════════════════════ PARTICULAR ALERT INSPECTOR MODAL -->
   <div class="modal-backdrop" id="alert-modal-backdrop" hidden></div>
-  <div class="modal" id="alert-modal" hidden>
+  <div class="modal modal-theater modal-alert-inspector" id="alert-modal" hidden>
     <div class="modal-header">
-      <div>
-        <h2 id="alert-modal-cam">Alert</h2>
-        <span class="modal-cam-ts" id="alert-modal-ts"></span>
+      <div class="alert-modal-title-group">
+        <div class="modal-cam-badge-row">
+          <h2 id="alert-modal-cam">Alert Details</h2>
+          <span class="badge badge-cyan" id="alert-modal-badge-type">INCIDENT</span>
+          <span class="badge badge-red" id="alert-modal-badge-sev">HIGH</span>
+        </div>
+        <span class="modal-cam-ts" id="alert-modal-ts">—</span>
       </div>
-      <button class="btn-icon btn-close-panel" id="btn-close-alert-modal">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-        </svg>
-      </button>
+      <div class="alert-modal-header-actions">
+        <button type="button" class="btn-jump-live" id="btn-alert-jump-live" title="Switch to live stream for this camera">
+          <span>🔴 Switch to Live Feed</span>
+        </button>
+        <button class="btn-icon btn-close-panel" id="btn-close-alert-modal" aria-label="Close alert inspector">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </div>
     </div>
-    <div class="modal-body">
-      <div class="modal-frame-wrap" id="alert-modal-frame-wrap">
-        <img id="alert-modal-img" src="" alt="Alert frame" style="display:none"/>
-        <div class="modal-frame-loading" id="alert-modal-no-thumb">No snapshot available</div>
+
+    <div class="modal-theater-body">
+      <!-- Left: Event Snapshot & Captured Trigger Sequence -->
+      <div class="theater-stream-pane">
+        <div class="modal-frame-wrap" id="alert-modal-frame-wrap">
+          <img id="alert-modal-img" src="" alt="Alert frame" style="display:none"/>
+          <div class="modal-frame-loading" id="alert-modal-no-thumb">No snapshot available</div>
+          <div class="stream-live-indicator alert-freeze-indicator" id="alert-modal-indicator">
+            📸 CAPTURED AT INCIDENT
+          </div>
+        </div>
+
+        <!-- Captured Trigger Sequence Frames for this specific alert -->
+        <div class="alert-event-frames-section" id="alert-modal-frames-wrap" style="display:none;">
+          <div class="theater-strip-header-row">
+            <span class="section-sub-label">📸 Incident Trigger Frames Captured for this Alert</span>
+            <span class="temporal-strip-hint">Click any frame to inspect</span>
+          </div>
+          <div class="temporal-strip" id="alert-modal-frames-strip"></div>
+        </div>
+
+        <!-- Diagnostic Stats for this alert -->
+        <div class="theater-diag-bar">
+          <div class="diag-stat">
+            <span class="diag-label">DINOv2 Drift</span>
+            <span class="diag-val" id="alert-stat-drift">—</span>
+          </div>
+          <div class="diag-stat">
+            <span class="diag-label">VLM Latency</span>
+            <span class="diag-val" id="alert-stat-latency">—</span>
+          </div>
+          <div class="diag-stat">
+            <span class="diag-label">Trigger→Post</span>
+            <span class="diag-val" id="alert-stat-e2e">—</span>
+          </div>
+          <div class="diag-stat">
+            <span class="diag-label">Safety Status</span>
+            <span class="diag-val" id="alert-stat-safety">—</span>
+          </div>
+        </div>
       </div>
-      <div class="modal-analysis">
-        <div class="modal-badges" id="alert-modal-badges"></div>
-        <p class="modal-observation" id="alert-modal-obs">—</p>
-        <div class="modal-meta" id="alert-modal-meta"></div>
+
+      <!-- Right: Particular Alert Understanding & Related Incident Trail -->
+      <div class="theater-controls-pane">
+        <!-- Particular Alert Understanding -->
+        <div class="theater-box">
+          <div class="theater-box-header">
+            <span class="theater-box-title">🚨 Particular Alert Analysis</span>
+            <span class="badge badge-accent badge-sm">RECORDED INCIDENT</span>
+          </div>
+          <div class="modal-badges" id="alert-modal-badges"></div>
+          <div class="modal-obs-wrap">
+            <span class="obs-sub-label">Recorded Observation:</span>
+            <p class="modal-observation" id="alert-modal-obs">—</p>
+          </div>
+          <div class="modal-meta" id="alert-modal-meta"></div>
+        </div>
+
+        <!-- Related Alerts Trail on this Camera -->
+        <div class="theater-box alert-related-box">
+          <div class="theater-box-header">
+            <div>
+              <span class="theater-box-title">🔗 Related Incident History on this Camera</span>
+              <span class="prompt-hint-small">Chronological alert trail for this camera feed</span>
+            </div>
+            <span class="badge badge-accent badge-sm" id="alert-related-count">0 Related</span>
+          </div>
+          <div class="alert-related-list" id="alert-related-list">
+            <!-- Dynamically populated with other alerts for this camera -->
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -369,6 +596,6 @@
   <!-- ═══════════════════════════════════════════════════════════ TOAST -->
   <div class="toast-container" id="toast-container"></div>
 
-  <script src="/app.js?v=15"></script>
+  <script src="/app.js?v=18"></script>
 </body>
 </html>

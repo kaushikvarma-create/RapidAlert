@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -107,6 +107,7 @@ scene_trigger = SceneTriggerEngine(
     camera_manager=camera_manager,
     on_incident_callback=scheduler.queue_incident,
     broadcast_fn=ws_manager.broadcast,
+    alert_engine=alert_engine,
     model_name=SYS_CFG.get("dinov2_model", "facebook/dinov2-small"),
     device="cuda",
     default_threshold=SYS_CFG.get("scene_threshold", 0.033),
@@ -394,6 +395,33 @@ def api_get_frame(name: str, width: int = 640, quality: int = 80):
     )
 
 
+@app.get("/api/cameras/{name}/stream")
+async def api_camera_stream(name: str, width: int = 640, quality: int = 70):
+    """Continuous MJPEG live video stream (multipart/x-mixed-replace)."""
+    async def frame_generator():
+        try:
+            while True:
+                b64 = frame_store.get_snapshot_b64(name, max_w=width, quality=quality)
+                if b64:
+                    frame_bytes = base64.b64decode(b64)
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
+                    )
+                await asyncio.sleep(0.1) # ~10 FPS smooth video
+        except (asyncio.CancelledError, GeneratorExit):
+            pass
+
+    return StreamingResponse(
+        frame_generator(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+        },
+    )
+
+
 # ══════════════════════════════════════════════════════════════════
 #  REST — Results / Status
 # ══════════════════════════════════════════════════════════════════
@@ -489,6 +517,34 @@ def api_get_alerts(n: int = 50):
 async def api_clear_alerts():
     alert_engine.clear()
     return {"status": "ok"}
+
+
+@app.post("/api/alerts/test")
+async def api_trigger_test_alert(cam: Optional[str] = None):
+    """Trigger an immediate test alert to verify notification feed and inspector."""
+    active = camera_manager.get_active_cameras()
+    cam_name = cam if (cam and cam in active) else (active[0] if active else "TEST_CAM")
+    snap = frame_store.get_snapshot_b64(cam_name, max_w=480, quality=70)
+    alert = await alert_engine.process(
+        cam_name=cam_name,
+        result={
+            "severity": "HIGH",
+            "safety": "WARNING",
+            "activity": "MOTION_TEST",
+            "workers": "2",
+            "machinery": "None",
+            "observation": f"Test Incident: Detected active movement and safety inspection trigger on {cam_name}. Verified alert delivery pipeline.",
+            "latency": 1.15,
+            "e2e_latency": 1.35,
+        },
+        thumbnail_b64=snap,
+        thumbnails_b64=[snap] if snap else [],
+        is_incident=True,
+        drift=0.0482,
+        e2e_latency=1.35,
+        latency=1.15,
+    )
+    return {"status": "ok", "alert": alert}
 
 
 # ══════════════════════════════════════════════════════════════════
