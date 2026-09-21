@@ -12,7 +12,7 @@ const App = {
   prompts: { master: '', cameras: {} },
   alertCount: 0,
   activeFilter: 'all',
-  activeAlertFilter: 'all',
+  activeAlertFilter: 'medium',
   audioMuted: false,
   audioCtx: null,
   activeCamModal: null,
@@ -221,6 +221,7 @@ const App = {
           this._renderAlert(a, false);
         }
       }
+      this._applyAlertFilter();
     }
 
     if (msg.metrics) this._applyMetrics(msg.metrics);
@@ -230,9 +231,13 @@ const App = {
       const elThresh = document.getElementById('sys-input-thresh');
       const elHb = document.getElementById('sys-input-hb');
       const elCooldown = document.getElementById('sys-input-cooldown');
+      const elFollowup = document.getElementById('sys-input-followup-interval');
+      const elPersistent = document.getElementById('sys-input-persistent-followup');
       if (elThresh) elThresh.value = msg.system.default_threshold || msg.system.scene_threshold || 0.033;
       if (elHb) elHb.value = msg.system.default_heartbeat_sec || 30;
       if (elCooldown) elCooldown.value = msg.system.event_cooldown || 15;
+      if (elFollowup && msg.system.followup_interval_sec != null) elFollowup.value = msg.system.followup_interval_sec;
+      if (elPersistent && msg.system.persistent_followup != null) elPersistent.checked = Boolean(msg.system.persistent_followup);
     }
     this._updateCamSelect();
 
@@ -246,9 +251,13 @@ const App = {
       const elThresh = document.getElementById('sys-input-thresh');
       const elHb = document.getElementById('sys-input-hb');
       const elCooldown = document.getElementById('sys-input-cooldown');
+      const elFollowup = document.getElementById('sys-input-followup-interval');
+      const elPersistent = document.getElementById('sys-input-persistent-followup');
       if (elThresh) elThresh.value = msg.system.default_threshold || msg.system.scene_threshold || 0.033;
       if (elHb) elHb.value = msg.system.default_heartbeat_sec || 30;
       if (elCooldown) elCooldown.value = msg.system.event_cooldown || 15;
+      if (elFollowup && msg.system.followup_interval_sec != null) elFollowup.value = msg.system.followup_interval_sec;
+      if (elPersistent && msg.system.persistent_followup != null) elPersistent.checked = Boolean(msg.system.persistent_followup);
     }
     if (msg.cameras) {
       for (const c of msg.cameras) {
@@ -668,8 +677,14 @@ const App = {
     const isFollowup = alert.trigger_mode === 'FOLLOWUP' || alert.is_followup;
     const isIncident = Boolean(alert.is_incident || alert.trigger_mode === 'TRIGGER') && !isFollowup;
     let triggerTagHtml = '';
-    if (isFollowup) {
-      triggerTagHtml = `<span class="alert-trigger-tag trigger-tag-followup" title="10-Second Follow-Up Outcome Evaluation">🔄 FOLLOW-UP (+10s)</span>`;
+    if (alert.trigger_badge) {
+      const tagClass = isFollowup ? 'trigger-tag-followup' : (isIncident ? 'trigger-tag-incident' : 'trigger-tag-periodic');
+      const tagTitle = isFollowup ? `${alert.delay_sec || 10}s Temporal Follow-Up Outcome Evaluation` : (isIncident ? 'Triggered by DINOv2 Scene Drift Incident' : 'Scheduled Periodic AI Inspection');
+      triggerTagHtml = `<span class="alert-trigger-tag ${tagClass}" title="${tagTitle}">${this._esc(alert.trigger_badge)}</span>`;
+    } else if (isFollowup) {
+      const delay = alert.delay_sec ? `+${Math.round(alert.delay_sec)}s` : '+10s';
+      const cycle = alert.cycle && alert.cycle > 1 ? ` #${alert.cycle}` : '';
+      triggerTagHtml = `<span class="alert-trigger-tag trigger-tag-followup" title="Temporal Follow-Up Outcome Evaluation">🔄 FOLLOW-UP${cycle} (${delay})</span>`;
     } else if (isIncident) {
       triggerTagHtml = `<span class="alert-trigger-tag trigger-tag-incident" title="Triggered by DINOv2 Scene Drift Incident">⚡ TRIGGER</span>`;
     } else {
@@ -684,9 +699,10 @@ const App = {
     const idBadgeHtml = eventIdShort ? `<span class="alert-id-chip" title="${this._esc(alert.id)}">${this._esc(eventIdShort.length > 18 ? '…' + eventIdShort.slice(-14) : eventIdShort)}</span>` : '';
 
     const item = document.createElement('div');
-    item.className = `alert-item sev-${isFollowup ? 'medium' : (isIncident ? 'high' : sev)}${animate ? ' alert-enter' : ''}`;
+    item.className = `alert-item sev-${sev || 'low'}${animate ? ' alert-enter' : ''}`;
     item.setAttribute('data-sev', sev);
     item.setAttribute('data-trigger', isFollowup ? 'followup' : (isIncident ? 'trigger' : 'periodic'));
+    item.setAttribute('data-is-drift', (alert.is_drift || isIncident || (alert.drift != null && alert.drift > 0)) ? 'true' : 'false');
     item.title = 'Click to inspect this particular alert and incident history';
     item.innerHTML = `
       <div class="alert-header">
@@ -715,10 +731,20 @@ const App = {
     }
 
     // Filter check
-    const af = this.activeAlertFilter || 'all';
-    if (af === 'high' && sev !== 'high') item.style.display = 'none';
-    else if (af === 'medium' && sev !== 'medium') item.style.display = 'none';
-    else if (af === 'drift' && !alert.is_drift) item.style.display = 'none';
+    const af = this.activeAlertFilter || 'medium';
+    const isDrift = Boolean(alert.is_drift || isIncident || (alert.drift != null && alert.drift > 0));
+    let matchFilter = true;
+    if (af === 'high') {
+      matchFilter = (sev === 'high' || sev === 'extreme');
+    } else if (af === 'medium') {
+      matchFilter = (sev === 'medium' || sev === 'high' || sev === 'extreme');
+    } else if (af === 'drift' || af === 'trigger') {
+      matchFilter = isIncident || isFollowup || isDrift;
+    } else if (af === 'all') {
+      matchFilter = true;
+    }
+
+    if (!matchFilter) item.style.display = 'none';
 
     feed.insertBefore(item, feed.firstChild);
 
@@ -726,24 +752,34 @@ const App = {
   },
 
   _applyAlertFilter() {
-    const af = this.activeAlertFilter || 'all';
+    const af = this.activeAlertFilter || 'medium';
     const items = document.querySelectorAll('#alerts-feed .alert-item');
     let visible = 0;
     items.forEach(item => {
-      const sev = item.getAttribute('data-sev');
+      const sev = (item.getAttribute('data-sev') || 'low').toLowerCase();
+      const trigger = item.getAttribute('data-trigger') || 'periodic';
       const isDrift = item.getAttribute('data-is-drift') === 'true';
       let show = false;
-      if (af === 'all') show = true;
-      else if (af === 'high' && sev === 'high') show = true;
-      else if (af === 'medium' && sev === 'medium') show = true;
-      else if (af === 'drift' && isDrift) show = true;
+      if (af === 'all') {
+        show = true;
+      } else if (af === 'high') {
+        show = (sev === 'high' || sev === 'extreme');
+      } else if (af === 'medium') {
+        show = (sev === 'medium' || sev === 'high' || sev === 'extreme');
+      } else if (af === 'drift' || af === 'trigger') {
+        show = (trigger === 'trigger' || trigger === 'followup' || isDrift);
+      }
 
       item.style.display = show ? '' : 'none';
       if (show) visible++;
     });
     const empty = document.getElementById('alerts-empty');
-    if (empty && items.length > 0) {
-      empty.style.display = visible === 0 ? 'flex' : 'none';
+    if (empty) {
+      if (items.length === 0) {
+        empty.style.display = 'flex';
+      } else {
+        empty.style.display = visible === 0 ? 'flex' : 'none';
+      }
     }
   },
 
@@ -1918,11 +1954,13 @@ const App = {
     document.getElementById('btn-save-cam-prompt')?.addEventListener('click', () => this._saveCamPrompt());
     document.getElementById('btn-clear-cam-prompt')?.addEventListener('click', () => this._clearCamPrompt());
 
-    // Save System Config (Threshold & Heartbeat)
+    // Save System Config (Threshold, Heartbeat, Cooldown, Followup Delay & Persistent Followup)
     document.getElementById('btn-save-sys-config')?.addEventListener('click', async () => {
       const thresh = parseFloat(document.getElementById('sys-input-thresh')?.value);
       const hb = parseFloat(document.getElementById('sys-input-hb')?.value);
       const cooldown = parseFloat(document.getElementById('sys-input-cooldown')?.value);
+      const followup = parseFloat(document.getElementById('sys-input-followup-interval')?.value);
+      const persistent = document.getElementById('sys-input-persistent-followup')?.checked;
       try {
         const res = await fetch('/api/config', {
           method: 'POST',
@@ -1931,6 +1969,8 @@ const App = {
             default_threshold: isNaN(thresh) ? undefined : thresh,
             default_heartbeat_sec: isNaN(hb) ? undefined : hb,
             event_cooldown: isNaN(cooldown) ? undefined : cooldown,
+            followup_interval_sec: isNaN(followup) ? undefined : followup,
+            persistent_followup: persistent,
           })
         });
         if (res.ok) {

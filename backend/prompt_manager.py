@@ -32,20 +32,28 @@ DEFAULT_MASTER = (
 
 DEFAULT_FOLLOWUP = (
     "You are an expert CCTV surveillance AI.\n"
-    "Analyse the provided temporal sequence of 4 CCTV frames capturing the 10-second follow-up window after an incident:\n"
-    "- Frame 1: Immediate aftermath (t +2.5s)\n"
-    "- Frame 2: Follow-up progression (t +5.0s)\n"
-    "- Frame 3: Ongoing status (t +7.5s)\n"
-    "- Frame 4: Current outcome (t +10.0s)\n\n"
-    "{normal_context}\n\n"
+    "Analyse the provided temporal sequence of 4 CCTV frames capturing the scene follow-up window:\n"
+    "- Frame 1: Sequence start\n"
+    "- Frame 2: Mid-sequence progression\n"
+    "- Frame 3: Recent status\n"
+    "- Frame 4: Current outcome\n\n"
+    "{normal_context}\n"
+    "{followup_context}\n\n"
+    "CRITICAL INSTRUCTIONS TO PREVENT FALSE POSITIVES & HALLUCINATION:\n"
+    "- Objectively evaluate ONLY the visual evidence visible in these CURRENT 4 frames.\n"
+    "- Do NOT carry forward or hallucinate hazards/severity from earlier triggers.\n"
+    "- If earlier movement/activity has subsided, people have departed, or normal operations have resumed, you MUST mark:\n"
+    "  SAFETY: OK\n"
+    "  SEVERITY: LOW\n"
+    "- Only output MEDIUM, HIGH, or DANGER if you directly observe an active violation, hazard, or aggressive motion in the CURRENT frames.\n\n"
     "Return EXACTLY this format, no extra text:\n"
-    "OBSERVATION: <1-2 sentences evaluating if the incident has resolved, continued, or escalated>\n"
+    "OBSERVATION: <1-2 sentences stating current scene status, explicitly noting if earlier activity has resolved, stabilized, or continued>\n"
     "ACTIVITY: <ACTIVE|IDLE|UNKNOWN>\n"
     "WORKERS: <integer count of people in scene>\n"
     "MACHINERY: <comma-separated list or None>\n"
     "SAFETY: <OK|WARNING|DANGER>\n"
     "SEVERITY: <LOW|MEDIUM|HIGH|EXTREME>\n"
-    "EVOLUTION: <concise summary of status changes over the 10-second follow-up window>\n\n"
+    "EVOLUTION: <concise summary of changes across the 4 frames>\n\n"
     "CRITICAL: Do NOT use extended thinking, reasoning steps, or <think> tags. Output the final format immediately."
 )
 
@@ -68,7 +76,16 @@ class PromptManager:
 
     # ── Public ──────────────────────────────────────────────────────
 
-    def get_prompt(self, cam_name: str, hour: Optional[int] = None, is_followup: bool = False) -> str:
+    def get_prompt(
+        self,
+        cam_name: str,
+        hour: Optional[int] = None,
+        is_followup: bool = False,
+        prev_severity: Optional[str] = None,
+        prev_observation: Optional[str] = None,
+        cycle: int = 1,
+        interval_sec: float = 10.0,
+    ) -> str:
         """Build the final prompt for cam_name with context injected."""
         if hour is None:
             hour = datetime.now().hour
@@ -82,7 +99,18 @@ class PromptManager:
             )
 
         if is_followup:
-            return self._followup.replace("{normal_context}", ctx_str)
+            followup_info = (
+                f"FOLLOW-UP CONTEXT:\n"
+                f"This is follow-up check #{cycle} ({interval_sec:.0f}s after initial trigger)."
+            )
+            if prev_severity:
+                followup_info += f" An earlier incident had severity: {prev_severity}."
+            if prev_observation:
+                followup_info += f" Earlier observation: \"{prev_observation}\"."
+            followup_info += " Objectively determine whether this has resolved or is persisting."
+
+            template = self._followup
+            return template.replace("{normal_context}", ctx_str).replace("{followup_context}", followup_info)
 
         template = self._cam_overrides.get(cam_name) or self._master
         return template.replace("{normal_context}", ctx_str)

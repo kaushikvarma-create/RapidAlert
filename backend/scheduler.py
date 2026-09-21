@@ -75,9 +75,12 @@ class DeadlineScheduler:
         self._workers: list[asyncio.Task] = []
         self._queue: Optional[asyncio.PriorityQueue] = None
         self._seq: int = 0
+        self._total_analyzed: int = 0
 
         self._latencies: list[float] = []
-        self._total_analyzed = 0
+        self.followup_interval_sec: float = 10.0
+        self.persistent_followup: bool = False
+        self.followup_max_cycles: int = 6
 
     def get_cam_heartbeat_interval(self, cam_name: str) -> float:
         """Returns the mandatory analysis interval in seconds for the given camera."""
@@ -212,6 +215,10 @@ class DeadlineScheduler:
         job_labels = job.get("labels")
         incident_id = job.get("incident_id")
         parent_id = job.get("parent_id")
+        cycle = job.get("cycle", 1)
+        prev_severity = job.get("prev_severity")
+        prev_observation = job.get("prev_observation")
+        followup_delay = float(job.get("followup_delay", self.followup_interval_sec))
 
         if is_incident and job.get("frames_b64"):
             frames_b64 = job["frames_b64"]
@@ -227,7 +234,14 @@ class DeadlineScheduler:
         if not frames_b64:
             return
 
-        prompt = self.prompt_manager.get_prompt(cam_name, is_followup=is_followup)
+        prompt = self.prompt_manager.get_prompt(
+            cam_name=cam_name,
+            is_followup=is_followup,
+            prev_severity=prev_severity,
+            prev_observation=prev_observation,
+            cycle=cycle,
+            interval_sec=followup_delay,
+        )
 
         t0 = time.monotonic()
         res = await self.vlm_pool.analyze(cam_name, frames_b64, prompt)
@@ -281,9 +295,11 @@ class DeadlineScheduler:
             drift=drift_score,
             e2e_latency=e2e_latency,
             latency=latency,
+            cycle=cycle,
+            delay_sec=followup_delay,
         )
 
-        # If this was an initial trigger event (not a follow-up), schedule the 10-second follow-up!
+        # 1. If this was an initial trigger event (not a follow-up), schedule follow-up cycle 1!
         if is_incident and not is_followup and alert:
             evt_id = alert["id"]
             inc_id = alert.get("incident_id")
@@ -293,9 +309,50 @@ class DeadlineScheduler:
                     incident_id=inc_id,
                     parent_id=evt_id,
                     drift_score=drift_score,
-                    delay_sec=10.0,
+                    cycle=1,
+                    prev_severity=res.get("severity", "MEDIUM"),
+                    prev_observation=res.get("observation", ""),
+                    delay_sec=self.followup_interval_sec,
                 )
             )
+
+        # 2. If this was a follow-up and persistent follow-up is enabled:
+        # Check if severity is still elevated. If yes, schedule next follow-up cycle!
+        elif is_followup and self.persistent_followup:
+            current_sev = (res.get("severity") or "LOW").upper()
+            current_safety = (res.get("safety") or "UNKNOWN").upper()
+            is_elevated = (
+                current_sev in ("MEDIUM", "HIGH", "EXTREME")
+                or current_safety in ("WARNING", "DANGER")
+            )
+            if is_elevated and cycle < self.followup_max_cycles:
+                next_cycle = cycle + 1
+                asyncio.create_task(
+                    self._schedule_followup(
+                        cam_name=cam_name,
+                        incident_id=incident_id,
+                        parent_id=parent_id,
+                        drift_score=drift_score,
+                        cycle=next_cycle,
+                        prev_severity=current_sev,
+                        prev_observation=res.get("observation", ""),
+                        delay_sec=self.followup_interval_sec,
+                    )
+                )
+                print(
+                    f"[Scheduler] 🔄 Persistent follow-up: {cam_name} severity remains {current_sev} "
+                    f"({current_safety}). Next follow-up #{next_cycle} scheduled in {self.followup_interval_sec:.1f}s."
+                )
+            elif not is_elevated:
+                print(
+                    f"[Scheduler] ✅ Scene resolved on {cam_name}: severity dropped to {current_sev} "
+                    f"({current_safety}). Persistent follow-up concluded."
+                )
+            elif cycle >= self.followup_max_cycles:
+                print(
+                    f"[Scheduler] 🛑 Persistent follow-up reached max cycles ({self.followup_max_cycles}) "
+                    f"for {cam_name}."
+                )
 
         # Broadcast single Cosmos 8B result, thumbnails, drift score and incident flag to dashboard
         if self.broadcast_fn:
@@ -307,6 +364,7 @@ class DeadlineScheduler:
                 "drift": drift_score,
                 "is_incident": is_incident,
                 "is_followup": is_followup,
+                "cycle": cycle,
                 "labels": job_labels,
                 "latency": latency,
                 "e2e_latency": e2e_latency,
@@ -319,11 +377,16 @@ class DeadlineScheduler:
         incident_id: str,
         parent_id: str,
         drift_score: float,
-        delay_sec: float = 10.0,
+        cycle: int = 1,
+        prev_severity: Optional[str] = None,
+        prev_observation: Optional[str] = None,
+        delay_sec: Optional[float] = None,
     ) -> None:
-        """Schedules a high-priority 10-second follow-up temporal evaluation."""
+        """Schedules a high-priority follow-up temporal evaluation."""
+        if delay_sec is None:
+            delay_sec = self.followup_interval_sec
         try:
-            print(f"[Scheduler] ⏳ Scheduled 10s follow-up for {cam_name} (Parent: {parent_id}) in {delay_sec}s...")
+            print(f"[Scheduler] ⏳ Scheduled follow-up #{cycle} for {cam_name} (Parent: {parent_id}) in {delay_sec:.1f}s...")
             await asyncio.sleep(delay_sec)
             if not self._running or self._queue is None:
                 return
@@ -335,7 +398,13 @@ class DeadlineScheduler:
             if not frames_b64:
                 return
 
-            followup_labels = ["t +2.5s", "t +5.0s", "t +7.5s", "t +10.0s (Outcome)"]
+            step = max(1.0, delay_sec / 4.0)
+            followup_labels = [
+                f"t +{step:.1f}s",
+                f"t +{step * 2:.1f}s",
+                f"t +{step * 3:.1f}s",
+                f"t +{delay_sec:.1f}s (Outcome)",
+            ]
             followup_job = {
                 "cam": cam_name,
                 "is_incident": True,
@@ -343,6 +412,10 @@ class DeadlineScheduler:
                 "incident_id": incident_id,
                 "parent_id": parent_id,
                 "drift": drift_score,
+                "cycle": cycle,
+                "prev_severity": prev_severity,
+                "prev_observation": prev_observation,
+                "followup_delay": delay_sec,
                 "frames_b64": frames_b64,
                 "thumbs_b64": thumbs_b64,
                 "thumbnail_b64": high_res_snap,
@@ -350,7 +423,7 @@ class DeadlineScheduler:
                 "trigger_time": time.monotonic(),
             }
             await self._queue.put((0, self._next_seq(), followup_job))
-            print(f"[Scheduler] 🔄 Queued 10s follow-up for {cam_name} (Parent: {parent_id})")
+            print(f"[Scheduler] 🔄 Queued follow-up #{cycle} for {cam_name} (Parent: {parent_id})")
         except asyncio.CancelledError:
             pass
         except Exception as e:

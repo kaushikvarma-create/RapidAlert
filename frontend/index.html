@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/style.css?v=21" />
+  <link rel="stylesheet" href="/style.css?v=22" />
   <script>
     (function() {
       var saved = localStorage.getItem('rapidalert_theme') || localStorage.getItem('theme');
@@ -118,10 +118,10 @@
       </div>
 
       <div class="alerts-filter-bar">
-        <button class="alert-filter-tab active" data-alert-filter="all">All</button>
+        <button class="alert-filter-tab" data-alert-filter="all">All</button>
         <button class="alert-filter-tab" data-alert-filter="high">🚨 High</button>
-        <button class="alert-filter-tab" data-alert-filter="medium">⚠️ Med</button>
-        <button class="alert-filter-tab" data-alert-filter="drift">⚡ Shift</button>
+        <button class="alert-filter-tab active" data-alert-filter="medium" title="Medium, High & Critical Alerts">⚠️ Med+</button>
+        <button class="alert-filter-tab" data-alert-filter="trigger" title="Scene Drift Triggers & Follow-Ups">⚡ Trigger</button>
       </div>
 
       <div class="alerts-feed" id="alerts-feed">
@@ -346,6 +346,19 @@
             <label class="field-label" for="sys-input-cooldown">Trigger Cooldown (sec)</label>
             <input id="sys-input-cooldown" type="number" step="1" min="2" max="120" class="input" placeholder="15" />
             <small style="color: var(--text-3); font-size: 0.68rem; display:block; margin-top:4px;">Minimum gap between event triggers</small>
+          </div>
+          <div>
+            <label class="field-label" for="sys-input-followup-interval">Follow-Up Delay (sec)</label>
+            <input id="sys-input-followup-interval" type="number" step="1" min="3" max="120" class="input" placeholder="10" />
+            <small style="color: var(--text-3); font-size: 0.68rem; display:block; margin-top:4px;">Delay after trigger for temporal follow-up</small>
+          </div>
+          <div style="display: flex; flex-direction: column; justify-content: flex-start;">
+            <label class="field-label" for="sys-input-persistent-followup">Persistent Follow-Up</label>
+            <label style="display: inline-flex; align-items: center; gap: 8px; cursor: pointer; height: 38px; margin-top: 2px;">
+              <input id="sys-input-persistent-followup" type="checkbox" style="width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer;" />
+              <span style="font-size: 0.82rem; color: var(--text-1); font-weight: 500;">Enable Persistent Loop</span>
+            </label>
+            <small style="color: var(--text-3); font-size: 0.68rem; display:block; margin-top:0px;">Repeat follow-ups until scene severity reduces to OK / LOW</small>
           </div>
         </div>
         <div style="display:flex; align-items:center; gap:12px;">
@@ -603,6 +616,6 @@
   <!-- ═══════════════════════════════════════════════════════════ TOAST -->
   <div class="toast-container" id="toast-container"></div>
 
-  <script src="/app.js?v=21"></script>
+  <script src="/app.js?v=22"></script>
 </body>
 </html>

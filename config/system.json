@@ -28,5 +28,8 @@
   "default_heartbeat_sec": 35.0,
   "semantic_interval": 0.5,
   "event_cooldown": 15.0,
+  "followup_interval_sec": 10.0,
+  "persistent_followup": true,
+  "followup_max_cycles": 6,
   "dashboard_port": 7000
 }

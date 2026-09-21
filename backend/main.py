@@ -182,7 +182,11 @@ async def _config_sync_loop() -> None:
                         scene_trigger.event_cooldown = float(new_cfg["event_cooldown"])
                     if "semantic_interval" in new_cfg:
                         scene_trigger.semantic_interval = float(new_cfg["semantic_interval"])
-                    print(f"[Main] 🔄 Hot-reloaded system.json (default_thresh: {SYS_CFG.get('default_threshold')}, hb: {SYS_CFG.get('default_heartbeat_sec')}s)")
+                    if "followup_interval_sec" in new_cfg:
+                        scheduler.followup_interval_sec = float(new_cfg["followup_interval_sec"])
+                    if "persistent_followup" in new_cfg:
+                        scheduler.persistent_followup = bool(new_cfg["persistent_followup"])
+                    print(f"[Main] 🔄 Hot-reloaded system.json (default_thresh: {SYS_CFG.get('default_threshold')}, hb: {SYS_CFG.get('default_heartbeat_sec')}s, followup: {scheduler.followup_interval_sec}s, persistent: {scheduler.persistent_followup})")
                     await ws_manager.broadcast({
                         "type": "config_updated",
                         "system": SYS_CFG,
@@ -295,6 +299,8 @@ class SystemConfigBody(BaseModel):
     default_heartbeat_sec: Optional[float] = None
     event_cooldown: Optional[float] = None
     semantic_interval: Optional[float] = None
+    followup_interval_sec: Optional[float] = None
+    persistent_followup: Optional[bool] = None
 
 
 @app.get("/api/config")
@@ -322,6 +328,10 @@ async def api_update_system_config(body: SystemConfigBody):
         scene_trigger.event_cooldown = float(updates["event_cooldown"])
     if "semantic_interval" in updates:
         scene_trigger.semantic_interval = float(updates["semantic_interval"])
+    if "followup_interval_sec" in updates:
+        scheduler.followup_interval_sec = float(updates["followup_interval_sec"])
+    if "persistent_followup" in updates:
+        scheduler.persistent_followup = bool(updates["persistent_followup"])
 
     # Persist to system.json
     try:
@@ -554,7 +564,10 @@ async def api_trigger_test_alert(cam: Optional[str] = None):
                 incident_id=alert["incident_id"],
                 parent_id=alert["id"],
                 drift_score=0.0482,
-                delay_sec=10.0,
+                delay_sec=scheduler.followup_interval_sec,
+                prev_observation=alert.get("observation", ""),
+                prev_severity=alert.get("severity", "HIGH"),
+                cycle=1,
             )
         )
     return {"status": "ok", "alert": alert}

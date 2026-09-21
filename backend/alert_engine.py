@@ -56,6 +56,8 @@ class AlertEngine:
         drift: Optional[float] = None,
         e2e_latency: Optional[float] = None,
         latency: Optional[float] = None,
+        cycle: int = 1,
+        delay_sec: float = 10.0,
     ) -> Optional[dict]:
         """Called for every VLM result. Fires alert with actual scene analysis when conditions are met."""
         raw_sev = (result.get("severity") or "LOW").upper()
@@ -71,9 +73,17 @@ class AlertEngine:
         if not is_alert:
             return None
 
-        # Effective severity & safety (elevate to MEDIUM/WARNING if incident/followup was triggered)
-        severity = raw_sev if raw_sev in _SEVERITY_TRIGGER else ("MEDIUM" if (is_incident or is_followup) else "LOW")
-        safety = raw_safety if raw_safety in _SAFETY_TRIGGER else ("WARNING" if (is_incident or is_followup) else "OK")
+        # Effective severity & safety:
+        # For follow-up: respect the model's objective visual evaluation (do not artificially elevate!)
+        if is_followup:
+            severity = raw_sev
+            safety = raw_safety
+        elif is_incident:
+            severity = raw_sev if raw_sev in _SEVERITY_TRIGGER else "MEDIUM"
+            safety = raw_safety if raw_safety in _SAFETY_TRIGGER else "WARNING"
+        else:
+            severity = raw_sev
+            safety = raw_safety
 
         ts_code = time.strftime("%Y%m%d%H%M%S")
         unique_suffix = f"{int(time.time() * 1000) % 1000:03d}"
@@ -81,8 +91,10 @@ class AlertEngine:
 
         if is_followup:
             trigger_mode = "FOLLOWUP"
-            trigger_badge = "🔄 FOLLOW-UP (+10s)"
-            event_id = f"EVT-{cam_slug}-{ts_code}-{unique_suffix}-FOLLOWUP"
+            cycle_suffix = f"-C{cycle}" if cycle > 1 else ""
+            event_id = f"EVT-{cam_slug}-{ts_code}-{unique_suffix}-FOLLOWUP{cycle_suffix}"
+            badge_delay = f"+{int(delay_sec)}s"
+            trigger_badge = f"🔄 FOLLOW-UP #{cycle} ({badge_delay})" if cycle > 1 else f"🔄 FOLLOW-UP ({badge_delay})"
             if not incident_id and parent_id:
                 # Inherit incident_id from parent if available
                 for a in self._alerts:
@@ -132,6 +144,8 @@ class AlertEngine:
             "is_incident": is_incident,
             "is_followup": is_followup,
             "is_periodic": not is_incident and not is_followup,
+            "cycle": cycle if is_followup else 0,
+            "delay_sec": delay_sec if is_followup else 0.0,
             "is_drift": False,
             "drift": drift,
             "latency": latency or result.get("latency"),
