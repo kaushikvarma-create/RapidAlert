@@ -145,6 +145,7 @@ const App = {
   handleMessage(msg) {
     switch (msg.type) {
       case 'init':    return this.onInit(msg);
+      case 'alert':   return this.onAlert(msg);
       case 'result_concurrent': return this.onResultConcurrent(msg);
       case 'camera_frame': return this.onCameraFrame(msg);
       case 'scene_shift': return this.onSceneShift(msg);
@@ -318,27 +319,24 @@ const App = {
       }
       this._renderCamCard(cam);
     }
-    const alertObj = {
-      cam: cam,
-      observation: `DINOv2 scene drift shift detected (drift=${Number(drift).toFixed(4)}). Event dispatched to Cosmos VLM.`,
-      severity: 'MEDIUM',
-      safety: 'WARNING',
-      is_drift: true,
-      ts: Date.now() / 1000,
-      thumbnail_b64: this.cameras[cam]?.thumbB64 || null
-    };
-    this.alerts.unshift(alertObj);
-    this._renderAlert(alertObj, true);
-    this._syncAlertCount();
-    this._playAlertChime('medium');
   },
 
   onAlert(msg) {
-    const alert = msg.data;
+    const alert = msg.data || msg.alert || msg;
+    if (!alert) return;
+    // Deduplicate by ID
+    if (alert.id && this.alerts.some(a => a.id === alert.id)) return;
     this.alerts.unshift(alert);
+    if (this.alerts.length > 200) this.alerts.pop();
+    this.alertCount = this.alerts.length;
     this._renderAlert(alert, true);
     this._syncAlertCount();
     this._playAlertChime(alert.severity || 'high');
+
+    // If alert inspector modal is currently viewing this camera, dynamically refresh related list
+    if (this.activeAlert && this.activeAlert.cam === alert.cam) {
+      this._renderRelatedAlerts(this.activeAlert);
+    }
   },
 
   onMetrics(msg) {
@@ -794,15 +792,21 @@ const App = {
     this._setText('alert-stat-e2e', alert.e2e_latency != null ? `${Number(alert.e2e_latency).toFixed(2)}s` : '--');
     this._setText('alert-stat-safety', alert.safety || (alert.is_drift ? 'WARNING' : '—'));
 
-    // Primary Image for THIS particular alert
+    // Primary Image for THIS particular alert (full native resolution)
     const img = document.getElementById('alert-modal-img');
     const noThumb = document.getElementById('alert-modal-no-thumb');
     const indicator = document.getElementById('alert-modal-indicator');
+    const frameWrap = document.getElementById('alert-modal-frame-wrap');
+    if (frameWrap) {
+      frameWrap.classList.remove('is-zoomed');
+      const zoomBadge = document.getElementById('alert-modal-zoom-badge');
+      if (zoomBadge) zoomBadge.textContent = '🔍 CLICK TO ZOOM (2x)';
+    }
     if (indicator) {
       indicator.innerHTML = `📸 CAPTURED AT INCIDENT (${alert.cam || 'Camera'})`;
     }
 
-    const primaryThumb = alert.thumbnail_b64 || (alert.thumbnails_b64 && alert.thumbnails_b64[0]);
+    const primaryThumb = alert.thumbnail_b64 || (alert.thumbnails_b64 && alert.thumbnails_b64[alert.thumbnails_b64.length - 1]);
     if (primaryThumb) {
       img.src = `data:image/jpeg;base64,${primaryThumb}`;
       img.style.display = 'block';
@@ -810,6 +814,20 @@ const App = {
     } else {
       img.style.display = 'none';
       if (noThumb) noThumb.style.display = 'flex';
+    }
+
+    // Set up click-to-zoom on the alert frame wrap
+    if (frameWrap && !frameWrap._zoomWired) {
+      frameWrap._zoomWired = true;
+      frameWrap.addEventListener('click', (e) => {
+        if (e.target.closest('.stream-live-indicator') || e.target.closest('button')) return;
+        frameWrap.classList.toggle('is-zoomed');
+        const isZoomed = frameWrap.classList.contains('is-zoomed');
+        const zoomBadge = document.getElementById('alert-modal-zoom-badge');
+        if (zoomBadge) {
+          zoomBadge.textContent = isZoomed ? '🔍 2x ZOOM (Click to reset)' : '🔍 CLICK TO ZOOM (2x)';
+        }
+      });
     }
 
     // Multi-frame Sequence for THIS particular alert (if available)
@@ -822,15 +840,17 @@ const App = {
         const count = alert.thumbnails_b64.length;
         const labels = ['t -4.0s (Before)', 't -1.0s (Trigger)', 't +1.5s (Action)', 't +3.5s (Outcome)'];
         alert.thumbnails_b64.forEach((b64, idx) => {
+          const isLatest = idx === count - 1;
           const thumbWrap = document.createElement('div');
-          thumbWrap.className = `temporal-strip-thumb-wrap ${idx === 0 ? 'active' : ''}`;
+          thumbWrap.className = `temporal-strip-thumb-wrap ${isLatest ? 'active' : ''}`;
           const labelText = labels[idx] || `Frame ${idx + 1} (t-${count - 1 - idx})`;
           thumbWrap.title = `${labelText} — Click to inspect`;
           thumbWrap.innerHTML = `
             <img src="data:image/jpeg;base64,${b64}" class="temporal-strip-thumb" alt="${labelText}">
             <span class="temporal-strip-label">${labelText}</span>
           `;
-          thumbWrap.addEventListener('click', () => {
+          thumbWrap.addEventListener('click', (e) => {
+            e.stopPropagation();
             img.src = `data:image/jpeg;base64,${b64}`;
             framesStrip.querySelectorAll('.temporal-strip-thumb-wrap').forEach(w => w.classList.remove('active'));
             thumbWrap.classList.add('active');

@@ -2188,6 +2188,59 @@ select.input option {
   border-color: rgba(255, 255, 255, 0.3) !important;
   letter-spacing: 0.04em;
   font-size: 0.65rem;
+  z-index: 2;
+}
+
+.alert-modal-frame-container {
+  position: relative;
+  background: #000;
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+  min-height: 380px;
+  max-height: 520px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: zoom-in;
+  user-select: none;
+}
+
+.alert-modal-frame-container.is-zoomed {
+  cursor: zoom-out;
+  overflow: auto;
+}
+
+.alert-modal-frame-container.is-zoomed #alert-modal-img {
+  transform: scale(2.0);
+  cursor: zoom-out;
+}
+
+#alert-modal-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  image-rendering: -webkit-optimize-contrast;
+  transition: transform 0.22s cubic-bezier(0.2, 0, 0, 1);
+  transform-origin: center center;
+}
+
+.alert-zoom-hint-badge {
+  position: absolute;
+  bottom: 10px;
+  right: 10px;
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(4px);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: #f1f5f9;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 3px 8px;
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 2;
+  transition: opacity 0.2s ease;
 }
 
 .alert-event-frames-section {

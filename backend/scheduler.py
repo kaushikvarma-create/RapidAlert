@@ -212,10 +212,12 @@ class DeadlineScheduler:
         if is_incident and job.get("frames_b64"):
             frames_b64 = job["frames_b64"]
             thumbs_b64 = job.get("thumbs_b64", [])
+            high_res_snap = job.get("thumbnail_b64") or self.frame_store.get_snapshot_b64(cam_name, max_w=1280, quality=85) or (thumbs_b64[-1] if thumbs_b64 else None)
         else:
             # Heartbeat fallback: extract 4 temporal frames across 10s
             frames_b64 = self.frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=10.0, max_w=512)
-            thumbs_b64 = self.frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=10.0, max_w=320, quality=65)
+            thumbs_b64 = self.frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=10.0, max_w=960, quality=82)
+            high_res_snap = self.frame_store.get_snapshot_b64(cam_name, max_w=1280, quality=85) or (thumbs_b64[-1] if thumbs_b64 else None)
 
         if not frames_b64:
             return
@@ -257,8 +259,8 @@ class DeadlineScheduler:
             except Exception:
                 pass
 
-        # Alert check based on Cosmos 8B result
-        latest_thumb = thumbs_b64[-1] if thumbs_b64 else None
+        # Alert check based on Cosmos 8B result with high-resolution frame
+        latest_thumb = high_res_snap or (thumbs_b64[-1] if thumbs_b64 else None)
         await self.alert_engine.process(
             cam_name=cam_name,
             result=res,

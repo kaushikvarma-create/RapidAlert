@@ -524,7 +524,8 @@ async def api_trigger_test_alert(cam: Optional[str] = None):
     """Trigger an immediate test alert to verify notification feed and inspector."""
     active = camera_manager.get_active_cameras()
     cam_name = cam if (cam and cam in active) else (active[0] if active else "TEST_CAM")
-    snap = frame_store.get_snapshot_b64(cam_name, max_w=480, quality=70)
+    snap = frame_store.get_snapshot_b64(cam_name, max_w=1280, quality=85)
+    temporal_snaps = frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=10.0, max_w=960, quality=82)
     alert = await alert_engine.process(
         cam_name=cam_name,
         result={
@@ -538,7 +539,7 @@ async def api_trigger_test_alert(cam: Optional[str] = None):
             "e2e_latency": 1.35,
         },
         thumbnail_b64=snap,
-        thumbnails_b64=[snap] if snap else [],
+        thumbnails_b64=temporal_snaps if temporal_snaps else ([snap] if snap else []),
         is_incident=True,
         drift=0.0482,
         e2e_latency=1.35,

@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/style.css?v=18" />
+  <link rel="stylesheet" href="/style.css?v=19" />
   <script>
     (function() {
       var saved = localStorage.getItem('rapidalert_theme') || localStorage.getItem('theme');
@@ -522,11 +522,14 @@
     <div class="modal-theater-body">
       <!-- Left: Event Snapshot & Captured Trigger Sequence -->
       <div class="theater-stream-pane">
-        <div class="modal-frame-wrap" id="alert-modal-frame-wrap">
+        <div class="modal-frame-wrap alert-modal-frame-container" id="alert-modal-frame-wrap">
           <img id="alert-modal-img" src="" alt="Alert frame" style="display:none"/>
           <div class="modal-frame-loading" id="alert-modal-no-thumb">No snapshot available</div>
           <div class="stream-live-indicator alert-freeze-indicator" id="alert-modal-indicator">
             📸 CAPTURED AT INCIDENT
+          </div>
+          <div class="alert-zoom-hint-badge" id="alert-modal-zoom-badge">
+            🔍 CLICK TO ZOOM (2x)
           </div>
         </div>
 
@@ -596,6 +599,6 @@
   <!-- ═══════════════════════════════════════════════════════════ TOAST -->
   <div class="toast-container" id="toast-container"></div>
 
-  <script src="/app.js?v=18"></script>
+  <script src="/app.js?v=19"></script>
 </body>
 </html>
