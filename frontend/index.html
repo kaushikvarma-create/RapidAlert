@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/style.css?v=20" />
+  <link rel="stylesheet" href="/style.css?v=21" />
   <script>
     (function() {
       var saved = localStorage.getItem('rapidalert_theme') || localStorage.getItem('theme');
@@ -502,6 +502,7 @@
       <div class="alert-modal-title-group">
         <div class="modal-cam-badge-row">
           <h2 id="alert-modal-cam">Alert Details</h2>
+          <span class="badge badge-mono" id="alert-modal-event-id">EVT-ID</span>
           <span class="badge badge-cyan" id="alert-modal-badge-type">INCIDENT</span>
           <span class="badge badge-red" id="alert-modal-badge-sev">HIGH</span>
         </div>
@@ -565,6 +566,9 @@
 
       <!-- Right: Particular Alert Understanding & Related Incident Trail -->
       <div class="theater-controls-pane">
+        <!-- Quick Pair Navigation Banner (Trigger <-> 10s Follow-Up) -->
+        <div class="alert-pair-banner" id="alert-modal-pair-banner" style="display:none;"></div>
+
         <!-- Particular Alert Understanding -->
         <div class="theater-box">
           <div class="theater-box-header">
@@ -599,6 +603,6 @@
   <!-- ═══════════════════════════════════════════════════════════ TOAST -->
   <div class="toast-container" id="toast-container"></div>
 
-  <script src="/app.js?v=20"></script>
+  <script src="/app.js?v=21"></script>
 </body>
 </html>

@@ -146,6 +146,7 @@ const App = {
     switch (msg.type) {
       case 'init':    return this.onInit(msg);
       case 'alert':   return this.onAlert(msg);
+      case 'alert_linked': return this.onAlertLinked(msg);
       case 'result_concurrent': return this.onResultConcurrent(msg);
       case 'camera_frame': return this.onCameraFrame(msg);
       case 'scene_shift': return this.onSceneShift(msg);
@@ -326,6 +327,19 @@ const App = {
     if (!alert) return;
     // Deduplicate by ID
     if (alert.id && this.alerts.some(a => a.id === alert.id)) return;
+
+    // Link parent if this is a follow-up
+    if (alert.parent_id) {
+      const parent = this.alerts.find(a => a.id === alert.parent_id);
+      if (parent) {
+        parent.followup_id = alert.id;
+      }
+      if (this.activeAlert && this.activeAlert.id === alert.parent_id) {
+        this.activeAlert.followup_id = alert.id;
+        this._renderPairBanner(this.activeAlert);
+      }
+    }
+
     this.alerts.unshift(alert);
     if (this.alerts.length > 200) this.alerts.pop();
     this.alertCount = this.alerts.length;
@@ -336,6 +350,18 @@ const App = {
     // If alert inspector modal is currently viewing this camera, dynamically refresh related list
     if (this.activeAlert && this.activeAlert.cam === alert.cam) {
       this._renderRelatedAlerts(this.activeAlert);
+    }
+  },
+
+  onAlertLinked(msg) {
+    const parent = this.alerts.find(a => a.id === msg.parent_id);
+    if (parent) {
+      parent.followup_id = msg.followup_id;
+      if (msg.incident_id) parent.incident_id = msg.incident_id;
+    }
+    if (this.activeAlert && this.activeAlert.id === msg.parent_id) {
+      this.activeAlert.followup_id = msg.followup_id;
+      this._renderPairBanner(this.activeAlert);
     }
   },
 
@@ -639,24 +665,34 @@ const App = {
     const ts  = alert.ts ? new Date(alert.ts * 1000).toLocaleTimeString() : '—';
     const sevCls = { low: 'green', medium: 'amber', high: 'red' }[sev] || 'muted';
 
-    const isIncident = Boolean(alert.is_incident || alert.trigger_mode === 'TRIGGER');
-    let triggerTagHtml = isIncident
-      ? `<span class="alert-trigger-tag trigger-tag-incident" title="Triggered by DINOv2 Scene Drift Incident">⚡ TRIGGER</span>`
-      : `<span class="alert-trigger-tag trigger-tag-periodic" title="Scheduled Periodic AI Inspection">⏱️ PERIODIC</span>`;
+    const isFollowup = alert.trigger_mode === 'FOLLOWUP' || alert.is_followup;
+    const isIncident = Boolean(alert.is_incident || alert.trigger_mode === 'TRIGGER') && !isFollowup;
+    let triggerTagHtml = '';
+    if (isFollowup) {
+      triggerTagHtml = `<span class="alert-trigger-tag trigger-tag-followup" title="10-Second Follow-Up Outcome Evaluation">🔄 FOLLOW-UP (+10s)</span>`;
+    } else if (isIncident) {
+      triggerTagHtml = `<span class="alert-trigger-tag trigger-tag-incident" title="Triggered by DINOv2 Scene Drift Incident">⚡ TRIGGER</span>`;
+    } else {
+      triggerTagHtml = `<span class="alert-trigger-tag trigger-tag-periodic" title="Scheduled Periodic AI Inspection">⏱️ PERIODIC</span>`;
+    }
 
     if (alert.is_fault) {
       triggerTagHtml = `<span class="alert-trigger-tag trigger-tag-offline">FEED FAULT</span>`;
     }
 
+    const eventIdShort = alert.id ? alert.id.replace(/^EVT-/, '') : '';
+    const idBadgeHtml = eventIdShort ? `<span class="alert-id-chip" title="${this._esc(alert.id)}">${this._esc(eventIdShort.length > 18 ? '…' + eventIdShort.slice(-14) : eventIdShort)}</span>` : '';
+
     const item = document.createElement('div');
-    item.className = `alert-item sev-${isIncident ? 'high' : sev}${animate ? ' alert-enter' : ''}`;
+    item.className = `alert-item sev-${isFollowup ? 'medium' : (isIncident ? 'high' : sev)}${animate ? ' alert-enter' : ''}`;
     item.setAttribute('data-sev', sev);
-    item.setAttribute('data-trigger', isIncident ? 'trigger' : 'periodic');
+    item.setAttribute('data-trigger', isFollowup ? 'followup' : (isIncident ? 'trigger' : 'periodic'));
     item.title = 'Click to inspect this particular alert and incident history';
     item.innerHTML = `
       <div class="alert-header">
         <span class="alert-cam">${this._esc(alert.cam || 'System')}</span>
         ${triggerTagHtml}
+        ${idBadgeHtml}
         <span class="badge badge-${sevCls} badge-sm">${sev.toUpperCase()}</span>
         <span class="alert-ts">${ts}</span>
       </div>
@@ -739,10 +775,22 @@ const App = {
     document.getElementById('alert-modal-cam').textContent = alert.cam || 'System Alert';
     document.getElementById('alert-modal-ts').textContent = `${fullDate} ${ts} • ${timeAgo}`;
 
-    const isIncident = Boolean(alert.is_incident || alert.trigger_mode === 'TRIGGER');
+    // Systematic Event ID Badge in Modal Header
+    const eventIdEl = document.getElementById('alert-modal-event-id');
+    if (eventIdEl) {
+      eventIdEl.textContent = alert.id || 'EVENT';
+      eventIdEl.title = `Systematic Event ID: ${alert.id || '—'}`;
+    }
+
+    const isFollowup = alert.trigger_mode === 'FOLLOWUP' || alert.is_followup;
+    const isIncident = Boolean(alert.is_incident || alert.trigger_mode === 'TRIGGER') && !isFollowup;
     const typeBadge = document.getElementById('alert-modal-badge-type');
     if (typeBadge) {
-      if (isIncident) {
+      if (isFollowup) {
+        typeBadge.textContent = '🔄 FOLLOW-UP (+10s)';
+        typeBadge.className = 'badge trigger-tag-followup';
+        typeBadge.title = '10-Second Post-Incident Temporal Follow-Up';
+      } else if (isIncident) {
         typeBadge.textContent = '⚡ TRIGGER';
         typeBadge.className = 'badge badge-amber';
         typeBadge.title = 'Incident triggered by DINOv2 scene drift';
@@ -759,6 +807,9 @@ const App = {
       sevBadge.className = `badge badge-${sevCls}`;
     }
 
+    // Quick Pair Navigation Banner (Trigger <-> Follow-Up)
+    this._renderPairBanner(alert);
+
     // Observation of THIS particular alert (clean scene analysis, fallback if legacy jargon)
     let obsText = alert.observation || 'No observation recorded for this alert.';
     if (obsText.startsWith('⚡ DINOv2 scene drift')) {
@@ -774,8 +825,12 @@ const App = {
     // Badges of THIS particular alert
     const badges = document.getElementById('alert-modal-badges');
     if (badges) {
+      const modeBadge = isFollowup
+        ? `<span class="badge trigger-tag-followup">🔄 FOLLOW-UP (+10s)</span>`
+        : `<span class="badge badge-${isIncident ? 'amber' : 'neutral'}">${isIncident ? '⚡ TRIGGER' : '⏱️ PERIODIC'}</span>`;
       badges.innerHTML = [
-        `<span class="badge badge-${isIncident ? 'amber' : 'neutral'}">${isIncident ? '⚡ TRIGGER' : '⏱️ PERIODIC'}</span>`,
+        modeBadge,
+        alert.id ? `<span class="badge badge-mono">${this._esc(alert.id)}</span>` : '',
         `<span class="badge badge-${sevCls}">⚠ ${sev.toUpperCase()}</span>`,
         alert.safety ? `<span class="badge badge-${safeCls}">🛡 ${this._esc(alert.safety)}</span>` : '',
         alert.activity && alert.activity !== 'UNKNOWN' && alert.activity !== 'SCENE_SHIFT' ? `<span class="badge badge-muted">⚡ ${this._esc(alert.activity)}</span>` : '',
@@ -786,8 +841,14 @@ const App = {
     // Metadata of THIS particular alert
     const meta = document.getElementById('alert-modal-meta');
     if (meta) {
+      let modeDesc = '⏱️ Scheduled Periodic Inspection';
+      if (isFollowup) modeDesc = `🔄 10-Second Post-Incident Follow-Up ${alert.parent_id ? `(Parent: ${alert.parent_id})` : ''}`;
+      else if (isIncident) modeDesc = `⚡ DINOv2 Incident Trigger ${alert.drift ? `(Drift: ${Number(alert.drift).toFixed(4)})` : ''}`;
+
       const rows = [
-        ['Trigger Mode', isIncident ? `⚡ DINOv2 Incident Trigger ${alert.drift ? `(Drift: ${Number(alert.drift).toFixed(4)})` : ''}` : '⏱️ Scheduled Periodic Inspection'],
+        ['Event ID', alert.id || '—'],
+        ['Incident Group', alert.incident_id || null],
+        ['Trigger Mode', modeDesc],
         ['Camera Feed', alert.cam],
         ['Detected At', alert.ts ? new Date(alert.ts * 1000).toLocaleString() : '—'],
         ['Workers Present', alert.workers && alert.workers !== '0' && alert.workers !== '—' ? alert.workers : null],
@@ -850,12 +911,16 @@ const App = {
         framesWrap.style.display = 'block';
         framesStrip.innerHTML = '';
         const count = alert.thumbnails_b64.length;
-        const labels = ['t -4.0s (Before)', 't -1.0s (Trigger)', 't +1.5s (Action)', 't +3.5s (Outcome)'];
+        const defaultLabels = isFollowup
+          ? ['t +2.5s', 't +5.0s', 't +7.5s', 't +10.0s (Outcome)']
+          : ['t -10.0s', 't -5.0s', 't -2.0s', 't 0.0s (Trigger)'];
+        const labels = (alert.labels && alert.labels.length === count) ? alert.labels : defaultLabels;
+
         alert.thumbnails_b64.forEach((b64, idx) => {
           const isLatest = idx === count - 1;
           const thumbWrap = document.createElement('div');
           thumbWrap.className = `temporal-strip-thumb-wrap ${isLatest ? 'active' : ''}`;
-          const labelText = labels[idx] || `Frame ${idx + 1} (t-${count - 1 - idx})`;
+          const labelText = labels[idx] || defaultLabels[idx] || `Frame ${idx + 1}`;
           thumbWrap.title = `${labelText} — Click to inspect`;
           thumbWrap.innerHTML = `
             <img src="data:image/jpeg;base64,${b64}" class="temporal-strip-thumb" alt="${labelText}">
@@ -893,6 +958,82 @@ const App = {
     document.getElementById('alert-modal').hidden = false;
   },
 
+  _renderPairBanner(alert) {
+    const banner = document.getElementById('alert-modal-pair-banner');
+    if (!banner) return;
+
+    const isFollowup = alert.trigger_mode === 'FOLLOWUP' || alert.is_followup;
+    const isTrigger = alert.trigger_mode === 'TRIGGER' || (alert.is_incident && !isFollowup);
+
+    if (isFollowup && alert.parent_id) {
+      const parent = this.alerts.find(a => a.id === alert.parent_id);
+      banner.style.display = 'block';
+      banner.innerHTML = `
+        <div class="alert-pair-nav-inner from-followup">
+          <div class="pair-label">
+            <span>⚡ Linked Trigger Event:</span>
+            <span class="badge badge-mono">${this._esc(alert.parent_id)}</span>
+          </div>
+          <button type="button" class="btn-pair-jump btn-amber" id="btn-pair-jump-parent">
+            ← View Initial Trigger
+          </button>
+        </div>
+      `;
+      const btn = document.getElementById('btn-pair-jump-parent');
+      if (btn) {
+        btn.onclick = () => {
+          if (parent) {
+            this.openAlertModal(parent);
+          } else {
+            this.showToast('Initial trigger event not found in current feed memory.', 'info');
+          }
+        };
+      }
+    } else if (isTrigger) {
+      const followup = alert.followup_id
+        ? this.alerts.find(a => a.id === alert.followup_id)
+        : this.alerts.find(a => a.parent_id === alert.id || (alert.incident_id && a.incident_id === alert.incident_id && (a.is_followup || a.trigger_mode === 'FOLLOWUP')));
+
+      if (followup) {
+        banner.style.display = 'block';
+        banner.innerHTML = `
+          <div class="alert-pair-nav-inner">
+            <div class="pair-label">
+              <span>🔄 10s Follow-Up Outcome Available:</span>
+              <span class="badge badge-mono">${this._esc(followup.id)}</span>
+            </div>
+            <button type="button" class="btn-pair-jump btn-cyan" id="btn-pair-jump-followup">
+              View 10s Follow-Up →
+            </button>
+          </div>
+        `;
+        const btn = document.getElementById('btn-pair-jump-followup');
+        if (btn) {
+          btn.onclick = () => {
+            this.openAlertModal(followup);
+          };
+        }
+      } else {
+        const ageSec = alert.ts ? (Date.now() / 1000 - alert.ts) : 999;
+        if (ageSec < 25) {
+          banner.style.display = 'block';
+          banner.innerHTML = `
+            <div class="alert-pair-nav-inner pending">
+              <div class="pair-label">
+                <span class="pulse-dot"></span>
+                <span>🔄 10-Second Follow-Up scheduled & capturing temporal outcome...</span>
+              </div>
+            </div>
+          `;
+        } else {
+          banner.style.display = 'none';
+        }
+      }
+    } else {
+      banner.style.display = 'none';
+    }
+  },
+
   _renderRelatedAlerts(currentAlert) {
     const listEl = document.getElementById('alert-related-list');
     const countBadge = document.getElementById('alert-related-count');
@@ -921,9 +1062,17 @@ const App = {
       const sev = (r.severity || 'LOW').toLowerCase();
       const rSevCls = { low: 'green', medium: 'amber', high: 'red' }[sev] || 'muted';
       const rTs = r.ts ? new Date(r.ts * 1000).toLocaleTimeString() : '—';
-      const rIsIncident = Boolean(r.is_incident || r.trigger_mode === 'TRIGGER');
-      const tag = rIsIncident ? '⚡ TRIGGER' : '⏱️ PERIODIC';
-      const tagCls = rIsIncident ? 'amber' : 'neutral';
+      const rIsFollowup = r.trigger_mode === 'FOLLOWUP' || r.is_followup;
+      const rIsIncident = Boolean(r.is_incident || r.trigger_mode === 'TRIGGER') && !rIsFollowup;
+      let tag = '⏱️ PERIODIC';
+      let tagCls = 'neutral';
+      if (rIsFollowup) {
+        tag = '🔄 FOLLOW-UP (+10s)';
+        tagCls = 'cyan';
+      } else if (rIsIncident) {
+        tag = '⚡ TRIGGER';
+        tagCls = 'amber';
+      }
 
       item.innerHTML = `
         ${r.thumbnail_b64 ? `<img src="data:image/jpeg;base64,${r.thumbnail_b64}" class="alert-related-thumb" alt="">` : ''}

@@ -176,43 +176,28 @@ class SceneTriggerEngine:
         trigger_time: Optional[float] = None,
     ) -> None:
         """
-        Asynchronously collects pre-trigger and post-trigger frames.
-        t0 (pre-trigger):  t-4.0s, t-1.0s
-        t1 (post-trigger): awaits t+1.5s, t+3.5s
-        Total 4 temporal frames representing the full incident evolution.
+        Immediately collects 4 temporal frames over the past 10 seconds:
+        - Frame 1: Scene baseline (t -10.0s)
+        - Frame 2: Developing activity (t -5.0s, last 6s window)
+        - Frame 3: Immediate lead-up (t -2.0s, last 6s window)
+        - Frame 4: Trigger moment (t 0.0s, trigger frame)
+        Zero waiting delay so incident VLM analysis dispatches instantaneously!
         """
         if trigger_time is None:
             trigger_time = time.monotonic()
         try:
-            # Extract t0 pre-trigger frames from rolling buffer
-            t0_frames = self.frame_store.get_pre_trigger_frames(
-                cam_name, trigger_ts, offsets=[-4.0, -1.0]
+            # Extract 4 frames directly from rolling buffer: t-10.0s, t-5.0s, t-2.0s, t 0.0s
+            offsets = [-10.0, -5.0, -2.0, 0.0]
+            frames = self.frame_store.get_pre_trigger_frames(
+                cam_name, trigger_ts, offsets=offsets
             )
 
-            # Wait and collect post-trigger frame 1 (t+1.5s)
-            await asyncio.sleep(1.5)
-            post1 = self.frame_store.get_latest(cam_name)
-            t1_frame1 = post1[0].copy() if post1 else (t0_frames[-1] if t0_frames else None)
-
-            # Wait and collect post-trigger frame 2 (t+3.5s)
-            await asyncio.sleep(2.0)
-            post2 = self.frame_store.get_latest(cam_name)
-            t1_frame2 = post2[0].copy() if post2 else (t1_frame1 if t1_frame1 is not None else None)
-
-            # Assemble the 4 frames
-            frames = []
-            if len(t0_frames) >= 2:
-                frames.extend(t0_frames)
-            elif len(t0_frames) == 1:
-                frames.extend([t0_frames[0], t0_frames[0]])
-            else:
+            if not frames:
                 fallback = self.frame_store.get_latest(cam_name)
-                frames.extend([fallback[0], fallback[0]] if fallback else [])
-
-            if t1_frame1 is not None:
-                frames.append(t1_frame1)
-            if t1_frame2 is not None:
-                frames.append(t1_frame2)
+                frames = [fallback[0].copy()] * 4 if fallback else []
+            elif len(frames) < 4:
+                while len(frames) < 4:
+                    frames.insert(0, frames[0].copy())
 
             # Base64 encode for VLM (downscaled to 512 for fast multi-frame processing)
             frames_b64 = self.frame_store.encode_frames(frames, max_w=512, quality=75)
@@ -221,7 +206,7 @@ class SceneTriggerEngine:
             # High resolution snapshot (960px, quality 78) for sharp incident inspector
             high_res_snap = self.frame_store.encode_frames([frames[-1]], max_w=960, quality=78)[0] if frames else (thumbs_b64[-1] if thumbs_b64 else None)
 
-            labels = ["t -4.0s (Before)", "t -1.0s (Trigger)", "t +1.5s (Action)", "t +3.5s (Outcome)"]
+            labels = ["t -10.0s", "t -5.0s", "t -2.0s", "t 0.0s (Trigger)"]
 
             incident_data = {
                 "cam": cam_name,

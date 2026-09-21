@@ -526,6 +526,7 @@ async def api_trigger_test_alert(cam: Optional[str] = None):
     cam_name = cam if (cam and cam in active) else (active[0] if active else "TEST_CAM")
     snap = frame_store.get_snapshot_b64(cam_name, max_w=960, quality=78)
     temporal_snaps = frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=10.0, max_w=480, quality=68)
+    labels = ["t -10.0s", "t -5.0s", "t -2.0s", "t 0.0s (Trigger)"]
     alert = await alert_engine.process(
         cam_name=cam_name,
         result={
@@ -541,10 +542,21 @@ async def api_trigger_test_alert(cam: Optional[str] = None):
         thumbnail_b64=snap,
         thumbnails_b64=temporal_snaps if temporal_snaps else ([snap] if snap else []),
         is_incident=True,
+        labels=labels,
         drift=0.0482,
         e2e_latency=1.35,
         latency=1.15,
     )
+    if alert:
+        asyncio.create_task(
+            scheduler._schedule_followup(
+                cam_name=cam_name,
+                incident_id=alert["incident_id"],
+                parent_id=alert["id"],
+                drift_score=0.0482,
+                delay_sec=10.0,
+            )
+        )
     return {"status": "ok", "alert": alert}
 
 

@@ -49,6 +49,10 @@ class AlertEngine:
         thumbnail_b64: Optional[str] = None,
         thumbnails_b64: Optional[List[str]] = None,
         is_incident: bool = False,
+        is_followup: bool = False,
+        incident_id: Optional[str] = None,
+        parent_id: Optional[str] = None,
+        labels: Optional[List[str]] = None,
         drift: Optional[float] = None,
         e2e_latency: Optional[float] = None,
         latency: Optional[float] = None,
@@ -61,20 +65,57 @@ class AlertEngine:
             raw_sev in _SEVERITY_TRIGGER
             or raw_safety in _SAFETY_TRIGGER
             or is_incident
+            or is_followup
         )
 
         if not is_alert:
             return None
 
-        # Effective severity & safety (elevate to MEDIUM/WARNING if incident was triggered)
-        severity = raw_sev if raw_sev in _SEVERITY_TRIGGER else ("MEDIUM" if is_incident else "LOW")
-        safety = raw_safety if raw_safety in _SAFETY_TRIGGER else ("WARNING" if is_incident else "OK")
+        # Effective severity & safety (elevate to MEDIUM/WARNING if incident/followup was triggered)
+        severity = raw_sev if raw_sev in _SEVERITY_TRIGGER else ("MEDIUM" if (is_incident or is_followup) else "LOW")
+        safety = raw_safety if raw_safety in _SAFETY_TRIGGER else ("WARNING" if (is_incident or is_followup) else "OK")
 
-        trigger_mode = "TRIGGER" if is_incident else "PERIODIC"
-        trigger_badge = "⚡ TRIGGER" if is_incident else "⏱️ PERIODIC"
+        ts_code = time.strftime("%Y%m%d%H%M%S")
+        unique_suffix = f"{int(time.time() * 1000) % 1000:03d}"
+        cam_slug = cam_name.upper().replace(" ", "_")
+
+        if is_followup:
+            trigger_mode = "FOLLOWUP"
+            trigger_badge = "🔄 FOLLOW-UP (+10s)"
+            event_id = f"EVT-{cam_slug}-{ts_code}-{unique_suffix}-FOLLOWUP"
+            if not incident_id and parent_id:
+                # Inherit incident_id from parent if available
+                for a in self._alerts:
+                    if a.get("id") == parent_id:
+                        incident_id = a.get("incident_id")
+                        break
+            if not incident_id:
+                incident_id = f"INC-{cam_slug}-{ts_code}-{unique_suffix}"
+        elif is_incident:
+            trigger_mode = "TRIGGER"
+            trigger_badge = "⚡ TRIGGER"
+            event_id = f"EVT-{cam_slug}-{ts_code}-{unique_suffix}-TRIGGER"
+            if not incident_id:
+                incident_id = f"INC-{cam_slug}-{ts_code}-{unique_suffix}"
+        else:
+            trigger_mode = "PERIODIC"
+            trigger_badge = "⏱️ PERIODIC"
+            event_id = f"EVT-{cam_slug}-{ts_code}-{unique_suffix}-PERIODIC"
+            if not incident_id:
+                incident_id = f"PER-{cam_slug}-{ts_code}-{unique_suffix}"
+
+        # Link to parent alert if this is a follow-up
+        if is_followup and parent_id:
+            for a in self._alerts:
+                if a.get("id") == parent_id:
+                    a["followup_id"] = event_id
+                    break
 
         alert = {
-            "id": f"alert_{cam_name}_{int(time.time() * 1000)}",
+            "id": event_id,
+            "incident_id": incident_id,
+            "parent_id": parent_id,
+            "followup_id": None,
             "cam": cam_name,
             "ts": time.time(),
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -89,18 +130,27 @@ class AlertEngine:
             "evolution": result.get("evolution", ""),
             "model": result.get("model", "vrfai/Cosmos-Reason2-8B-NVFP4"),
             "is_incident": is_incident,
-            "is_periodic": not is_incident,
+            "is_followup": is_followup,
+            "is_periodic": not is_incident and not is_followup,
             "is_drift": False,
             "drift": drift,
             "latency": latency or result.get("latency"),
             "e2e_latency": e2e_latency or result.get("e2e_latency"),
             "thumbnail_b64": thumbnail_b64 or (thumbnails_b64[-1] if thumbnails_b64 else None),
             "thumbnails_b64": thumbnails_b64 or [],
+            "labels": labels or [],
         }
         self._alerts.append(alert)
 
         if self._broadcast_fn:
             await self._broadcast_fn({"type": "alert", "data": alert})
+            if is_followup and parent_id:
+                await self._broadcast_fn({
+                    "type": "alert_linked",
+                    "parent_id": parent_id,
+                    "followup_id": event_id,
+                    "incident_id": incident_id,
+                })
 
         return alert
 

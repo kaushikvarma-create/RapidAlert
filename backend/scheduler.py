@@ -207,7 +207,11 @@ class DeadlineScheduler:
     async def _analyze_job(self, job: dict) -> None:
         cam_name = job["cam"]
         is_incident = not job.get("is_heartbeat", False)
+        is_followup = job.get("is_followup", False)
         drift_score = job.get("drift", 0.0)
+        job_labels = job.get("labels")
+        incident_id = job.get("incident_id")
+        parent_id = job.get("parent_id")
 
         if is_incident and job.get("frames_b64"):
             frames_b64 = job["frames_b64"]
@@ -218,11 +222,12 @@ class DeadlineScheduler:
             frames_b64 = self.frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=10.0, max_w=512)
             thumbs_b64 = self.frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=10.0, max_w=480, quality=68)
             high_res_snap = self.frame_store.get_snapshot_b64(cam_name, max_w=960, quality=78) or (thumbs_b64[-1] if thumbs_b64 else None)
+            job_labels = ["t -10.0s", "t -6.5s", "t -3.0s", "t 0.0s (Current)"]
 
         if not frames_b64:
             return
 
-        prompt = self.prompt_manager.get_prompt(cam_name)
+        prompt = self.prompt_manager.get_prompt(cam_name, is_followup=is_followup)
 
         t0 = time.monotonic()
         res = await self.vlm_pool.analyze(cam_name, frames_b64, prompt)
@@ -235,11 +240,13 @@ class DeadlineScheduler:
             res["e2e_latency"] = e2e_latency
             res["trigger_to_post"] = e2e_latency
             res["is_incident"] = True
+            res["is_followup"] = is_followup
         else:
             e2e_latency = None
             res["e2e_latency"] = None
             res["trigger_to_post"] = None
             res["is_incident"] = False
+            res["is_followup"] = False
 
         self._latencies.append(latency)
         if len(self._latencies) > 100:
@@ -261,16 +268,34 @@ class DeadlineScheduler:
 
         # Alert check based on Cosmos 8B result with high-resolution frame
         latest_thumb = high_res_snap or (thumbs_b64[-1] if thumbs_b64 else None)
-        await self.alert_engine.process(
+        alert = await self.alert_engine.process(
             cam_name=cam_name,
             result=res,
             thumbnail_b64=latest_thumb,
             thumbnails_b64=thumbs_b64,
             is_incident=is_incident,
+            is_followup=is_followup,
+            incident_id=incident_id,
+            parent_id=parent_id,
+            labels=job_labels,
             drift=drift_score,
             e2e_latency=e2e_latency,
             latency=latency,
         )
+
+        # If this was an initial trigger event (not a follow-up), schedule the 10-second follow-up!
+        if is_incident and not is_followup and alert:
+            evt_id = alert["id"]
+            inc_id = alert.get("incident_id")
+            asyncio.create_task(
+                self._schedule_followup(
+                    cam_name=cam_name,
+                    incident_id=inc_id,
+                    parent_id=evt_id,
+                    drift_score=drift_score,
+                    delay_sec=10.0,
+                )
+            )
 
         # Broadcast single Cosmos 8B result, thumbnails, drift score and incident flag to dashboard
         if self.broadcast_fn:
@@ -281,10 +306,55 @@ class DeadlineScheduler:
                 "thumbnails_b64": thumbs_b64,
                 "drift": drift_score,
                 "is_incident": is_incident,
+                "is_followup": is_followup,
+                "labels": job_labels,
                 "latency": latency,
                 "e2e_latency": e2e_latency,
                 "trigger_to_post": e2e_latency,
             })
+
+    async def _schedule_followup(
+        self,
+        cam_name: str,
+        incident_id: str,
+        parent_id: str,
+        drift_score: float,
+        delay_sec: float = 10.0,
+    ) -> None:
+        """Schedules a high-priority 10-second follow-up temporal evaluation."""
+        try:
+            print(f"[Scheduler] ⏳ Scheduled 10s follow-up for {cam_name} (Parent: {parent_id}) in {delay_sec}s...")
+            await asyncio.sleep(delay_sec)
+            if not self._running or self._queue is None:
+                return
+
+            frames_b64 = self.frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=delay_sec, max_w=512)
+            thumbs_b64 = self.frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=delay_sec, max_w=480, quality=68)
+            high_res_snap = self.frame_store.get_snapshot_b64(cam_name, max_w=960, quality=78) or (thumbs_b64[-1] if thumbs_b64 else None)
+
+            if not frames_b64:
+                return
+
+            followup_labels = ["t +2.5s", "t +5.0s", "t +7.5s", "t +10.0s (Outcome)"]
+            followup_job = {
+                "cam": cam_name,
+                "is_incident": True,
+                "is_followup": True,
+                "incident_id": incident_id,
+                "parent_id": parent_id,
+                "drift": drift_score,
+                "frames_b64": frames_b64,
+                "thumbs_b64": thumbs_b64,
+                "thumbnail_b64": high_res_snap,
+                "labels": followup_labels,
+                "trigger_time": time.monotonic(),
+            }
+            await self._queue.put((0, self._next_seq(), followup_job))
+            print(f"[Scheduler] 🔄 Queued 10s follow-up for {cam_name} (Parent: {parent_id})")
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            print(f"[Scheduler] Error running follow-up for {cam_name}: {e}")
 
     # ── Auto-tune ───────────────────────────────────────────────────
 
