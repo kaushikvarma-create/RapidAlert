@@ -42,24 +42,28 @@ class StorageManager:
             conn = self._conn()
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS analyses (
-                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    cam         TEXT    NOT NULL,
-                    ts          REAL    NOT NULL,
-                    observation TEXT,
-                    activity    TEXT,
-                    workers     TEXT,
-                    machinery   TEXT,
-                    safety      TEXT,
-                    severity    TEXT,
-                    latency     REAL,
-                    raw         TEXT,
-                    error       INTEGER DEFAULT 0
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cam          TEXT    NOT NULL,
+                    ts           REAL    NOT NULL,
+                    observation  TEXT,
+                    activity     TEXT,
+                    workers      TEXT,
+                    machinery    TEXT,
+                    safety       TEXT,
+                    severity     TEXT,
+                    latency      REAL,
+                    e2e_latency  REAL,
+                    incident_id  TEXT,
+                    parent_id    TEXT,
+                    trigger_mode TEXT,
+                    clip_path    TEXT,
+                    keywords     TEXT,
+                    threat_level TEXT,
+                    confidence   REAL,
+                    labels       TEXT,
+                    raw          TEXT,
+                    error        INTEGER DEFAULT 0
                 );
-
-                CREATE INDEX IF NOT EXISTS idx_analyses_cam    ON analyses(cam);
-                CREATE INDEX IF NOT EXISTS idx_analyses_ts     ON analyses(ts);
-                CREATE INDEX IF NOT EXISTS idx_analyses_severity ON analyses(severity);
-                CREATE INDEX IF NOT EXISTS idx_analyses_safety   ON analyses(safety);
 
                 CREATE TABLE IF NOT EXISTS meta (
                     key   TEXT PRIMARY KEY,
@@ -67,21 +71,44 @@ class StorageManager:
                 );
             """)
 
-            # Add e2e_latency column if not present
+            # Migration: Add missing columns if database exists from earlier version
             cursor = conn.execute("PRAGMA table_info(analyses)")
-            columns = [row["name"] for row in cursor.fetchall()]
-            if "e2e_latency" not in columns:
-                try:
-                    conn.execute("ALTER TABLE analyses ADD COLUMN e2e_latency REAL")
-                    conn.commit()
-                except sqlite3.OperationalError as op_err:
-                    if "duplicate column name" not in str(op_err).lower():
-                        error_tracker.capture_exception(
-                            op_err,
-                            component="StorageManager",
-                            effect="Failed to alter analyses table to add e2e_latency column",
-                            severity="WARNING",
-                        )
+            existing_cols = {row["name"] for row in cursor.fetchall()}
+            schema_additions = {
+                "e2e_latency": "REAL",
+                "incident_id": "TEXT",
+                "parent_id": "TEXT",
+                "trigger_mode": "TEXT",
+                "clip_path": "TEXT",
+                "keywords": "TEXT",
+                "threat_level": "TEXT",
+                "confidence": "REAL",
+                "labels": "TEXT",
+            }
+            for col_name, col_type in schema_additions.items():
+                if col_name not in existing_cols:
+                    try:
+                        conn.execute(f"ALTER TABLE analyses ADD COLUMN {col_name} {col_type}")
+                        conn.commit()
+                    except sqlite3.OperationalError as op_err:
+                        if "duplicate column name" not in str(op_err).lower():
+                            error_tracker.capture_exception(
+                                op_err,
+                                component="StorageManager",
+                                effect=f"Failed to add column {col_name} to analyses table",
+                                severity="WARNING",
+                            )
+
+            # Create indexes after all columns are confirmed to exist
+            conn.executescript("""
+                CREATE INDEX IF NOT EXISTS idx_analyses_cam       ON analyses(cam);
+                CREATE INDEX IF NOT EXISTS idx_analyses_ts        ON analyses(ts);
+                CREATE INDEX IF NOT EXISTS idx_analyses_severity  ON analyses(severity);
+                CREATE INDEX IF NOT EXISTS idx_analyses_safety    ON analyses(safety);
+                CREATE INDEX IF NOT EXISTS idx_analyses_incident  ON analyses(incident_id);
+                CREATE INDEX IF NOT EXISTS idx_analyses_trigger   ON analyses(trigger_mode);
+                CREATE INDEX IF NOT EXISTS idx_analyses_cam_ts    ON analyses(cam, ts);
+            """)
 
             # Store DB version
             conn.execute(
@@ -98,19 +125,43 @@ class StorageManager:
             )
 
     # ── Write ────────────────────────────────────────────────────
-    def save(self, result: dict, latency: float = 0.0, e2e_latency: Optional[float] = None) -> Optional[int]:
+    def save(
+        self,
+        result: dict,
+        latency: float = 0.0,
+        e2e_latency: Optional[float] = None,
+        incident_id: Optional[str] = None,
+        parent_id: Optional[str] = None,
+        trigger_mode: Optional[str] = None,
+        clip_path: Optional[str] = None,
+        keywords: Optional[str] = None,
+        threat_level: Optional[str] = None,
+        confidence: Optional[float] = None,
+        labels: Optional[list | str] = None,
+    ) -> Optional[int]:
         """Insert one analysis result. Returns new row id or None if failed."""
         cam = result.get("cam", "")
         try:
             conn = self._conn()
             ts = result.get("ts") or time.time()
             e2e = e2e_latency if e2e_latency is not None else result.get("e2e_latency")
+            inc_id = incident_id or result.get("incident_id")
+            p_id = parent_id or result.get("parent_id")
+            t_mode = trigger_mode or result.get("trigger_mode")
+            c_path = clip_path or result.get("clip_path")
+            kw = keywords or (", ".join(result.get("keywords", [])) if isinstance(result.get("keywords"), list) else result.get("keywords", ""))
+            t_level = threat_level or result.get("threat_level") or result.get("severity")
+            conf = confidence if confidence is not None else result.get("confidence")
+            lbls = labels if isinstance(labels, str) else (", ".join(labels) if isinstance(labels, list) else result.get("labels", ""))
+
             cur = conn.execute(
                 """
                 INSERT INTO analyses
                   (cam, ts, observation, activity, workers, machinery,
-                   safety, severity, latency, e2e_latency, error)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                   safety, severity, latency, e2e_latency, incident_id,
+                   parent_id, trigger_mode, clip_path, keywords,
+                   threat_level, confidence, labels, error)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     cam,
@@ -123,6 +174,14 @@ class StorageManager:
                     result.get("severity", "LOW"),
                     round(latency, 3),
                     round(e2e, 3) if e2e is not None else None,
+                    inc_id,
+                    p_id,
+                    t_mode,
+                    c_path,
+                    kw,
+                    t_level,
+                    round(conf, 3) if conf is not None else None,
+                    lbls,
                     1 if result.get("error") else 0,
                 ),
             )
@@ -146,6 +205,9 @@ class StorageManager:
         until_ts: Optional[float] = None,
         severity: Optional[str] = None,
         safety: Optional[str] = None,
+        search: Optional[str] = None,
+        incident_id: Optional[str] = None,
+        trigger_mode: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict]:
@@ -168,6 +230,18 @@ class StorageManager:
             if safety:
                 clauses.append("safety = ?")
                 params.append(safety.upper())
+            if incident_id:
+                clauses.append("incident_id = ?")
+                params.append(incident_id)
+            if trigger_mode:
+                clauses.append("trigger_mode = ?")
+                params.append(trigger_mode.upper())
+            if search and search.strip():
+                term = f"%{search.strip()}%"
+                clauses.append(
+                    "(observation LIKE ? OR activity LIKE ? OR machinery LIKE ? OR keywords LIKE ? OR incident_id LIKE ? OR labels LIKE ?)"
+                )
+                params.extend([term, term, term, term, term, term])
 
             where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
             params.extend([limit, offset])

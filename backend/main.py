@@ -29,6 +29,7 @@ from backend.core.config import (
     CONFIG_DIR,
     FRONTEND_DIR,
     DATABASE_PATH,
+    CLIPS_DIR,
     SYSTEM_CONFIG_PATH,
     CAMERAS_CONFIG_PATH,
     PROMPTS_CONFIG_PATH,
@@ -483,18 +484,24 @@ def api_get_all_history(
     cam: Optional[str] = None,
     severity: Optional[str] = None,
     safety: Optional[str] = None,
+    search: Optional[str] = None,
+    incident_id: Optional[str] = None,
+    trigger_mode: Optional[str] = None,
     since: Optional[float] = None,
     until: Optional[float] = None,
     limit: int = 100,
     offset: int = 0,
 ):
-    """Filtered history query across all cameras."""
+    """Filtered history query across all cameras with full-text keyword and metadata search."""
     return storage.query(
         cam=cam,
         since_ts=since,
         until_ts=until,
         severity=severity,
         safety=safety,
+        search=search,
+        incident_id=incident_id,
+        trigger_mode=trigger_mode,
         limit=limit,
         offset=offset,
     )
@@ -726,8 +733,9 @@ async def get_vlm_health():
 
 
 # ══════════════════════════════════════════════════════════════
-#  Static frontend — mount LAST (catches all remaining routes)
+#  Static files & frontend — mount LAST
 # ══════════════════════════════════════════════════════════════
 
+app.mount("/clips", StaticFiles(directory=str(CLIPS_DIR)), name="clips")
 app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
 

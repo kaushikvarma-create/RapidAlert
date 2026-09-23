@@ -28,9 +28,11 @@ CAMERAS_CONFIG_PATH = CONFIG_DIR / "cameras.json"
 PROMPTS_CONFIG_PATH = CONFIG_DIR / "prompts.json"
 SCANNER_CONFIG_PATH = CONFIG_DIR / "scanner.json"
 DATABASE_PATH = DATA_DIR / "analyses.db"
+CLIPS_DIR = DATA_DIR / "clips"
 
 # Ensure runtime directories exist
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+CLIPS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 

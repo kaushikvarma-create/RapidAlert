@@ -13,6 +13,7 @@ Core business and hardware acceleration services:
 """
 from backend.services.alert_engine import AlertEngine
 from backend.services.camera_manager import CameraManager, CameraThread
+from backend.services.clip_recorder import ClipRecorder, clip_recorder
 from backend.services.frame_store import FrameStore
 from backend.services.metrics_monitor import metrics_loop, get_gpu_util, get_cpu_util, get_ram_util
 from backend.services.nvidia_ingest import NvidiaStreamCapture, is_nvidia_available
@@ -29,6 +30,8 @@ __all__ = [
     "AlertEngine",
     "CameraManager",
     "CameraThread",
+    "ClipRecorder",
+    "clip_recorder",
     "FrameStore",
     "metrics_loop",
     "get_gpu_util",

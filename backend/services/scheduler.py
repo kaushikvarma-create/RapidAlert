@@ -326,19 +326,6 @@ class DeadlineScheduler:
         # Store result in memory
         self.result_store.put(cam_name, results, latency, thumbnails_b64=thumbs_b64, e2e_latency=e2e_latency)
 
-        # Persist to SQLite
-        if self.storage:
-            try:
-                self.storage.save(dict(res, cam=cam_name), latency=latency, e2e_latency=e2e_latency)
-            except Exception as exc:
-                error_tracker.capture_exception(
-                    exc,
-                    component="Scheduler",
-                    camera=cam_name,
-                    effect=f"Failed to persist analysis result for {cam_name} to database",
-                    severity="ERROR",
-                )
-
         # Alert check based on Cosmos 8B result with high-resolution frame
         latest_thumb = high_res_snap or (thumbs_b64[-1] if thumbs_b64 else None)
         alert = await self.alert_engine.process(
@@ -357,6 +344,28 @@ class DeadlineScheduler:
             cycle=cycle,
             delay_sec=followup_delay,
         )
+
+        # Persist to SQLite
+        if self.storage:
+            try:
+                self.storage.save(
+                    dict(res, cam=cam_name),
+                    latency=latency,
+                    e2e_latency=e2e_latency,
+                    incident_id=alert.get("incident_id") if alert else incident_id,
+                    parent_id=alert.get("parent_id") if alert else parent_id,
+                    trigger_mode=alert.get("trigger_mode") if alert else ("TRIGGER" if is_incident else ("FOLLOWUP" if is_followup else "PERIODIC")),
+                    clip_path=alert.get("clip_path") if alert else None,
+                    labels=job_labels,
+                )
+            except Exception as exc:
+                error_tracker.capture_exception(
+                    exc,
+                    component="Scheduler",
+                    camera=cam_name,
+                    effect=f"Failed to persist analysis result for {cam_name} to database",
+                    severity="ERROR",
+                )
 
         # 1. If this was an initial trigger event (not a follow-up), schedule follow-up cycle 1!
         if is_incident and not is_followup and alert:

@@ -73,6 +73,7 @@ class AlertEngine:
         latency: Optional[float] = None,
         cycle: int = 1,
         delay_sec: float = 10.0,
+        clip_path: Optional[str] = None,
     ) -> Optional[dict]:
         """Called for every VLM result. Fires alert with actual scene analysis when conditions are met."""
         raw_sev = (result.get("severity") or "LOW").upper()
@@ -140,6 +141,25 @@ class AlertEngine:
                     a["followup_id"] = event_id
                     break
 
+        # Generate clip if not provided but multi-frame thumbnails are present
+        final_clip_path = clip_path
+        if not final_clip_path and thumbnails_b64 and len(thumbnails_b64) >= 2:
+            try:
+                from backend.services.clip_recorder import clip_recorder
+                final_clip_path = await clip_recorder.async_create_clip(
+                    cam_name=cam_name,
+                    event_id=event_id,
+                    frames=thumbnails_b64,
+                )
+            except Exception as exc:
+                error_tracker.capture_exception(
+                    exc,
+                    component="AlertEngine",
+                    camera=cam_name,
+                    effect=f"Failed to record incident clip for {event_id}",
+                    severity="WARNING",
+                )
+
         alert = {
             "id": event_id,
             "incident_id": incident_id,
@@ -167,6 +187,7 @@ class AlertEngine:
             "drift": drift,
             "latency": latency or result.get("latency"),
             "e2e_latency": e2e_latency or result.get("e2e_latency"),
+            "clip_path": final_clip_path,
             "thumbnail_b64": thumbnail_b64 or (thumbnails_b64[-1] if thumbnails_b64 else None),
             "thumbnails_b64": thumbnails_b64 or [],
             "labels": labels or [],

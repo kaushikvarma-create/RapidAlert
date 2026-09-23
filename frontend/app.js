@@ -736,6 +736,22 @@ const App = {
   // ════════════════════════════════════════════════════════════
   _matchesAlertFilter(alert, filter) {
     if (!alert) return false;
+
+    // Keyword / Fulltext Search Filter
+    if (this.alertSearchQuery && this.alertSearchQuery.trim()) {
+      const q = this.alertSearchQuery.trim().toLowerCase();
+      const match = (
+        (alert.observation && alert.observation.toLowerCase().includes(q)) ||
+        (alert.activity && alert.activity.toLowerCase().includes(q)) ||
+        (alert.machinery && alert.machinery.toLowerCase().includes(q)) ||
+        (alert.cam && alert.cam.toLowerCase().includes(q)) ||
+        (alert.id && alert.id.toLowerCase().includes(q)) ||
+        (alert.incident_id && alert.incident_id.toLowerCase().includes(q)) ||
+        (alert.labels && alert.labels.some(l => String(l).toLowerCase().includes(q)))
+      );
+      if (!match) return false;
+    }
+
     const af = filter || this.activeAlertFilter || 'medium';
     if (af === 'all') return true;
 
@@ -1109,6 +1125,22 @@ const App = {
       }
     }
 
+    // Video Clip for THIS alert (if available)
+    const videoWrap = document.getElementById('alert-modal-video-wrap');
+    const videoEl = document.getElementById('alert-modal-video');
+    if (videoWrap && videoEl) {
+      if (alert.clip_path) {
+        videoWrap.style.display = 'block';
+        videoEl.src = alert.clip_path;
+        videoEl.load();
+        videoEl.play().catch(() => {});
+      } else {
+        videoWrap.style.display = 'none';
+        videoEl.pause();
+        videoEl.src = '';
+      }
+    }
+
     // Render RELATED ALERTS for this camera
     this._renderRelatedAlerts(alert);
 
@@ -1279,6 +1311,11 @@ const App = {
   closeAlertModal() {
     document.getElementById('alert-modal-backdrop').hidden = true;
     document.getElementById('alert-modal').hidden = true;
+    const videoEl = document.getElementById('alert-modal-video');
+    if (videoEl) {
+      videoEl.pause();
+      videoEl.src = '';
+    }
     this.activeAlert = null;
   },
 
@@ -1949,12 +1986,14 @@ const App = {
   _histLimit: 50,
 
   async _loadHistory() {
+    const search = document.getElementById('hist-search-input')?.value || '';
     const cam  = document.getElementById('hist-cam-sel')?.value  || '';
     const sev  = document.getElementById('hist-sev-sel')?.value  || '';
     const safe = document.getElementById('hist-safe-sel')?.value || '';
     const offset = this._histPage * this._histLimit;
 
     const params = new URLSearchParams({ limit: this._histLimit, offset });
+    if (search.trim()) params.set('search', search.trim());
     if (cam)  params.set('cam', cam);
     if (sev)  params.set('severity', sev);
     if (safe) params.set('safety', safe);
@@ -2252,6 +2291,29 @@ const App = {
       document.getElementById('scan-results').innerHTML = '';
       document.getElementById('scan-count').textContent = '0 cameras found';
     });
+
+    // Search inputs
+    const alertSearchInput = document.getElementById('alert-search-input');
+    if (alertSearchInput) {
+      let searchTimeout = null;
+      alertSearchInput.addEventListener('input', (e) => {
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(() => {
+          this.alertSearchQuery = e.target.value;
+          this._renderAllAlerts();
+        }, 150);
+      });
+    }
+
+    const histSearchInput = document.getElementById('hist-search-input');
+    if (histSearchInput) {
+      histSearchInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          this._histPage = 0;
+          this._loadHistory();
+        }
+      });
+    }
 
     // History actions
     document.getElementById('btn-load-history')?.addEventListener('click', () => {
