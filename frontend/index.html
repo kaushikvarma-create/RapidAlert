@@ -48,9 +48,11 @@
     </div>
 
       <div class="vlm-shards-pill" id="vlm-shards-pill" style="display: inline-flex; gap: 6px; align-items: center; background: var(--bg-card); border: 1px solid var(--border); padding: 3px 10px; border-radius: 20px; font-size: 0.72rem; font-family: var(--font-mono);">
-        <span style="color: var(--text-muted); font-size: 0.7rem;">MIG:</span>
-        <span id="shard-0-gauge" class="badge badge-mono" style="padding: 1px 6px; font-size: 0.68rem;">8000: [0/4]</span>
-        <span id="shard-1-gauge" class="badge badge-mono" style="padding: 1px 6px; font-size: 0.68rem;">8001: [0/4]</span>
+        <span id="vlm-mode-label" style="color: var(--text-muted); font-size: 0.7rem; font-weight: 600;">MIG:</span>
+        <div id="vlm-shards-list" style="display: inline-flex; gap: 5px; align-items: center;">
+          <span id="shard-0-gauge" class="badge badge-mono" style="padding: 1px 6px; font-size: 0.68rem;">8000: [0/4]</span>
+          <span id="shard-1-gauge" class="badge badge-mono" style="padding: 1px 6px; font-size: 0.68rem;">8001: [0/4]</span>
+        </div>
       </div>
       <div class="ws-pill" id="ws-pill">
         <span class="ws-dot" id="ws-dot"></span>

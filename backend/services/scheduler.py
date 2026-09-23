@@ -311,7 +311,7 @@ class DeadlineScheduler:
         )
 
         t0 = time.monotonic()
-        res = await self.vlm_pool.analyze(cam_name, frames_b64, prompt)
+        res = await self.vlm_pool.analyze(cam_name, frames_b64, prompt, labels=job_labels)
         res["model"] = DEFAULT_VLM_MODEL
         latency = res.get("latency", time.monotonic() - t0)
 
@@ -582,11 +582,15 @@ class DeadlineScheduler:
             try:
                 await asyncio.sleep(5)
                 metrics = self.result_store.get_metrics()
+                shards_stats = self.vlm_pool.get_stats()
+                is_mig = any(s.get("is_mig") for s in shards_stats)
                 metrics.update({
                     "concurrency": len(self._workers),
                     "queue_depth": self.queue_depth,
                     "in_flight":   self.in_flight_count,
-                    "vlm_shards":  self.vlm_pool.get_stats(),
+                    "vlm_shards":  shards_stats,
+                    "vlm_mode":    "mig" if is_mig else "shared",
+                    "is_mig":      is_mig,
                 })
                 if self.broadcast_fn:
                     await self.broadcast_fn({"type": "metrics", "data": metrics})

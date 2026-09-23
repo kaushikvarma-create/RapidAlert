@@ -29,6 +29,15 @@ class FrameStore:
         self.jpeg_quality = jpeg_quality
 
     def put(self, cam_name: str, frame: np.ndarray) -> None:
+        if frame is None or frame.size == 0:
+            return
+        # Reject uninitialized YUV zeroed buffers (solid bright green: B<25, R<25, G>90 or pitch black: mean<3)
+        mean_b, mean_g, mean_r = cv2.mean(frame)[:3]
+        if mean_g > 90 and mean_r < 25 and mean_b < 25:
+            return
+        if mean_g < 3 and mean_r < 3 and mean_b < 3:
+            return
+
         ts = time.monotonic()
         # Fast one-pass JPEG encode upon frame ingestion for zero-latency multi-client streaming
         try:
@@ -177,10 +186,16 @@ class FrameStore:
         window = [item for item in items if item[1] >= target_start - 2.0]
         
         if not window:
-            window = [items[-1]]  # Fallback to latest if nothing in window
+            window = items
+        if not window:
+            return None
 
-        # If we have less than requested, just take what we have
-        if len(window) <= count:
+        # If we have fewer than requested, pad by repeating the oldest valid frame
+        if len(window) < count:
+            oldest = window[0]
+            padded = [oldest] * (count - len(window)) + list(window)
+            selected = padded
+        elif len(window) == count:
             selected = window
         else:
             # Evenly sample `count` frames from the window

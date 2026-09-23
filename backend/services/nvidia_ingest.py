@@ -159,6 +159,12 @@ class NvidiaStreamCapture:
             # Memory view to numpy RGBA then BGR
             arr = np.frombuffer(map_info.data, dtype=np.uint8).reshape((h, w, 4))
             bgr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+            # Validate frame sanity: drop uninitialized YUV420 buffers (which map to solid green B<25, R<25, G>90)
+            mean_b, mean_g, mean_r = cv2.mean(bgr)[:3]
+            if mean_g > 90 and mean_r < 25 and mean_b < 25:
+                return False, None
+            if mean_g < 3 and mean_r < 3 and mean_b < 3:
+                return False, None
             return True, bgr
         except Exception as e:
             error_tracker.capture_exception(

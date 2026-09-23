@@ -1387,6 +1387,54 @@ const App = {
     this._setText('sys-p50',     m.p50_latency != null ? `${m.p50_latency}s` : '—');
     this._setText('sys-p95',     m.p95_latency != null ? `${m.p95_latency}s` : '—');
     this._setText('sys-aps',     m.analyses_per_sec != null ? `${m.analyses_per_sec.toFixed(1)}/s` : '—');
+
+    if (m.vlm_shards) {
+      this._updateVlmShardsUI({ shards: m.vlm_shards, is_mig: m.is_mig, mode: m.vlm_mode });
+    }
+  },
+
+  _updateVlmShardsUI(data) {
+    if (!data) return;
+    const shards = Array.isArray(data) ? data : (data.shards || []);
+    if (!shards.length) return;
+
+    let isMig = false;
+    if (typeof data.is_mig === 'boolean') {
+      isMig = data.is_mig;
+    } else if (typeof data.mode === 'string') {
+      isMig = data.mode.toLowerCase() === 'mig';
+    } else {
+      isMig = shards.some(s => s.is_mig || (s.mig_uuid && s.mig_uuid.length > 0));
+    }
+
+    const modeLabel = document.getElementById('vlm-mode-label');
+    if (modeLabel) {
+      modeLabel.textContent = isMig ? 'MIG:' : 'SHARED:';
+      modeLabel.title = isMig ? 'Multi-Instance GPU Partitioning Active' : 'Shared GPU Shards (Non-MIG)';
+    }
+
+    const container = document.getElementById('vlm-shards-list');
+    if (!container) return;
+
+    container.innerHTML = shards.map((s, idx) => {
+      const inflight = (s.inflight !== undefined) ? s.inflight : (s.in_flight !== undefined ? s.in_flight : 0);
+      const maxC = s.max_concurrent || 4;
+      const port = s.port || (s.url ? s.url.split(':').pop() : idx);
+      const queued = s.queued || 0;
+      
+      let badgeClass = 'badge-mono';
+      if (!s.healthy) {
+        badgeClass = 'badge-red';
+      } else if (inflight > 0) {
+        badgeClass = 'badge-amber';
+      } else {
+        badgeClass = 'badge-green';
+      }
+      
+      const qText = queued > 0 ? ` +${queued}q` : '';
+      const latText = s.avg_latency_ms ? ` (${s.avg_latency_ms}ms)` : '';
+      return `<span id="shard-${idx}-gauge" class="badge ${badgeClass}" style="padding: 1px 6px; font-size: 0.68rem; transition: background 0.2s ease;" title="${this._esc(s.url)} | In-flight: ${inflight}/${maxC}${qText}${latText} | Weight: ${s.weight ?? 1}">${port}: [${inflight}/${maxC}${qText}]</span>`;
+    }).join('');
   },
 
   // ════════════════════════════════════════════════════════════
@@ -1770,19 +1818,7 @@ const App = {
       }
       if (rStats && rStats.ok) {
         const statsData = await rStats.json();
-        const shards = statsData.shards || [];
-        const g0 = document.getElementById('shard-0-gauge');
-        const g1 = document.getElementById('shard-1-gauge');
-        if (shards[0] && g0) {
-          const s0 = shards[0];
-          g0.textContent = `8000: [${s0.in_flight || 0}/${s0.max_concurrent || 4}]`;
-          g0.className = s0.healthy ? 'badge badge-green' : 'badge badge-red';
-        }
-        if (shards[1] && g1) {
-          const s1 = shards[1];
-          g1.textContent = `8001: [${s1.in_flight || 0}/${s1.max_concurrent || 4}]`;
-          g1.className = s1.healthy ? 'badge badge-green' : 'badge badge-red';
-        }
+        this._updateVlmShardsUI(statsData);
       }
     } catch { /* ignore */ }
   },

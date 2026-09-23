@@ -64,12 +64,16 @@ class _EndpointShard:
         max_concurrent: int,
         queue_depth: int,
         session: aiohttp.ClientSession,
+        mig_uuid: str = "",
+        mig_profile: str = "",
     ):
         self.url            = url
         self.model          = model
         self.weight         = max(1, weight)
         self.max_concurrent = max(1, max_concurrent)
         self.queue_depth    = max(1, queue_depth)
+        self.mig_uuid       = mig_uuid
+        self.mig_profile    = mig_profile
         self._session       = session
 
         self._queue: asyncio.Queue       = asyncio.Queue(maxsize=queue_depth)
@@ -169,14 +173,24 @@ class _EndpointShard:
         cam_name   = job["cam"]
         frames_b64 = job["frames_b64"]
         prompt     = job["prompt"]
+        labels     = job.get("labels") or []
         url        = f"{self.url}/v1/chat/completions"
 
         content = []
         frames = frames_b64 if isinstance(frames_b64, list) else [frames_b64]
-        for b64 in frames:
+        if len(frames) > 1:
+            # Interleave explicit frame label markers to anchor multi-frame vision attention
+            for idx, b64 in enumerate(frames):
+                label_txt = labels[idx] if idx < len(labels) else f"Frame {idx + 1}"
+                content.append({"type": "text", "text": f"{label_txt}:"})
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                })
+        elif frames:
             content.append({
                 "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                "image_url": {"url": f"data:image/jpeg;base64,{frames[0]}"},
             })
         content.append({"type": "text", "text": prompt})
 
@@ -239,16 +253,21 @@ class _EndpointShard:
 
     def get_stats(self) -> dict:
         lats = list(self._latencies)
+        port = self.url.split(":")[-1] if ":" in self.url else self.url
         return {
             "url":          self.url,
+            "port":         port,
             "model":        self.model,
             "weight":       self.weight,
             "max_concurrent": self.max_concurrent,
             "healthy":      self.healthy,
             "queued":       self._queue.qsize(),
             "inflight":     self.stat_inflight,
+            "in_flight":    self.stat_inflight,
             "completed":    self.stat_completed,
             "errors":       self.stat_errors,
+            "mig_uuid":     self.mig_uuid,
+            "is_mig":       bool(self.mig_uuid),
             "avg_latency_ms": round(sum(lats) / len(lats) * 1000, 1) if lats else None,
             "p95_latency_ms": round(sorted(lats)[int(len(lats) * 0.95)] * 1000, 1) if len(lats) >= 5 else None,
             "load_score":   round(self.load_score(), 3),
@@ -296,6 +315,8 @@ class MIGAwareVLMPool:
                 weight         = cfg.get("weight", 1),
                 max_concurrent = cfg.get("max_concurrent", 2),
                 queue_depth    = cfg.get("queue_depth", 8),
+                mig_uuid       = cfg.get("mig_uuid", ""),
+                mig_profile    = cfg.get("mig_profile", ""),
                 session        = self._session,
             )
             self._shards.append(shard)
@@ -331,7 +352,9 @@ class MIGAwareVLMPool:
             self._health_loop(), name="vlm-health"
         )
 
-        print(f"[VLMPool] ✅ Started — {len(self._shards)} MIG shard(s):")
+        is_mig = any(bool(s.mig_uuid) for s in self._shards)
+        pool_type = "MIG" if is_mig else "Shared"
+        print(f"[VLMPool] ✅ Started — {len(self._shards)} {pool_type} shard(s):")
         for s in self._shards:
             print(
                 f"  → {s.url}  model={s.model}  "
@@ -378,14 +401,27 @@ class MIGAwareVLMPool:
         """Per-shard telemetry — included in metrics broadcasts."""
         return [s.get_stats() for s in self._shards]
 
+    def is_mig(self) -> bool:
+        """Returns True if any shard is configured with a dedicated MIG UUID."""
+        return any(bool(s.mig_uuid) for s in self._shards)
+
     async def analyze(
-        self, cam_name: str, frame_b64: "str | list[str]", system_prompt: str
+        self,
+        cam_name: str,
+        frame_b64: "str | list[str]",
+        system_prompt: str,
+        labels: Optional[list[str]] = None,
     ) -> dict:
         """
-        Route to the MIG shard with the lowest weighted load score,
+        Route to the MIG/shared shard with the lowest weighted load score,
         enqueue the job, and await the Future result.
         """
-        job = {"cam": cam_name, "frames_b64": frame_b64, "prompt": system_prompt}
+        job = {
+            "cam": cam_name,
+            "frames_b64": frame_b64,
+            "prompt": system_prompt,
+            "labels": labels,
+        }
         fut: asyncio.Future = asyncio.get_event_loop().create_future()
 
         # Sort shards by ascending load_score (best first)
@@ -401,11 +437,15 @@ class MIGAwareVLMPool:
         return await fut
 
     async def analyze_concurrent(
-        self, cam_name: str, frame_b64: "str | list[str]", system_prompt: str
+        self,
+        cam_name: str,
+        frame_b64: "str | list[str]",
+        system_prompt: str,
+        labels: Optional[list[str]] = None,
     ) -> list[dict]:
         """Fire request to ALL shards simultaneously (comparator / ensemble mode)."""
         tasks = [
-            self.analyze(cam_name, frame_b64, system_prompt)
+            self.analyze(cam_name, frame_b64, system_prompt, labels=labels)
             for _ in self._shards
         ]
         return await asyncio.gather(*tasks)

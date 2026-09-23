@@ -68,6 +68,7 @@ class SceneTriggerEngine:
         self._prev_embeddings: Dict[str, np.ndarray] = {}
         self._last_event_time: Dict[str, float] = {}
         self._last_sample_time: Dict[str, float] = {}
+        self._cam_first_seen: Dict[str, float] = {}
         self._active_collectors: Dict[str, asyncio.Task] = {}
         self.latest_drifts: Dict[str, float] = {}
 
@@ -107,6 +108,9 @@ class SceneTriggerEngine:
                 now = time.monotonic()
 
                 for cam_name in active_cams:
+                    if cam_name not in self._cam_first_seen:
+                        self._cam_first_seen[cam_name] = now
+
                     # Respect sampling interval per camera
                     if now - self._last_sample_time.get(cam_name, 0) < self.semantic_interval:
                         continue
@@ -125,6 +129,11 @@ class SceneTriggerEngine:
                     # Run embedding inference in thread pool to avoid blocking asyncio event loop
                     emb = await asyncio.to_thread(self._extract_embedding, frame)
                     if emb is None:
+                        continue
+
+                    # Enforce 3.0s warmup guard so initial baseline stabilizes without false triggers
+                    if (now - self._cam_first_seen[cam_name]) < 3.0:
+                        self._prev_embeddings[cam_name] = emb
                         continue
 
                     prev_emb = self._prev_embeddings.get(cam_name)

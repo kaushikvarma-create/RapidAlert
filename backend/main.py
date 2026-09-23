@@ -743,11 +743,17 @@ async def api_scan(body: ScanBody):
 @app.get("/api/vlm/stats")
 async def get_vlm_stats():
     """
-    Per-MIG-shard live telemetry:
+    Per-MIG/shared-shard live telemetry:
     queued items, in-flight requests, completed count, error count,
     avg/p95 latency, health flag, weight, and load_score.
     """
-    return {"shards": vlm_pool.get_stats()}
+    shards = vlm_pool.get_stats()
+    is_mig = any(s.get("is_mig") for s in shards)
+    return {
+        "is_mig": is_mig,
+        "mode": "mig" if is_mig else "shared",
+        "shards": shards,
+    }
 
 
 @app.get("/api/vlm/health")
