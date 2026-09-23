@@ -39,8 +39,10 @@ class SceneTriggerEngine:
         broadcast_fn: Optional[Callable] = None,
         alert_engine = None,
         model_name: str = DEFAULT_DINOV2_MODEL,
-        device: str = "cuda",
+        device: str = "cpu",
         default_threshold: float = DEFAULT_SCENE_THRESHOLD,
+        major_threshold: float = 0.060,
+        minor_threshold: float = 0.030,
         semantic_interval: float = DEFAULT_SEMANTIC_INTERVAL,
         event_cooldown: float = DEFAULT_EVENT_COOLDOWN,
     ):
@@ -50,8 +52,10 @@ class SceneTriggerEngine:
         self.broadcast_fn = broadcast_fn
         self.alert_engine = alert_engine
         self.model_name = model_name
-        self.device = device if torch.cuda.is_available() else "cpu"
+        self.device = "cpu"
         self.default_threshold = default_threshold
+        self.major_threshold = major_threshold
+        self.minor_threshold = minor_threshold
         self.semantic_interval = semantic_interval
         self.event_cooldown = event_cooldown
 
@@ -76,7 +80,7 @@ class SceneTriggerEngine:
             self._processor = AutoImageProcessor.from_pretrained(self.model_name)
             self._model = AutoModel.from_pretrained(self.model_name).to(self.device)
             self._model.eval()
-            print("[SceneTrigger] ✅ DINOv2 ready for scene shift detection")
+            print("[SceneTrigger] ✅ DINOv2 ready on CPU for scene shift detection")
         except Exception as exc:
             error_tracker.capture_exception(
                 exc,
@@ -131,20 +135,27 @@ class SceneTriggerEngine:
                         distance = float(1.0 - np.dot(prev_emb, emb))
                         self.latest_drifts[cam_name] = round(distance, 4)
 
-                        # Check threshold and cooldown
+                        # Check thresholds and cooldown
                         threshold = self._get_cam_threshold(cam_name)
                         cooldown_elapsed = (now - self._last_event_time.get(cam_name, 0)) >= self.event_cooldown
 
-                        if distance >= threshold and cooldown_elapsed:
+                        is_major = distance >= self.major_threshold
+                        is_minor = distance >= self.minor_threshold
+                        is_legacy = distance >= threshold
+
+                        if (is_major or is_minor or is_legacy) and cooldown_elapsed:
                             self._last_event_time[cam_name] = now
                             t_trigger = time.monotonic()
+                            tier = 2 if (is_major or distance >= threshold) else 3
+                            tag = "MAJOR SCENE SHIFT" if tier == 2 else "MINOR SCENE SHIFT"
+                            thresh_str = f"major_threshold: {self.major_threshold:.4f}" if tier == 2 else f"minor_threshold: {self.minor_threshold:.4f}"
                             print(
-                                f"[SceneTrigger] 🚨 SCENE SHIFT on {cam_name}! "
-                                f"Drift: {distance:.4f} (threshold: {threshold:.4f})"
+                                f"[SceneTrigger] {'🚨' if tier == 2 else '⚠️ '} {tag} on {cam_name}! "
+                                f"Drift: {distance:.4f} ({thresh_str}) → Tier-{tier}"
                             )
                             # Start asynchronous post-trigger collection
                             self._active_collectors[cam_name] = asyncio.create_task(
-                                self._collect_incident(cam_name, distance, frame_ts, trigger_time=t_trigger)
+                                self._collect_incident(cam_name, distance, frame_ts, trigger_time=t_trigger, tier=tier)
                             )
 
                 # Broadcast live drift metrics to dashboard every 1s
@@ -214,6 +225,7 @@ class SceneTriggerEngine:
         drift_score: float,
         trigger_ts: float,
         trigger_time: Optional[float] = None,
+        tier: int = 2,
     ) -> None:
         """
         Immediately collects 4 temporal frames over the past 10 seconds:
@@ -275,6 +287,7 @@ class SceneTriggerEngine:
                 "trigger_ts": trigger_ts,
                 "trigger_time": trigger_time,
                 "drift": drift_score,
+                "tier": tier,
                 "frames_b64": frames_b64,
                 "thumbs_b64": thumbs_b64,
                 "thumbnail_b64": high_res_snap,

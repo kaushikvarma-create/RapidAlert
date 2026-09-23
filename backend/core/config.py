@@ -63,6 +63,8 @@ TEMPORAL_THUMB_QUALITY = 68
 
 # DINOv2 Drift Detection & Trigger
 DEFAULT_SCENE_THRESHOLD = 0.034
+DINO_MAJOR_THRESHOLD = 0.060
+DINO_MINOR_THRESHOLD = 0.030
 DEFAULT_SEMANTIC_INTERVAL = 0.5    # seconds between DINOv2 embedding checks
 DEFAULT_EVENT_COOLDOWN = 15.0      # seconds cooldown per camera between trigger events
 DINOV2_INPUT_WIDTH = 448           # resize width for fast inference
