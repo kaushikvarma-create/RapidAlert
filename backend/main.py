@@ -72,6 +72,8 @@ from backend.services.storage import StorageManager
 from backend.services.rtsp_scanner import RTSPScanner
 from backend.services.metrics_monitor import metrics_loop
 from backend.services.scene_trigger import SceneTriggerEngine
+from backend.services.watchdog import SystemWatchdog
+from backend.core.shutdown_logger import log_system_event
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -122,6 +124,15 @@ scene_trigger = SceneTriggerEngine(
     event_cooldown=sys_cfg.event_cooldown,
 )
 
+watchdog = SystemWatchdog(
+    camera_manager=camera_manager,
+    frame_store=frame_store,
+    vlm_pool=vlm_pool,
+    ws_manager=ws_manager,
+    interval_sec=15.0,
+    broadcast_fn=ws_manager.broadcast,
+)
+
 
 # ══════════════════════════════════════════════════════════════════
 #  Application Lifespan
@@ -133,10 +144,12 @@ _bg_tasks = []
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup ─────────────────────────────────────────────────
+    t_start = time.monotonic()
     camera_manager.sync()
     await vlm_pool.start()
     await scheduler.start()
     scene_trigger.start()
+    watchdog.start()
     _bg_tasks.append(asyncio.create_task(prompt_manager.watch_loop()))
     _bg_tasks.append(asyncio.create_task(_config_sync_loop()))
     _bg_tasks.append(asyncio.create_task(metrics_loop(ws_manager.broadcast)))
@@ -146,12 +159,28 @@ async def lifespan(app: FastAPI):
     print(f"\n[RapidAlert] ✅ Dashboard → http://localhost:{port}\n")
     yield
     # ── Shutdown ────────────────────────────────────────────────
+    uptime = time.monotonic() - t_start
+    summary = watchdog.get_summary()
+    watchdog.stop()
     for task in _bg_tasks:
         task.cancel()
     scene_trigger.stop()
     await scheduler.stop()
     await vlm_pool.stop()
     camera_manager.stop_all()
+
+    log_system_event(
+        event_type="Shutdown",
+        reason="Application Shutdown Triggered (Ctrl+C / SIGINT / SIGTERM)",
+        uptime_sec=uptime,
+        details={
+            "Active Feeds": summary.get("cameras_active"),
+            "vLLM Shards": summary.get("vlm_shards_healthy"),
+            "Analyses Done": scheduler._total_analyzed,
+            "Logged Errors": len(error_tracker.get_errors()),
+        },
+        action_required="None. All streams, models, and workers released cleanly. To resume: ./run.sh",
+    )
 
 
 async def _config_sync_loop() -> None:

@@ -51,8 +51,9 @@ HF_CACHE="$HOME/huggingface"
 declare -a LOG_PIDS=()
 
 cleanup() {
+    local exit_code=$?
     echo ""
-    warn "Shutting down RapidAlert..."
+    warn "Shutting down RapidAlert (Exit code: ${exit_code})..."
     for pid in "${LOG_PIDS[@]:-}"; do
         if kill -0 "$pid" 2>/dev/null; then kill "$pid" 2>/dev/null || true; fi
     done
@@ -67,8 +68,9 @@ cleanup() {
         fi
     fi
     fuser -k "${DASHBOARD_PORT}/tcp" 2>/dev/null || true
-    # Don't kill vLLM docker here, keep it running for faster subsequent restarts!
-    ok "Dashboard closed. vLLM container left running for speed."
+    echo -e "${BOLD}${GREEN}  ✓ Backend gracefully stopped.${NC}"
+    echo -e "${BOLD}${CYAN}  ℹ Next Steps: Run './run.sh' to resume surveillance or inspect 'logs/system_events.log'.${NC}"
+    echo ""
 }
 trap cleanup EXIT INT TERM
 
