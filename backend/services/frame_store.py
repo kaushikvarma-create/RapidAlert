@@ -3,18 +3,23 @@ FrameStore: thread-safe frame buffer.
 One slot per camera: (frame_bgr, timestamp).
 get_snapshot_b64() encodes to JPEG + base64 for VLM submission.
 """
-import threading
-import time
+from __future__ import annotations
+
 import base64
 import collections
+import threading
+import time
 from typing import Optional, Tuple
 
 import cv2
 import numpy as np
 
+from backend.core.config import DEFAULT_FRAME_WIDTH, DEFAULT_JPEG_QUALITY
+from backend.core.error_tracker import error_tracker
+
 
 class FrameStore:
-    def __init__(self, max_w: int = 1280, jpeg_quality: int = 82):
+    def __init__(self, max_w: int = DEFAULT_FRAME_WIDTH, jpeg_quality: int = DEFAULT_JPEG_QUALITY):
         self._store: dict[str, collections.deque[Tuple[np.ndarray, float]]] = collections.defaultdict(
             lambda: collections.deque(maxlen=300)
         )
@@ -45,7 +50,7 @@ class FrameStore:
         if entry is None:
             return None
         frame, _ = entry
-        return self._encode_frame(frame, max_w, quality)
+        return self._encode_frame(frame, max_w, quality, cam_name=cam_name)
 
     def get_pre_trigger_frames(
         self,
@@ -81,7 +86,6 @@ class FrameStore:
             q = self._store.get(cam_name)
             if not q:
                 return None
-            # Extract items to list
             items = list(q)
             
         now = time.monotonic()
@@ -91,7 +95,7 @@ class FrameStore:
         window = [item for item in items if item[1] >= target_start - 2.0]
         
         if not window:
-            window = [items[-1]] # Fallback to latest if nothing in window
+            window = [items[-1]]  # Fallback to latest if nothing in window
 
         # If we have less than requested, just take what we have
         if len(window) <= count:
@@ -101,7 +105,7 @@ class FrameStore:
             indices = np.linspace(0, len(window) - 1, count, dtype=int)
             selected = [window[i] for i in indices]
 
-        return [self._encode_frame(f, max_w, quality) for f, _ in selected]
+        return [self._encode_frame(f, max_w, quality, cam_name=cam_name) for f, _ in selected]
 
     def encode_frames(
         self,
@@ -116,14 +120,27 @@ class FrameStore:
         frame: np.ndarray,
         max_w: Optional[int] = None,
         quality: Optional[int] = None,
+        cam_name: Optional[str] = None,
     ) -> str:
-        mw = max_w if max_w is not None else self.max_w
-        q = quality if quality is not None else self.jpeg_quality
-        h, w = frame.shape[:2]
-        if w > mw:
-            frame = cv2.resize(frame, (mw, int(h * mw / w)), interpolation=cv2.INTER_AREA)
-        _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, q])
-        return base64.b64encode(buf).decode()
+        try:
+            mw = max_w if max_w is not None else self.max_w
+            q = quality if quality is not None else self.jpeg_quality
+            h, w = frame.shape[:2]
+            if w > mw:
+                frame = cv2.resize(frame, (mw, int(h * mw / w)), interpolation=cv2.INTER_AREA)
+            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, q])
+            if not ok:
+                raise ValueError("cv2.imencode returned False")
+            return base64.b64encode(buf).decode()
+        except Exception as exc:
+            error_tracker.capture_exception(
+                exc,
+                component="FrameStore",
+                camera=cam_name,
+                effect=f"Failed to encode JPEG frame for camera {cam_name}; returning empty base64",
+                severity="WARNING",
+            )
+            return ""
 
     def list_cameras(self) -> list[str]:
         with self._lock:

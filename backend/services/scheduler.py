@@ -14,31 +14,48 @@ Speed principle: the feed loop never sleeps longer than 5ms when work is
 available. Workers start new jobs immediately after finishing. The semaphore
 is replaced by explicit worker count (easier to auto-tune).
 """
+from __future__ import annotations
+
 import asyncio
 import time
-import traceback
-from typing import Callable, Optional
+from typing import Callable, Optional, TYPE_CHECKING
 
-from camera_manager import CameraManager
-from frame_store import FrameStore
-from vlm_client import VLMPool
-from prompt_manager import PromptManager
-from result_store import ResultStore
-from alert_engine import AlertEngine
-from typing import TYPE_CHECKING
+from backend.services.camera_manager import CameraManager
+from backend.services.frame_store import FrameStore
+from backend.services.vlm_client import VLMPool
+from backend.services.prompt_manager import PromptManager
+from backend.services.result_store import ResultStore
+from backend.services.alert_engine import AlertEngine
+from backend.core.config import (
+    DEFAULT_VLM_MODEL,
+    DEFAULT_HEARTBEAT_SEC,
+    DEFAULT_FOLLOWUP_INTERVAL,
+    DEFAULT_FOLLOWUP_MAX_CYCLES,
+    DEFAULT_PERSISTENT_FOLLOWUP,
+    TUNE_INTERVAL_SEC,
+    LATENCY_UP_THRESH_SEC,
+    LATENCY_DN_THRESH_SEC,
+    FEED_TICK_SEC,
+    IDLE_TICK_SEC,
+    QUEUE_CAP_PER_WORKER,
+    TEMPORAL_THUMB_WIDTH,
+    TEMPORAL_THUMB_QUALITY,
+    HIGH_RES_FRAME_WIDTH,
+    HIGH_RES_JPEG_QUALITY,
+)
+from backend.core.error_tracker import error_tracker
+
 if TYPE_CHECKING:
-    from storage import StorageManager
+    from backend.services.storage import StorageManager
 
 
 class DeadlineScheduler:
-    TUNE_INTERVAL = 15          # seconds between auto-tune ticks
-    LATENCY_UP_THRESH = 4.0     # p95 below → add a worker
-    LATENCY_DN_THRESH = 12.0    # p95 above → remove a worker
-    # MIN_WORKERS is set in __init__ to max(2, n_vllm_endpoints)
-    FEED_TICK = 0.005           # 5 ms — time between feed loop iterations
-    IDLE_TICK = 0.05            # 50 ms — when no cameras are available
-    QUEUE_CAP_PER_WORKER = 1    # max items queued per worker — prevents pile-up
-                                # when cams > workers; each cam waits ≤1 cycle
+    TUNE_INTERVAL = TUNE_INTERVAL_SEC
+    LATENCY_UP_THRESH = LATENCY_UP_THRESH_SEC
+    LATENCY_DN_THRESH = LATENCY_DN_THRESH_SEC
+    FEED_TICK = FEED_TICK_SEC
+    IDLE_TICK = IDLE_TICK_SEC
+    QUEUE_CAP_PER_WORKER = QUEUE_CAP_PER_WORKER
 
     def __init__(
         self,
@@ -49,10 +66,10 @@ class DeadlineScheduler:
         result_store: ResultStore,
         alert_engine: AlertEngine,
         initial_concurrency: int = 4,
-        max_concurrency: int = 16,
+        max_concurrency: int = 8,
         broadcast_fn: Optional[Callable] = None,
         storage=None,   # StorageManager | None
-        default_heartbeat_sec: float = 30.0,
+        default_heartbeat_sec: float = DEFAULT_HEARTBEAT_SEC,
     ):
         self.camera_manager = camera_manager
         self.frame_store = frame_store
@@ -64,8 +81,7 @@ class DeadlineScheduler:
         self.storage = storage
         self.default_heartbeat_sec = float(default_heartbeat_sec)
 
-        # Throttling requests at the app level prevents vLLM from building
-        # efficient batches. Pin workers to max_concurrency.
+        # Pin workers to max_concurrency
         self.MIN_WORKERS = max_concurrency
         self._concurrency = max_concurrency
         self._max_concurrency = max_concurrency
@@ -78,9 +94,9 @@ class DeadlineScheduler:
         self._total_analyzed: int = 0
 
         self._latencies: list[float] = []
-        self.followup_interval_sec: float = 10.0
-        self.persistent_followup: bool = False
-        self.followup_max_cycles: int = 6
+        self.followup_interval_sec: float = DEFAULT_FOLLOWUP_INTERVAL
+        self.persistent_followup: bool = DEFAULT_PERSISTENT_FOLLOWUP
+        self.followup_max_cycles: int = DEFAULT_FOLLOWUP_MAX_CYCLES
 
     def get_cam_heartbeat_interval(self, cam_name: str) -> float:
         """Returns the mandatory analysis interval in seconds for the given camera."""
@@ -89,8 +105,14 @@ class DeadlineScheduler:
             if c.get("name") == cam_name and c.get("heartbeat_sec") is not None:
                 try:
                     return float(c["heartbeat_sec"])
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as exc:
+                    error_tracker.capture_exception(
+                        exc,
+                        component="Scheduler",
+                        camera=cam_name,
+                        effect=f"Invalid heartbeat_sec in camera config for {cam_name}; using default {self.default_heartbeat_sec}s",
+                        severity="WARNING",
+                    )
         return float(self.default_heartbeat_sec)
 
     def _next_seq(self) -> int:
@@ -123,7 +145,7 @@ class DeadlineScheduler:
         self._bg_tasks = [
             asyncio.create_task(self._feed_loop(), name="scheduler-feed"),
             asyncio.create_task(self._tune_loop(), name="scheduler-tune"),
-            asyncio.create_task(self._metrics_loop(), name="scheduler-metrics")
+            asyncio.create_task(self._metrics_loop(), name="scheduler-metrics"),
         ]
         print(
             f"[Scheduler] ✅ Started — {self._concurrency} workers, "
@@ -161,30 +183,41 @@ class DeadlineScheduler:
     async def _feed_loop(self) -> None:
         """
         Background heartbeat loop: checks for cameras that have been quiet
-        without an incident for >= 60 seconds and queues a low-priority refresh.
+        without an incident and queues a low-priority refresh.
         """
         while self._running:
-            cams = self.camera_manager.get_active_cameras()
-            now = time.monotonic()
-            eligible = [
-                c for c in cams
-                if c not in self._in_flight
-                and self.frame_store.get_latest(c) is not None
-                and now - self._last_analyzed.get(c, 0) >= self.get_cam_heartbeat_interval(c)
-            ]
+            try:
+                cams = self.camera_manager.get_active_cameras()
+                now = time.monotonic()
+                eligible = [
+                    c for c in cams
+                    if c not in self._in_flight
+                    and self.frame_store.get_latest(c) is not None
+                    and now - self._last_analyzed.get(c, 0) >= self.get_cam_heartbeat_interval(c)
+                ]
 
-            queue_cap = max(1, len(self._workers)) * self.QUEUE_CAP_PER_WORKER
-            if eligible and self._queue.qsize() < queue_cap:
-                cam = max(
-                    eligible,
-                    key=lambda c: now - self._last_analyzed.get(c, 0),
+                queue_cap = max(1, len(self._workers)) * self.QUEUE_CAP_PER_WORKER
+                if eligible and self._queue.qsize() < queue_cap:
+                    cam = max(
+                        eligible,
+                        key=lambda c: now - self._last_analyzed.get(c, 0),
+                    )
+                    self._in_flight.add(cam)
+                    job = {"cam": cam, "is_heartbeat": True}
+                    await self._queue.put((1, self._next_seq(), job))
+                    await asyncio.sleep(self.FEED_TICK)
+                else:
+                    await asyncio.sleep(self.IDLE_TICK)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                error_tracker.capture_exception(
+                    exc,
+                    component="Scheduler",
+                    effect="Scheduler heartbeat feed loop encountered an error; pausing for 1s",
+                    severity="WARNING",
                 )
-                self._in_flight.add(cam)
-                job = {"cam": cam, "is_heartbeat": True}
-                await self._queue.put((1, self._next_seq(), job))
-                await asyncio.sleep(self.FEED_TICK)
-            else:
-                await asyncio.sleep(self.IDLE_TICK)
+                await asyncio.sleep(1.0)
 
     # ── Worker ──────────────────────────────────────────────────────
 
@@ -196,13 +229,19 @@ class DeadlineScheduler:
                 continue
             except asyncio.CancelledError:
                 break
-            
+
             priority, seq, job = item
             cam = job.get("cam", "")
             try:
                 await self._analyze_job(job)
-            except Exception:
-                traceback.print_exc()
+            except Exception as exc:
+                error_tracker.capture_exception(
+                    exc,
+                    component="Scheduler",
+                    camera=cam,
+                    effect=f"VLM analysis job failed for camera {cam}; item discarded from queue",
+                    severity="ERROR",
+                )
             finally:
                 self._in_flight.discard(cam)
                 self._queue.task_done()
@@ -223,12 +262,21 @@ class DeadlineScheduler:
         if is_incident and job.get("frames_b64"):
             frames_b64 = job["frames_b64"]
             thumbs_b64 = job.get("thumbs_b64", [])
-            high_res_snap = job.get("thumbnail_b64") or self.frame_store.get_snapshot_b64(cam_name, max_w=960, quality=78) or (thumbs_b64[-1] if thumbs_b64 else None)
+            high_res_snap = (
+                job.get("thumbnail_b64")
+                or self.frame_store.get_snapshot_b64(cam_name, max_w=HIGH_RES_FRAME_WIDTH, quality=HIGH_RES_JPEG_QUALITY)
+                or (thumbs_b64[-1] if thumbs_b64 else None)
+            )
         else:
             # Heartbeat fallback: extract 4 temporal frames across 10s
             frames_b64 = self.frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=10.0, max_w=512)
-            thumbs_b64 = self.frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=10.0, max_w=480, quality=68)
-            high_res_snap = self.frame_store.get_snapshot_b64(cam_name, max_w=960, quality=78) or (thumbs_b64[-1] if thumbs_b64 else None)
+            thumbs_b64 = self.frame_store.get_temporal_snapshots_b64(
+                cam_name, count=4, span_sec=10.0, max_w=TEMPORAL_THUMB_WIDTH, quality=TEMPORAL_THUMB_QUALITY
+            )
+            high_res_snap = (
+                self.frame_store.get_snapshot_b64(cam_name, max_w=HIGH_RES_FRAME_WIDTH, quality=HIGH_RES_JPEG_QUALITY)
+                or (thumbs_b64[-1] if thumbs_b64 else None)
+            )
             job_labels = ["t -10.0s", "t -6.5s", "t -3.0s", "t 0.0s (Current)"]
 
         if not frames_b64:
@@ -245,7 +293,7 @@ class DeadlineScheduler:
 
         t0 = time.monotonic()
         res = await self.vlm_pool.analyze(cam_name, frames_b64, prompt)
-        res["model"] = "vrfai/Cosmos-Reason2-8B-NVFP4"
+        res["model"] = DEFAULT_VLM_MODEL
         latency = res.get("latency", time.monotonic() - t0)
 
         if is_incident:
@@ -271,14 +319,21 @@ class DeadlineScheduler:
 
         results = [res]
 
-        # Store result
+        # Store result in memory
         self.result_store.put(cam_name, results, latency, thumbnails_b64=thumbs_b64, e2e_latency=e2e_latency)
 
+        # Persist to SQLite
         if self.storage:
             try:
                 self.storage.save(dict(res, cam=cam_name), latency=latency, e2e_latency=e2e_latency)
-            except Exception:
-                pass
+            except Exception as exc:
+                error_tracker.capture_exception(
+                    exc,
+                    component="Scheduler",
+                    camera=cam_name,
+                    effect=f"Failed to persist analysis result for {cam_name} to database",
+                    severity="ERROR",
+                )
 
         # Alert check based on Cosmos 8B result with high-resolution frame
         latest_thumb = high_res_snap or (thumbs_b64[-1] if thumbs_b64 else None)
@@ -317,7 +372,6 @@ class DeadlineScheduler:
             )
 
         # 2. If this was a follow-up and persistent follow-up is enabled:
-        # Check if severity is still elevated. If yes, schedule next follow-up cycle!
         elif is_followup and self.persistent_followup:
             current_sev = (res.get("severity") or "LOW").upper()
             current_safety = (res.get("safety") or "UNKNOWN").upper()
@@ -392,10 +446,22 @@ class DeadlineScheduler:
                 return
 
             frames_b64 = self.frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=delay_sec, max_w=512)
-            thumbs_b64 = self.frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=delay_sec, max_w=480, quality=68)
-            high_res_snap = self.frame_store.get_snapshot_b64(cam_name, max_w=960, quality=78) or (thumbs_b64[-1] if thumbs_b64 else None)
+            thumbs_b64 = self.frame_store.get_temporal_snapshots_b64(
+                cam_name, count=4, span_sec=delay_sec, max_w=TEMPORAL_THUMB_WIDTH, quality=TEMPORAL_THUMB_QUALITY
+            )
+            high_res_snap = (
+                self.frame_store.get_snapshot_b64(cam_name, max_w=HIGH_RES_FRAME_WIDTH, quality=HIGH_RES_JPEG_QUALITY)
+                or (thumbs_b64[-1] if thumbs_b64 else None)
+            )
 
             if not frames_b64:
+                error_tracker.capture_error(
+                    message=f"No temporal frames found for {cam_name} during follow-up #{cycle}",
+                    component="Scheduler",
+                    camera=cam_name,
+                    effect=f"Follow-up #{cycle} evaluation skipped due to missing frames",
+                    severity="WARNING",
+                )
                 return
 
             step = max(1.0, delay_sec / 4.0)
@@ -426,51 +492,78 @@ class DeadlineScheduler:
             print(f"[Scheduler] 🔄 Queued follow-up #{cycle} for {cam_name} (Parent: {parent_id})")
         except asyncio.CancelledError:
             pass
-        except Exception as e:
-            print(f"[Scheduler] Error running follow-up for {cam_name}: {e}")
+        except Exception as exc:
+            error_tracker.capture_exception(
+                exc,
+                component="Scheduler",
+                camera=cam_name,
+                effect=f"Error running follow-up cycle #{cycle} for {cam_name}; follow-up cancelled",
+                severity="ERROR",
+            )
 
     # ── Auto-tune ───────────────────────────────────────────────────
 
     async def _tune_loop(self) -> None:
         while self._running:
-            await asyncio.sleep(self.TUNE_INTERVAL)
-            if len(self._latencies) < 5:
-                continue
+            try:
+                await asyncio.sleep(self.TUNE_INTERVAL)
+                if len(self._latencies) < 5:
+                    continue
 
-            recent = self._latencies[-20:]
-            p95 = sorted(recent)[int(len(recent) * 0.95)]
-            cam_count = max(1, len(self.camera_manager.get_active_cameras()))
-            target_max = min(self._max_concurrency, cam_count * 2)
+                recent = self._latencies[-20:]
+                p95 = sorted(recent)[int(len(recent) * 0.95)]
+                cam_count = max(1, len(self.camera_manager.get_active_cameras()))
+                target_max = min(self._max_concurrency, cam_count * 2)
 
-            if p95 < self.LATENCY_UP_THRESH and len(self._workers) < target_max:
-                # Inference is fast — add a worker
-                i = len(self._workers)
-                w = asyncio.create_task(self._worker(i), name=f"vlm-worker-{i}")
-                self._workers.append(w)
-                print(
-                    f"[Scheduler] ↑ Concurrency → {len(self._workers)}  "
-                    f"(p95={p95:.1f}s)"
-                )
+                if p95 < self.LATENCY_UP_THRESH and len(self._workers) < target_max:
+                    # Inference is fast — add a worker
+                    i = len(self._workers)
+                    w = asyncio.create_task(self._worker(i), name=f"vlm-worker-{i}")
+                    self._workers.append(w)
+                    print(
+                        f"[Scheduler] ↑ Concurrency → {len(self._workers)}  "
+                        f"(p95={p95:.1f}s)"
+                    )
 
-            elif p95 > self.LATENCY_DN_THRESH and len(self._workers) > self.MIN_WORKERS:
-                # Inference is slow — shed a worker
-                old = self._workers.pop()
-                old.cancel()
-                print(
-                    f"[Scheduler] ↓ Concurrency → {len(self._workers)}  "
-                    f"(p95={p95:.1f}s)"
+                elif p95 > self.LATENCY_DN_THRESH and len(self._workers) > self.MIN_WORKERS:
+                    # Inference is slow — shed a worker
+                    old = self._workers.pop()
+                    old.cancel()
+                    print(
+                        f"[Scheduler] ↓ Concurrency → {len(self._workers)}  "
+                        f"(p95={p95:.1f}s)"
+                    )
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                error_tracker.capture_exception(
+                    exc,
+                    component="Scheduler",
+                    effect="Auto-tuning loop encountered an error; continuing with current worker count",
+                    severity="WARNING",
                 )
 
     # ── Metrics broadcast ───────────────────────────────────────────
 
     async def _metrics_loop(self) -> None:
         while self._running:
-            await asyncio.sleep(5)
-            metrics = self.result_store.get_metrics()
-            metrics.update({
-                "concurrency": len(self._workers),
-                "queue_depth": self.queue_depth,
-                "in_flight": self.in_flight_count,
-            })
-            if self.broadcast_fn:
-                await self.broadcast_fn({"type": "metrics", "data": metrics})
+            try:
+                await asyncio.sleep(5)
+                metrics = self.result_store.get_metrics()
+                metrics.update({
+                    "concurrency": len(self._workers),
+                    "queue_depth": self.queue_depth,
+                    "in_flight":   self.in_flight_count,
+                    "vlm_shards":  self.vlm_pool.get_stats(),
+                })
+                if self.broadcast_fn:
+                    await self.broadcast_fn({"type": "metrics", "data": metrics})
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                error_tracker.capture_exception(
+                    exc,
+                    component="Scheduler",
+                    effect="Metrics broadcast loop failed to dispatch telemetry",
+                    severity="WARNING",
+                )

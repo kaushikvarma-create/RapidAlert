@@ -1,82 +1,51 @@
 """
-RTSPScanner: discovers cameras on the local network.
-
-Two methods:
-  1. WS-Discovery (ONVIF multicast) — finds ONVIF-compliant cameras instantly
-  2. TCP port scan on 554 (RTSP) — catches non-ONVIF cameras
-
-Returns a list of dicts: {ip, port, method, rtsp_urls}
-where rtsp_urls are common path guesses to try (tested against each IP).
+RTSPScanner: network discovery for RTSP / ONVIF IP cameras.
+Two scan methods run in parallel:
+  1. ONVIF WS-Discovery (UDP broadcast to 239.255.255.250:3702)
+  2. TCP port 554 port scan
+Combines results, deduplicates by IP, and applies vendor RTSP path templates loaded from config/scanner.json.
 """
+from __future__ import annotations
+
 import asyncio
 import ipaddress
-import re
 import socket
-import uuid
+import time
 from typing import Optional
 
-# Common RTSP paths for popular DVR/NVR brands
-RTSP_PATH_TEMPLATES = [
-    "rtsp://{creds}{ip}:{port}/cam/realmonitor?channel=1&subtype=0",  # Dahua
-    "rtsp://{creds}{ip}:{port}/h264/ch1/main/av_stream",              # Hikvision
-    "rtsp://{creds}{ip}:{port}/stream1",                              # generic
-    "rtsp://{creds}{ip}:{port}/live",                                 # generic
-    "rtsp://{creds}{ip}:{port}/video1",                               # generic
-    "rtsp://{creds}{ip}:{port}/ch0_0.264",                            # Axis-style
-    "rtsp://{creds}{ip}:{port}/mpeg4/media.amp",                      # Axis
-    "rtsp://{creds}{ip}:{port}/1",                                    # simple
-    "rtsp://{creds}{ip}:{port}/live/ch00_0",                          # Reolink
-    "rtsp://{creds}{ip}:{port}/11",                                   # Bosch
-]
-
-WS_DISCOVERY_MSG = (
-    '<?xml version="1.0" encoding="utf-8"?>'
-    '<Envelope xmlns:tds="http://www.onvif.org/ver10/device/wsdl"'
-    ' xmlns="http://www.w3.org/2003/05/soap-envelope">'
-    '<Header>'
-    '<wsa:MessageID xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing">'
-    "uuid:{msg_id}"
-    "</wsa:MessageID>"
-    '<wsa:To xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing">'
-    "urn:schemas-xmlsoap-org:ws:2005:04:discovery"
-    "</wsa:To>"
-    '<wsa:Action xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing">'
-    "http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe"
-    "</wsa:Action>"
-    "</Header>"
-    "<Body>"
-    '<Probe xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"'
-    ' xmlns:xsd="http://www.w3.org/2001/XMLSchema"'
-    ' xmlns="http://schemas.xmlsoap.org/ws/2005/04/discovery">'
-    '<Types xmlns:dn="http://www.onvif.org/ver10/network/wsdl">'
-    "dn:NetworkVideoTransmitter"
-    "</Types>"
-    "</Probe>"
-    "</Body>"
-    "</Envelope>"
-)
+from backend.core.config import load_scanner_config
+from backend.core.error_tracker import error_tracker
 
 
 class RTSPScanner:
-    """Async RTSP/ONVIF camera discovery."""
 
-    # ── WS-Discovery (ONVIF multicast) ──────────────────────────
     @staticmethod
-    async def ws_discover(timeout: float = 3.0) -> list[str]:
+    def _get_scanner_params():
+        """Retrieve scanner templates and defaults dynamically from config/scanner.json."""
+        return load_scanner_config()
+
+    # ── ONVIF WS-Discovery ───────────────────────────────────────
+    @staticmethod
+    async def ws_discover(timeout: Optional[float] = None) -> list[str]:
         """
-        Send ONVIF WS-Discovery probe to 239.255.255.250:3702.
-        Returns list of IPs that responded.
+        Broadcasts WS-Discovery Probe to 239.255.255.250:3702 (UDP).
+        Returns list of responding IP addresses.
         """
-        msg = WS_DISCOVERY_MSG.replace("{msg_id}", str(uuid.uuid4()))
-        found: set[str] = set()
+        cfg = RTSPScanner._get_scanner_params()
+        probe_timeout = timeout if timeout is not None else float(cfg.get("default_ws_timeout", 3.0))
+        probe_xml_template = cfg.get("ws_discovery_probe", "")
+
         loop = asyncio.get_event_loop()
 
-        def _blocking_discover():
+        def _blocking_discover() -> list[str]:
+            found = set()
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+            sock.settimeout(probe_timeout)
             try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                sock.settimeout(timeout)
-                sock.sendto(msg.encode(), ("239.255.255.250", 3702))
+                probe_payload = probe_xml_template.format(int(time.time())).encode("utf-8")
+                sock.sendto(probe_payload, ("239.255.255.250", 3702))
                 while True:
                     try:
                         data, addr = sock.recvfrom(65536)
@@ -84,7 +53,12 @@ class RTSPScanner:
                     except socket.timeout:
                         break
             except Exception as exc:
-                print(f"[Scanner] WS-Discovery error: {exc}")
+                error_tracker.capture_exception(
+                    exc,
+                    component="RTSPScanner",
+                    effect="ONVIF WS-Discovery probe encountered an error; discovered IPs may be incomplete",
+                    severity="WARNING",
+                )
             finally:
                 try:
                     sock.close()
@@ -98,19 +72,29 @@ class RTSPScanner:
     @staticmethod
     async def port_scan(
         subnet: Optional[str] = None,
-        port: int = 554,
-        timeout: float = 0.4,
-        concurrency: int = 128,
+        port: Optional[int] = None,
+        timeout: Optional[float] = None,
+        concurrency: Optional[int] = None,
     ) -> list[str]:
         """
-        Scan an entire /24 subnet for open TCP port 554 (RTSP).
+        Scan an entire /24 subnet for open TCP port (RTSP).
         If subnet is None, auto-detects the local /24.
         Returns list of IPs with the port open.
         """
+        cfg = RTSPScanner._get_scanner_params()
+        scan_port = port if port is not None else int(cfg.get("default_port", 554))
+        scan_timeout = timeout if timeout is not None else float(cfg.get("default_port_timeout", 0.4))
+        scan_concurrency = concurrency if concurrency is not None else int(cfg.get("scan_concurrency", 128))
+
         if subnet is None:
             subnet = RTSPScanner._local_subnet()
         if subnet is None:
-            print("[Scanner] Cannot determine local subnet")
+            error_tracker.capture_error(
+                message="Cannot determine local subnet for port scan",
+                component="RTSPScanner",
+                effect="RTSP port sweep skipped due to unknown subnet",
+                severity="WARNING",
+            )
             return []
 
         # Enumerate /24 (or whatever prefix)
@@ -121,14 +105,14 @@ class RTSPScanner:
             net = ipaddress.ip_network(f"{subnet}.0/24", strict=False)
 
         hosts = [str(h) for h in net.hosts()]
-        sem = asyncio.Semaphore(concurrency)
+        sem = asyncio.Semaphore(scan_concurrency)
         open_ips: list[str] = []
 
         async def check(ip: str):
             async with sem:
                 try:
                     _, writer = await asyncio.wait_for(
-                        asyncio.open_connection(ip, port), timeout=timeout
+                        asyncio.open_connection(ip, scan_port), timeout=scan_timeout
                     )
                     writer.close()
                     try:
@@ -137,7 +121,7 @@ class RTSPScanner:
                         pass
                     open_ips.append(ip)
                 except Exception:
-                    pass
+                    pass  # Connection refused or timed out — expected for non-camera IPs
 
         await asyncio.gather(*[check(ip) for ip in hosts])
         return sorted(open_ips)
@@ -146,16 +130,22 @@ class RTSPScanner:
     @staticmethod
     async def full_scan(
         subnet: Optional[str] = None,
-        ws_timeout: float = 3.0,
-        port_timeout: float = 0.4,
+        ws_timeout: Optional[float] = None,
+        port_timeout: Optional[float] = None,
         credentials: Optional[tuple[str, str]] = None,
     ) -> list[dict]:
         """
         Run both WS-Discovery and port scan in parallel.
-        Returns deduplicated list of discovered cameras.
+        Returns deduplicated list of discovered cameras with vendor URL templates.
         """
-        ws_task   = asyncio.create_task(RTSPScanner.ws_discover(timeout=ws_timeout))
-        port_task = asyncio.create_task(RTSPScanner.port_scan(subnet=subnet, timeout=port_timeout))
+        cfg = RTSPScanner._get_scanner_params()
+        default_port = int(cfg.get("default_port", 554))
+        path_templates = cfg.get("rtsp_path_templates", [])
+
+        ws_task = asyncio.create_task(RTSPScanner.ws_discover(timeout=ws_timeout))
+        port_task = asyncio.create_task(
+            RTSPScanner.port_scan(subnet=subnet, port=default_port, timeout=port_timeout)
+        )
 
         ws_ips, port_ips = await asyncio.gather(ws_task, port_task)
 
@@ -178,12 +168,12 @@ class RTSPScanner:
             urls = [
                 t.replace("{creds}", creds_str)
                  .replace("{ip}", ip)
-                 .replace("{port}", "554")
-                for t in RTSP_PATH_TEMPLATES
+                 .replace("{port}", str(default_port))
+                for t in path_templates
             ]
             results.append({
                 "ip": ip,
-                "port": 554,
+                "port": default_port,
                 "method": method,
                 "rtsp_urls": urls,
             })
@@ -201,7 +191,13 @@ class RTSPScanner:
             # Convert to /24
             parts = ip.split(".")
             return f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
-        except Exception:
+        except Exception as exc:
+            error_tracker.capture_exception(
+                exc,
+                component="RTSPScanner",
+                effect="Could not automatically resolve local subnet",
+                severity="WARNING",
+            )
             return None
 
     @staticmethod

@@ -1,126 +1,131 @@
 """
-RapidAlert — FastAPI backend
-Serves REST API + WebSocket + static dashboard frontend.
+RapidAlert — FastAPI Backend Application
+Serves REST API + WebSocket + Live Telemetry + Static Dashboard Frontend.
 """
+from __future__ import annotations
+
 import asyncio
 import base64
 import json
 import os
-import socket
-import subprocess
 import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
 from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
 
 # ── Path setup ─────────────────────────────────────────────────────
-ROOT = Path(__file__).parent.parent
-CONFIG_DIR = ROOT / "config"
-FRONTEND_DIR = ROOT / "frontend"
-
-# All backend modules live alongside main.py
+# Ensure both backend root and rapidalert root are in python path
+ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(ROOT))
 
-from camera_manager import CameraManager
-from frame_store import FrameStore
-from vlm_client import VLMPool
-from prompt_manager import PromptManager
-from result_store import ResultStore
-from alert_engine import AlertEngine
-from scheduler import DeadlineScheduler
-from ws_manager import WSManager
-from storage import StorageManager
-from rtsp_scanner import RTSPScanner
-from metrics_monitor import metrics_loop
-from scene_trigger import SceneTriggerEngine
+# Centralized configuration & error tracking
+from backend.core.config import (
+    CONFIG_DIR,
+    FRONTEND_DIR,
+    DATABASE_PATH,
+    SYSTEM_CONFIG_PATH,
+    CAMERAS_CONFIG_PATH,
+    PROMPTS_CONFIG_PATH,
+    DEFAULT_DASHBOARD_PORT,
+    PREVIEW_FRAME_WIDTH,
+    PREVIEW_JPEG_QUALITY,
+    HIGH_RES_FRAME_WIDTH,
+    HIGH_RES_JPEG_QUALITY,
+    TEMPORAL_THUMB_WIDTH,
+    TEMPORAL_THUMB_QUALITY,
+    config_manager,
+)
+from backend.core.error_tracker import error_tracker
+
+# Schemas (Request and Response models)
+from backend.schemas.requests import (
+    CameraBody,
+    SystemConfigBody,
+    PromptBody,
+    ScanBody,
+    TestAlertBody,
+)
+from backend.schemas.responses import (
+    StandardStatusResponse,
+    SystemConfigResponse,
+    ErrorListResponse,
+    ErrorSummaryResponse,
+)
+
+# Services
+from backend.services.camera_manager import CameraManager
+from backend.services.frame_store import FrameStore
+from backend.services.vlm_client import VLMPool
+from backend.services.prompt_manager import PromptManager
+from backend.services.result_store import ResultStore
+from backend.services.alert_engine import AlertEngine
+from backend.services.scheduler import DeadlineScheduler
+from backend.services.ws_manager import WSManager
+from backend.services.storage import StorageManager
+from backend.services.rtsp_scanner import RTSPScanner
+from backend.services.metrics_monitor import metrics_loop
+from backend.services.scene_trigger import SceneTriggerEngine
 
 
 # ══════════════════════════════════════════════════════════════════
-#  Config loading
+#  Singletons Initialization
 # ══════════════════════════════════════════════════════════════════
 
-def _load_system_cfg() -> dict:
-    defaults = {
-        "vllm_endpoints": [
-            {"url": "http://localhost:8000", "model": "Qwen/Qwen3-VL-8B-Instruct"}
-        ],
-        "auto_start_vllm": True,
-        "vllm_model": "Qwen/Qwen3-VL-8B-Instruct",
-        "vllm_port": 8000,
-        "vllm_max_seqs": 16,
-        "vllm_max_model_len": 4096,
-        "vllm_gpu_utilization": 0.85,
-        "initial_concurrency": 4,
-        "max_concurrency": 16,
-        "frame_width": 1280,
-        "jpeg_quality": 82,
-    }
-    path = CONFIG_DIR / "system.json"
-    if path.exists():
-        try:
-            with open(path) as f:
-                defaults.update(json.load(f))
-        except Exception as e:
-            print(f"[Config] system.json error: {e}")
-    return defaults
+sys_cfg = config_manager.get()
 
-
-# ══════════════════════════════════════════════════════════════════
-#  Singletons
-# ══════════════════════════════════════════════════════════════════
-
-SYS_CFG = _load_system_cfg()
-
-frame_store      = FrameStore(SYS_CFG["frame_width"], SYS_CFG["jpeg_quality"])
-camera_manager   = CameraManager(CONFIG_DIR / "cameras.json", frame_store)
-vlm_pool         = VLMPool(SYS_CFG["vllm_endpoints"])
-result_store     = ResultStore()
-alert_engine     = AlertEngine()
-ws_manager       = WSManager()
-storage          = StorageManager(ROOT / "data" / "analyses.db")
-prompt_manager   = PromptManager(
-    CONFIG_DIR / "prompts.json",
+frame_store = FrameStore(sys_cfg.frame_width, sys_cfg.jpeg_quality)
+camera_manager = CameraManager(CAMERAS_CONFIG_PATH, frame_store)
+vlm_pool = VLMPool([ep.model_dump() for ep in sys_cfg.vllm_endpoints])
+result_store = ResultStore()
+alert_engine = AlertEngine()
+ws_manager = WSManager()
+storage = StorageManager(DATABASE_PATH)
+prompt_manager = PromptManager(
+    PROMPTS_CONFIG_PATH,
     cameras_config_provider=camera_manager.get_config,
 )
 scheduler = DeadlineScheduler(
-    camera_manager    = camera_manager,
-    frame_store       = frame_store,
-    vlm_pool          = vlm_pool,
-    prompt_manager    = prompt_manager,
-    result_store      = result_store,
-    alert_engine      = alert_engine,
-    initial_concurrency = SYS_CFG["initial_concurrency"],
-    max_concurrency     = SYS_CFG["max_concurrency"],
-    broadcast_fn      = ws_manager.broadcast,
-    storage           = storage,
-    default_heartbeat_sec = float(SYS_CFG.get("default_heartbeat_sec", 30.0)),
+    camera_manager=camera_manager,
+    frame_store=frame_store,
+    vlm_pool=vlm_pool,
+    prompt_manager=prompt_manager,
+    result_store=result_store,
+    alert_engine=alert_engine,
+    initial_concurrency=sys_cfg.initial_concurrency,
+    max_concurrency=sys_cfg.max_concurrency,
+    broadcast_fn=ws_manager.broadcast,
+    storage=storage,
+    default_heartbeat_sec=sys_cfg.default_heartbeat_sec,
 )
 alert_engine.set_broadcaster(ws_manager.broadcast)
+error_tracker.set_broadcaster(ws_manager.broadcast)
+
 scene_trigger = SceneTriggerEngine(
     frame_store=frame_store,
     camera_manager=camera_manager,
     on_incident_callback=scheduler.queue_incident,
     broadcast_fn=ws_manager.broadcast,
     alert_engine=alert_engine,
-    model_name=SYS_CFG.get("dinov2_model", "facebook/dinov2-small"),
+    model_name=sys_cfg.dinov2_model,
     device="cuda",
-    default_threshold=SYS_CFG.get("scene_threshold", 0.033),
-    semantic_interval=SYS_CFG.get("semantic_interval", 0.5),
-    event_cooldown=SYS_CFG.get("event_cooldown", 15.0),
+    default_threshold=sys_cfg.scene_threshold,
+    semantic_interval=sys_cfg.semantic_interval,
+    event_cooldown=sys_cfg.event_cooldown,
 )
 
 
 # ══════════════════════════════════════════════════════════════════
-#  Lifespan
+#  Application Lifespan
 # ══════════════════════════════════════════════════════════════════
 
 _bg_tasks = []
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -133,7 +138,9 @@ async def lifespan(app: FastAPI):
     _bg_tasks.append(asyncio.create_task(_config_sync_loop()))
     _bg_tasks.append(asyncio.create_task(metrics_loop(ws_manager.broadcast)))
     _bg_tasks.append(asyncio.create_task(_snapshot_stream_loop()))
-    print(f"\n[RapidAlert] ✅ Dashboard → http://localhost:{SYS_CFG.get('dashboard_port', 7000)}\n")
+    
+    port = config_manager.get().dashboard_port
+    print(f"\n[RapidAlert] ✅ Dashboard → http://localhost:{port}\n")
     yield
     # ── Shutdown ────────────────────────────────────────────────
     for task in _bg_tasks:
@@ -146,80 +153,105 @@ async def lifespan(app: FastAPI):
 
 async def _config_sync_loop() -> None:
     """Poll cameras.json and system.json for changes, hot-apply to engines, and notify WS clients."""
-    global SYS_CFG
-    sys_path = CONFIG_DIR / "system.json"
+    sys_path = SYSTEM_CONFIG_PATH
     last_sys_mtime = 0.0
     try:
         if sys_path.exists():
             last_sys_mtime = os.path.getmtime(sys_path)
-    except Exception:
-        pass
+    except Exception as exc:
+        error_tracker.capture_exception(
+            exc,
+            component="ConfigManager",
+            effect="Could not check initial system.json timestamp",
+            severity="WARNING",
+        )
 
     while True:
-        await asyncio.sleep(2)
-        # 1. Camera changes
-        if camera_manager.sync():
-            await ws_manager.broadcast({
-                "type": "cameras",
-                "data": camera_manager.get_config(),
-            })
-
-        # 2. System config changes
         try:
+            await asyncio.sleep(2)
+            # 1. Camera changes
+            if camera_manager.sync():
+                await ws_manager.broadcast({
+                    "type": "cameras",
+                    "data": camera_manager.get_config(),
+                })
+
+            # 2. System config changes
             if sys_path.exists():
                 mtime = os.path.getmtime(sys_path)
                 if mtime > last_sys_mtime:
                     last_sys_mtime = mtime
-                    with open(sys_path) as f:
-                        new_cfg = json.load(f)
-                    SYS_CFG.update(new_cfg)
-                    if "default_threshold" in new_cfg or "scene_threshold" in new_cfg:
-                        t = float(new_cfg.get("default_threshold", new_cfg.get("scene_threshold", 0.033)))
-                        scene_trigger.set_default_threshold(t)
-                    if "default_heartbeat_sec" in new_cfg:
-                        scheduler.default_heartbeat_sec = float(new_cfg["default_heartbeat_sec"])
-                    if "event_cooldown" in new_cfg:
-                        scene_trigger.event_cooldown = float(new_cfg["event_cooldown"])
-                    if "semantic_interval" in new_cfg:
-                        scene_trigger.semantic_interval = float(new_cfg["semantic_interval"])
-                    if "followup_interval_sec" in new_cfg:
-                        scheduler.followup_interval_sec = float(new_cfg["followup_interval_sec"])
-                    if "persistent_followup" in new_cfg:
-                        scheduler.persistent_followup = bool(new_cfg["persistent_followup"])
-                    print(f"[Main] 🔄 Hot-reloaded system.json (default_thresh: {SYS_CFG.get('default_threshold')}, hb: {SYS_CFG.get('default_heartbeat_sec')}s, followup: {scheduler.followup_interval_sec}s, persistent: {scheduler.persistent_followup})")
+                    cfg = config_manager.load()
+                    
+                    scene_trigger.set_default_threshold(cfg.default_threshold)
+                    scheduler.default_heartbeat_sec = cfg.default_heartbeat_sec
+                    scene_trigger.event_cooldown = cfg.event_cooldown
+                    scene_trigger.semantic_interval = cfg.semantic_interval
+                    scheduler.followup_interval_sec = cfg.followup_interval_sec
+                    scheduler.persistent_followup = cfg.persistent_followup
+
+                    print(
+                        f"[Main] 🔄 Hot-reloaded system.json (default_thresh: {cfg.default_threshold}, "
+                        f"hb: {cfg.default_heartbeat_sec}s, followup: {scheduler.followup_interval_sec}s, "
+                        f"persistent: {scheduler.persistent_followup})"
+                    )
                     await ws_manager.broadcast({
                         "type": "config_updated",
-                        "system": SYS_CFG,
+                        "system": config_manager.as_dict(),
                         "cameras": camera_manager.get_config(),
                     })
+        except asyncio.CancelledError:
+            break
         except Exception as e:
-            print(f"[Main] Error in system config sync: {e}")
+            error_tracker.capture_exception(
+                e,
+                component="ConfigManager",
+                effect="Error during periodic config sync loop; continuing",
+                severity="WARNING",
+            )
 
 
 async def _snapshot_stream_loop() -> None:
     """Broadcast live camera snapshots every 2 seconds so the dashboard preview stays live."""
     while True:
-        await asyncio.sleep(2.0)
-        active = camera_manager.get_active_cameras()
-        for cam in active:
-            snap = frame_store.get_snapshot_b64(cam, max_w=320, quality=65)
-            if snap:
-                await ws_manager.broadcast({
-                    "type": "camera_frame",
-                    "cam": cam,
-                    "thumbnail_b64": snap,
-                })
+        try:
+            await asyncio.sleep(2.0)
+            active = camera_manager.get_active_cameras()
+            for cam in active:
+                snap = frame_store.get_snapshot_b64(
+                    cam, max_w=PREVIEW_FRAME_WIDTH, quality=PREVIEW_JPEG_QUALITY
+                )
+                if snap:
+                    await ws_manager.broadcast({
+                        "type": "camera_frame",
+                        "cam": cam,
+                        "thumbnail_b64": snap,
+                    })
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            error_tracker.capture_exception(
+                exc,
+                component="CameraManager",
+                effect="Error in live snapshot broadcast loop; continuing",
+                severity="WARNING",
+            )
 
 
 # ══════════════════════════════════════════════════════════════════
-#  App
+#  FastAPI App Definition
 # ══════════════════════════════════════════════════════════════════
 
-app = FastAPI(title="RapidAlert", version="1.0.0", lifespan=lifespan)
+app = FastAPI(
+    title="RapidAlert",
+    version="2.0.0",
+    description="High-Speed Hybrid VLM Surveillance & Incident Detection Engine",
+    lifespan=lifespan,
+)
 
 
 # ══════════════════════════════════════════════════════════════════
-#  WebSocket
+#  WebSocket Endpoint
 # ══════════════════════════════════════════════════════════════════
 
 @app.websocket("/ws")
@@ -230,7 +262,9 @@ async def websocket_endpoint(ws: WebSocket):
         active_cams = camera_manager.get_active_cameras()
         live_thumbs = {}
         for c in active_cams:
-            snap = frame_store.get_snapshot_b64(c, max_w=320, quality=65)
+            snap = frame_store.get_snapshot_b64(
+                c, max_w=PREVIEW_FRAME_WIDTH, quality=PREVIEW_JPEG_QUALITY
+            )
             if snap:
                 live_thumbs[c] = [snap]
 
@@ -243,7 +277,7 @@ async def websocket_endpoint(ws: WebSocket):
             "thumbnails": live_thumbs,
             "drifts": scene_trigger.latest_drifts,
             "alerts": alert_engine.get_recent(25, summary=True),
-            "system": SYS_CFG,
+            "system": config_manager.as_dict(),
             "metrics": {
                 **result_store.get_metrics(),
                 "concurrency": scheduler.concurrency,
@@ -254,7 +288,9 @@ async def websocket_endpoint(ws: WebSocket):
                 "master": prompt_manager.get_master(),
                 "cameras": prompt_manager.get_cam_overrides(),
             },
+            "recent_errors": error_tracker.get_recent(limit=10),
         })
+
         # Keep connection alive with periodic pings
         while True:
             await asyncio.sleep(25)
@@ -263,8 +299,13 @@ async def websocket_endpoint(ws: WebSocket):
         pass
     except asyncio.CancelledError:
         pass
-    except Exception:
-        pass
+    except Exception as exc:
+        error_tracker.capture_exception(
+            exc,
+            component="WebSocketManager",
+            effect="Unhandled exception in WebSocket client loop; closing socket",
+            severity="WARNING",
+        )
     finally:
         await ws_manager.disconnect(ws)
 
@@ -283,72 +324,6 @@ def api_get_drifts():
     return scene_trigger.latest_drifts
 
 
-class CameraBody(BaseModel):
-    name: str
-    url: str = ""
-    enabled: bool = True
-    normal_context_day: str = ""
-    normal_context_night: str = ""
-    priority: str = "normal"
-    threshold: Optional[float] = None
-    heartbeat_sec: Optional[float] = None
-
-
-class SystemConfigBody(BaseModel):
-    default_threshold: Optional[float] = None
-    default_heartbeat_sec: Optional[float] = None
-    event_cooldown: Optional[float] = None
-    semantic_interval: Optional[float] = None
-    followup_interval_sec: Optional[float] = None
-    persistent_followup: Optional[bool] = None
-
-
-@app.get("/api/config")
-def api_get_config():
-    return {
-        "system": SYS_CFG,
-        "cameras": camera_manager.get_config(),
-    }
-
-
-@app.post("/api/config")
-async def api_update_system_config(body: SystemConfigBody):
-    global SYS_CFG
-    updates = body.model_dump(exclude_none=True)
-    if not updates:
-        return {"status": "ok", "system": SYS_CFG}
-
-    SYS_CFG.update(updates)
-    if "default_threshold" in updates:
-        SYS_CFG["scene_threshold"] = updates["default_threshold"]
-        scene_trigger.set_default_threshold(updates["default_threshold"])
-    if "default_heartbeat_sec" in updates:
-        scheduler.default_heartbeat_sec = float(updates["default_heartbeat_sec"])
-    if "event_cooldown" in updates:
-        scene_trigger.event_cooldown = float(updates["event_cooldown"])
-    if "semantic_interval" in updates:
-        scene_trigger.semantic_interval = float(updates["semantic_interval"])
-    if "followup_interval_sec" in updates:
-        scheduler.followup_interval_sec = float(updates["followup_interval_sec"])
-    if "persistent_followup" in updates:
-        scheduler.persistent_followup = bool(updates["persistent_followup"])
-
-    # Persist to system.json
-    try:
-        sys_path = CONFIG_DIR / "system.json"
-        with open(sys_path, "w") as f:
-            json.dump(SYS_CFG, f, indent=2)
-    except Exception as e:
-        print(f"[Main] Error saving system.json: {e}")
-
-    await ws_manager.broadcast({
-        "type": "config_updated",
-        "system": SYS_CFG,
-        "cameras": camera_manager.get_config(),
-    })
-    return {"status": "ok", "system": SYS_CFG}
-
-
 @app.post("/api/cameras")
 async def api_upsert_camera(cam: CameraBody):
     camera_manager.update_camera(cam.model_dump())
@@ -361,7 +336,7 @@ async def api_upsert_camera(cam: CameraBody):
 
 
 @app.post("/api/cameras/batch")
-async def api_batch_update_cameras(cams: list[CameraBody]):
+async def api_batch_update_cameras(cams: List[CameraBody]):
     for cam in cams:
         camera_manager.update_camera(cam.model_dump())
     _persist_cameras()
@@ -384,13 +359,69 @@ async def api_delete_camera(name: str):
 
 
 def _persist_cameras() -> None:
-    path = CONFIG_DIR / "cameras.json"
-    with open(path, "w") as f:
-        json.dump(camera_manager.get_config(), f, indent=2)
+    try:
+        with open(CAMERAS_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(camera_manager.get_config(), f, indent=2)
+    except Exception as e:
+        error_tracker.capture_exception(
+            e,
+            component="CameraManager",
+            effect=f"Failed to persist camera config to {CAMERAS_CONFIG_PATH}",
+            severity="ERROR",
+        )
 
 
 # ══════════════════════════════════════════════════════════════════
-#  REST — Frames
+#  REST — Configuration
+# ══════════════════════════════════════════════════════════════════
+
+@app.get("/api/config")
+def api_get_config():
+    return {
+        "system": config_manager.as_dict(),
+        "cameras": camera_manager.get_config(),
+    }
+
+
+@app.post("/api/config")
+async def api_update_system_config(body: SystemConfigBody):
+    updates = body.model_dump(exclude_none=True)
+    if not updates:
+        return {"status": "ok", "system": config_manager.as_dict()}
+
+    try:
+        cfg = config_manager.update(updates)
+        if "default_threshold" in updates or "scene_threshold" in updates:
+            scene_trigger.set_default_threshold(cfg.default_threshold)
+        if "default_heartbeat_sec" in updates:
+            scheduler.default_heartbeat_sec = float(cfg.default_heartbeat_sec)
+        if "event_cooldown" in updates:
+            scene_trigger.event_cooldown = float(cfg.event_cooldown)
+        if "semantic_interval" in updates:
+            scene_trigger.semantic_interval = float(cfg.semantic_interval)
+        if "followup_interval_sec" in updates:
+            scheduler.followup_interval_sec = float(cfg.followup_interval_sec)
+        if "persistent_followup" in updates:
+            scheduler.persistent_followup = bool(cfg.persistent_followup)
+
+        await ws_manager.broadcast({
+            "type": "config_updated",
+            "system": config_manager.as_dict(),
+            "cameras": camera_manager.get_config(),
+        })
+        return {"status": "ok", "system": config_manager.as_dict()}
+    except Exception as e:
+        error_tracker.capture_exception(
+            e,
+            component="ConfigManager",
+            effect="Failed to update and persist system configuration",
+            severity="ERROR",
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ══════════════════════════════════════════════════════════════════
+#  REST — Frames & MJPEG Stream
 # ══════════════════════════════════════════════════════════════════
 
 @app.get("/api/cameras/{name}/frame")
@@ -418,7 +449,7 @@ async def api_camera_stream(name: str, width: int = 640, quality: int = 70):
                         b"--frame\r\n"
                         b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
                     )
-                await asyncio.sleep(0.1) # ~10 FPS smooth video
+                await asyncio.sleep(0.1)  # ~10 FPS smooth video
         except (asyncio.CancelledError, GeneratorExit):
             pass
 
@@ -491,12 +522,6 @@ def api_get_prompts():
     }
 
 
-class PromptBody(BaseModel):
-    master: Optional[str] = None
-    cam_name: Optional[str] = None
-    cam_prompt: Optional[str] = None  # None or "" → clear override
-
-
 @app.post("/api/prompts")
 async def api_update_prompts(body: PromptBody):
     prompt_manager.save(
@@ -542,8 +567,12 @@ async def api_trigger_test_alert(cam: Optional[str] = None):
     """Trigger an immediate test alert to verify notification feed and inspector."""
     active = camera_manager.get_active_cameras()
     cam_name = cam if (cam and cam in active) else (active[0] if active else "TEST_CAM")
-    snap = frame_store.get_snapshot_b64(cam_name, max_w=960, quality=78)
-    temporal_snaps = frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=10.0, max_w=480, quality=68)
+    snap = frame_store.get_snapshot_b64(
+        cam_name, max_w=HIGH_RES_FRAME_WIDTH, quality=HIGH_RES_JPEG_QUALITY
+    )
+    temporal_snaps = frame_store.get_temporal_snapshots_b64(
+        cam_name, count=4, span_sec=10.0, max_w=TEMPORAL_THUMB_WIDTH, quality=TEMPORAL_THUMB_QUALITY
+    )
     labels = ["t -10.0s", "t -5.0s", "t -2.0s", "t 0.0s (Trigger)"]
     alert = await alert_engine.process(
         cam_name=cam_name,
@@ -582,7 +611,41 @@ async def api_trigger_test_alert(cam: Optional[str] = None):
 
 
 # ══════════════════════════════════════════════════════════════════
-#  REST — Metrics
+#  REST — System Diagnostics & Error Tracking
+# ══════════════════════════════════════════════════════════════════
+
+@app.get("/api/errors", response_model=ErrorListResponse)
+def api_get_errors(
+    limit: int = Query(50, ge=1, le=500),
+    component: Optional[str] = None,
+    camera: Optional[str] = None,
+    severity: Optional[str] = None,
+):
+    """Retrieve recorded system exceptions and operational impact records."""
+    records = error_tracker.get_recent(
+        limit=limit,
+        component=component,
+        camera=camera,
+        severity=severity,
+    )
+    return {"count": len(records), "errors": records}
+
+
+@app.get("/api/errors/summary", response_model=ErrorSummaryResponse)
+def api_get_errors_summary():
+    """Retrieve aggregate statistics on system errors grouped by component and effect."""
+    return error_tracker.get_summary()
+
+
+@app.delete("/api/errors", response_model=StandardStatusResponse)
+def api_clear_errors():
+    """Clear error history from memory and SQLite log."""
+    error_tracker.clear()
+    return {"status": "ok", "message": "Error log cleared successfully"}
+
+
+# ══════════════════════════════════════════════════════════════════
+#  REST — Metrics & Health
 # ══════════════════════════════════════════════════════════════════
 
 @app.get("/api/metrics")
@@ -596,25 +659,14 @@ def api_get_metrics():
     return m
 
 
-# ══════════════════════════════════════════════════════════════════
-#  REST — vLLM health
-# ══════════════════════════════════════════════════════════════════
-
 @app.get("/api/health/vlm")
 async def api_vlm_health():
     return await vlm_pool.health_check()
 
 
 # ══════════════════════════════════════════════════════════════
-#  REST — RTSP / ONVIF scanner
+#  REST — RTSP / ONVIF Scanner
 # ══════════════════════════════════════════════════════════════
-
-class ScanBody(BaseModel):
-    subnet: Optional[str] = None          # e.g. "192.168.1.0/24" or None for auto
-    ws_timeout: float = 3.0
-    port_timeout: float = 0.4
-    username: Optional[str] = None
-    password: Optional[str] = None
 
 _scan_lock = asyncio.Lock()
 _scan_running = False
@@ -648,8 +700,31 @@ async def api_scan(body: ScanBody):
             _scan_running = False
 
 
+
+# ══════════════════════════════════════════════════════════════
+#  VLM Pool telemetry
+# ══════════════════════════════════════════════════════════════
+
+@app.get("/api/vlm/stats")
+async def get_vlm_stats():
+    """
+    Per-MIG-shard live telemetry:
+    queued items, in-flight requests, completed count, error count,
+    avg/p95 latency, health flag, weight, and load_score.
+    """
+    return {"shards": vlm_pool.get_stats()}
+
+
+@app.get("/api/vlm/health")
+async def get_vlm_health():
+    """Trigger a manual health probe on all vLLM endpoints."""
+    results = await vlm_pool.health_check()
+    return {"health": results}
+
+
 # ══════════════════════════════════════════════════════════════
 #  Static frontend — mount LAST (catches all remaining routes)
 # ══════════════════════════════════════════════════════════════
 
 app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
+

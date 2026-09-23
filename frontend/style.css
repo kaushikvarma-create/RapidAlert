@@ -2465,3 +2465,176 @@ select.input option {
   animation: pulse 1.5s infinite;
 }
 
+/* ── System Diagnostics & Error Tracking ────────────────────── */
+.error-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 0.65rem;
+  font-weight: 700;
+  border-radius: 999px;
+  padding: 1px 5px;
+  min-width: 16px;
+  text-align: center;
+  box-shadow: 0 1px 4px rgba(239, 68, 68, 0.4);
+}
+
+.error-summary-bar {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.error-summary-chip {
+  font-size: 0.76rem;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-2);
+}
+
+.error-summary-chip span {
+  font-weight: 700;
+  color: var(--text);
+  margin-right: 4px;
+}
+
+.errors-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.error-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-left: 4px solid #ef4444;
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: background 0.15s;
+}
+
+.error-card.sev-warning {
+  border-left-color: #f59e0b;
+}
+
+.error-card.sev-critical {
+  border-left-color: #dc2626;
+  background: rgba(220, 38, 38, 0.05);
+}
+
+.error-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.error-meta-tags {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.error-comp-badge {
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(234, 111, 62, 0.12);
+  color: var(--accent);
+  border: 1px solid rgba(234, 111, 62, 0.25);
+}
+
+.error-cam-badge {
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--bg-card-hover);
+  color: var(--text-2);
+  border: 1px solid var(--border);
+}
+
+.error-time {
+  font-size: 0.7rem;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+}
+
+.error-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text);
+  font-family: var(--font-mono);
+}
+
+.error-effect-box {
+  background: rgba(239, 68, 68, 0.06);
+  border: 1px solid rgba(239, 68, 68, 0.15);
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 0.75rem;
+  color: var(--text);
+  display: flex;
+  gap: 6px;
+}
+
+.error-card.sev-warning .error-effect-box {
+  background: rgba(245, 158, 11, 0.06);
+  border-color: rgba(245, 158, 11, 0.2);
+}
+
+.error-effect-label {
+  font-weight: 700;
+  color: #ef4444;
+  white-space: nowrap;
+}
+
+.error-card.sev-warning .error-effect-label {
+  color: #f59e0b;
+}
+
+.error-origin {
+  font-size: 0.7rem;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+}
+
+.error-trace-toggle {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 0.7rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+  margin-top: 4px;
+}
+
+.error-traceback {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 0.68rem;
+  font-family: var(--font-mono);
+  color: var(--text-2);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 180px;
+  overflow-y: auto;
+  margin-top: 4px;
+  display: none;
+}
+
+

@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/style.css?v=23" />
+  <link rel="stylesheet" href="/style.css?v=24" />
   <script>
     (function() {
       var saved = localStorage.getItem('rapidalert_theme') || localStorage.getItem('theme');
@@ -54,6 +54,10 @@
       </div>
       <button class="btn-icon" id="btn-theme-toggle" title="Toggle Light/Dark Theme" aria-label="Toggle Light/Dark Theme">
         <span id="theme-toggle-icon" style="font-size: 1rem; line-height: 1;">☀️</span>
+      </button>
+      <button class="btn-icon" id="btn-errors" title="System Errors & Diagnostics" aria-label="System Errors & Diagnostics" style="position: relative;">
+        <span style="font-size: 1.05rem; line-height: 1;">🛠️</span>
+        <span id="error-badge" class="error-badge" style="display: none;">0</span>
       </button>
       <button class="btn-icon" id="btn-settings" title="Settings">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -613,9 +617,41 @@
     </div>
   </div>
 
+  <!-- ═══════════════════════════════════════════════════════════ MODAL: SYSTEM ERRORS & DIAGNOSTICS -->
+  <div class="modal-backdrop" id="modal-errors" style="display: none;">
+    <div class="modal-box modal-lg" style="max-width: 920px;">
+      <div class="modal-header">
+        <div class="modal-header-left">
+          <span class="modal-title">🛠️ System Health &amp; Error Diagnostics</span>
+          <span class="modal-sub">Live visibility into exceptions, subsystem origins, and operational downstream effects.</span>
+        </div>
+        <div style="display: flex; gap: 8px; align-items: center;">
+          <button class="btn btn-sm btn-ghost" id="btn-refresh-errors" title="Refresh errors">🔄 Refresh</button>
+          <button class="btn btn-sm btn-ghost" id="btn-clear-errors" style="color: #ef4444;" title="Clear error log">🗑️ Clear</button>
+          <button class="btn-icon" id="btn-close-errors" title="Close">✕</button>
+        </div>
+      </div>
+      <div class="modal-body" style="max-height: 70vh; overflow-y: auto;">
+        <div class="error-summary-bar" id="error-summary-bar">
+          <div class="error-summary-chip"><span id="err-count-total">0</span> Total Errors</div>
+          <div class="error-summary-chip"><span id="err-count-critical" style="color: #dc2626;">0</span> Critical</div>
+          <div class="error-summary-chip"><span id="err-count-warnings" style="color: #f59e0b;">0</span> Warnings</div>
+        </div>
+        <div class="errors-list" id="errors-list">
+          <!-- Dynamically populated -->
+        </div>
+        <div class="empty-state" id="empty-errors" style="display: none; padding: 40px 0;">
+          <div class="empty-icon" style="font-size: 2.5rem;">✅</div>
+          <p style="font-weight: 600; margin-top: 8px;">All Systems Operational</p>
+          <small style="color: var(--text-3);">No unhandled exceptions or pipeline failures recorded.</small>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- ═══════════════════════════════════════════════════════════ TOAST -->
   <div class="toast-container" id="toast-container"></div>
 
-  <script src="/app.js?v=23"></script>
+  <script src="/app.js?v=24"></script>
 </body>
 </html>

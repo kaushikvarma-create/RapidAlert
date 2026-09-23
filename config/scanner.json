@@ -1,0 +1,23 @@
+{
+  "_comment": "RapidAlert Network Scanner Configuration. RTSP templates and ONVIF discovery probe.",
+  "default_port": 554,
+  "scan_concurrency": 128,
+  "default_port_timeout": 0.4,
+  "default_ws_timeout": 3.0,
+  "rtsp_path_templates": [
+    "rtsp://{creds}{ip}:{port}/Streaming/Channels/101",
+    "rtsp://{creds}{ip}:{port}/Streaming/Channels/102",
+    "rtsp://{creds}{ip}:{port}/cam/realmonitor?channel=1&subtype=0",
+    "rtsp://{creds}{ip}:{port}/cam/realmonitor?channel=1&subtype=1",
+    "rtsp://{creds}{ip}:{port}/h264Preview_01_main",
+    "rtsp://{creds}{ip}:{port}/h264Preview_01_sub",
+    "rtsp://{creds}{ip}:{port}/axis-media/media.amp",
+    "rtsp://{creds}{ip}:{port}/live/ch0",
+    "rtsp://{creds}{ip}:{port}/stream1",
+    "rtsp://{creds}{ip}:{port}/stream2",
+    "rtsp://{creds}{ip}:{port}/h264",
+    "rtsp://{creds}{ip}:{port}/ch0",
+    "rtsp://{creds}{ip}:{port}/"
+  ],
+  "ws_discovery_probe": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<soap:Envelope xmlns:soap=\"http://www.w3.org/2003/05/soap-envelope\" xmlns:wsa=\"http://schemas.xmlsoap.org/ws/2004/08/addressing\" xmlns:wsd=\"http://schemas.xmlsoap.org/ws/2005/04/discovery\" xmlns:dn=\"http://www.onvif.org/ver10/network/wsdl\">\n<soap:Header>\n<wsa:MessageID>uuid: rapidalert-probe-{}</wsa:MessageID>\n<wsa:To>urn:schemas-xmlsoap-org:ws:2005:04:discovery</wsa:To>\n<wsa:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</wsa:Action>\n</soap:Header>\n<soap:Body>\n<wsd:Probe>\n<wsd:Types>dn:NetworkVideoTransmitter</wsd:Types>\n</wsd:Probe>\n</soap:Body>\n</soap:Envelope>"
+}

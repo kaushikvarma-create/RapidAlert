@@ -95,7 +95,7 @@ if ! python3 -c "import fastapi, uvicorn, aiohttp, cv2, numpy, torch, transforme
   pip install --break-system-packages -q -r requirements.txt || die "Failed to install dependencies"
 fi
 
-if python3 -c "import sys; sys.path.insert(0, 'backend'); from nvidia_ingest import is_nvidia_available; exit(0 if is_nvidia_available() else 1)" 2>/dev/null; then
+if python3 -c "from backend.services.nvidia_ingest import is_nvidia_available; exit(0 if is_nvidia_available() else 1)" 2>/dev/null; then
   ok "NVIDIA DeepStream / NVDEC hardware decoding available."
 else
   warn "NVIDIA DeepStream plugins not found — will use OpenCV fallback."
@@ -147,11 +147,22 @@ if [[ "$AUTO_START_VLLM" == "true" ]]; then
         CNAME="rapidalert_vllm_${i}"
         C_API_URL="http://localhost:${PORT}/v1/models"
         NEEDS_START=1
-        
-        # Extract the specific model for this endpoint
+
+        # Extract per-endpoint config from system.json
         EP_MODEL=$(python3 -c "import json; d=json.load(open('config/system.json')); eps=d.get('vllm_endpoints', []); print(eps[$i]['model'] if $i < len(eps) else d.get('vllm_model'))" 2>/dev/null || echo "$VLLM_MODEL")
-        EP_TOKENIZER=$(python3 -c "import json; d=json.load(open('config/system.json')); eps=d.get('vllm_endpoints', []); print(eps[$i].get('tokenizer', '')) if $i < len(eps) else print('')" 2>/dev/null || echo "")
-        EP_QUANTIZATION=$(python3 -c "import json; d=json.load(open('config/system.json')); eps=d.get('vllm_endpoints', []); print(eps[$i].get('quantization', d.get('vllm_quantization', ''))) if $i < len(eps) else print(d.get('vllm_quantization', ''))" 2>/dev/null || echo "$VLLM_QUANTIZATION")
+        EP_TOKENIZER=$(python3 -c "import json; d=json.load(open('config/system.json')); eps=d.get('vllm_endpoints', []); print(eps[$i].get('tokenizer', '') if $i < len(eps) else '')" 2>/dev/null || echo "")
+        EP_QUANTIZATION=$(python3 -c "import json; d=json.load(open('config/system.json')); eps=d.get('vllm_endpoints', []); print(eps[$i].get('quantization', d.get('vllm_quantization', '')) if $i < len(eps) else d.get('vllm_quantization', ''))" 2>/dev/null || echo "$VLLM_QUANTIZATION")
+        # MIG UUID — pins this container exclusively to its MIG slice
+        EP_MIG_UUID=$(python3 -c "import json; d=json.load(open('config/system.json')); eps=d.get('vllm_endpoints', []); print(eps[$i].get('mig_uuid', '') if $i < len(eps) else '')" 2>/dev/null || echo "")
+        EP_SM=$(python3 -c "import json; d=json.load(open('config/system.json')); eps=d.get('vllm_endpoints', []); print(eps[$i].get('sm_count', '?') if $i < len(eps) else '?')" 2>/dev/null || echo "?")
+        # Per-endpoint GPU memory utilization — lower on the 12SM shard to protect NVDEC/GUI
+        EP_GPU_UTIL=$(python3 -c "import json; d=json.load(open('config/system.json')); eps=d.get('vllm_endpoints', []); print(eps[$i].get('gpu_utilization', d.get('vllm_gpu_utilization', 0.95)) if $i < len(eps) else d.get('vllm_gpu_utilization', 0.95))" 2>/dev/null || echo "${VLLM_GPU_UTILIZATION}")
+
+        if [[ -n "$EP_MIG_UUID" ]]; then
+            log "Instance ${i}: MIG=${EP_MIG_UUID} (${EP_SM} SMs)  port=${PORT}  gpu_util=${EP_GPU_UTIL}"
+        else
+            warn "Instance ${i}: no mig_uuid set — container will use any available GPU"
+        fi
 
         # Check if running and serving correct model
         if curl -sf "${C_API_URL}" >/dev/null 2>&1; then
@@ -183,6 +194,7 @@ if [[ "$AUTO_START_VLLM" == "true" ]]; then
                 -e HF_HOME=/data/models/huggingface \
                 -e EP_MODEL="${EP_MODEL}" \
                 -e EP_QUANTIZATION="${EP_QUANTIZATION}" \
+                ${EP_MIG_UUID:+-e NVIDIA_VISIBLE_DEVICES="${EP_MIG_UUID}"} \
                 -v "${HF_CACHE}:/data/models/huggingface" \
                 "${VLLM_IMAGE}" \
                 bash -c " \
@@ -197,7 +209,7 @@ if [[ "$AUTO_START_VLLM" == "true" ]]; then
                     --port \"${PORT}\" \
                     ${EP_TOKENIZER:+--tokenizer \"${EP_TOKENIZER}\"} \
                     --max-model-len \"${VLLM_MAX_MODEL_LEN}\" \
-                    --gpu-memory-utilization \"${VLLM_GPU_UTILIZATION}\" \
+                    --gpu-memory-utilization \"${EP_GPU_UTIL}\" \
                     --dtype auto \
                     --enforce-eager \
                     --max-num-seqs \"${VLLM_MAX_SEQS}\" \
@@ -249,6 +261,26 @@ echo "  ────────────────────────
 log "Launching RapidAlert Dashboard ..."
 echo "  ─────────────────────────────────────────────────────"
 echo ""
+
+# ── MIG device selection for backend (DeepStream NVDEC + DINOv2) ────────────
+# In MIG mode the raw "GPU 0" is not directly accessible. We pin the backend
+# process to the first MIG UUID (GI=1, the larger 12SM/2g slice) so that
+# GStreamer nvvideoconvert, NVDEC buffer pools and PyTorch/DINOv2 all see a
+# valid CUDA device. The VLLM containers are pinned independently by their own
+# CUDA_VISIBLE_DEVICES set in the docker run commands above.
+BACKEND_MIG_UUID=$(python3 -c "
+import json
+d = json.load(open('config/system.json'))
+eps = d.get('vllm_endpoints', [])
+print(eps[0].get('mig_uuid', '') if eps else '')
+" 2>/dev/null || echo "")
+
+if [[ -n "${BACKEND_MIG_UUID}" ]]; then
+    export CUDA_VISIBLE_DEVICES="${BACKEND_MIG_UUID}"
+    ok "Backend pinned to MIG device: ${BACKEND_MIG_UUID}"
+else
+    warn "No mig_uuid in config — backend will use default CUDA device selection"
+fi
 
 mkdir -p logs data
 

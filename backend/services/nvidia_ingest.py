@@ -3,13 +3,19 @@ NvidiaStreamCapture: Hardware-accelerated RTSP video ingest for NVIDIA Thor / Je
 Uses GStreamer and DeepStream (nvurisrcbin + nvvideoconvert) to decode H.264/H.265
 directly on NVDEC, bypassing CPU decoding overhead.
 """
+from __future__ import annotations
+
 import time
 from typing import Optional, Tuple
 import numpy as np
 import cv2
 
+from backend.core.config import DEFAULT_FRAME_WIDTH, DEFAULT_FRAME_HEIGHT
+from backend.core.error_tracker import error_tracker
+
 _GST_INITIALIZED = False
 _NVIDIA_AVAILABLE: Optional[bool] = None
+
 
 def is_nvidia_available() -> bool:
     """Check if GStreamer and nvurisrcbin / nvvideoconvert plugins are present."""
@@ -28,7 +34,13 @@ def is_nvidia_available() -> bool:
         has_src = Gst.ElementFactory.find("nvurisrcbin") is not None
         has_conv = Gst.ElementFactory.find("nvvideoconvert") is not None
         _NVIDIA_AVAILABLE = bool(has_src and has_conv)
-    except Exception:
+    except Exception as exc:
+        error_tracker.capture_exception(
+            exc,
+            component="NvidiaIngest",
+            effect="GStreamer / DeepStream plugins probe failed; NVDEC hardware decoding unavailable",
+            severity="WARNING",
+        )
         _NVIDIA_AVAILABLE = False
     return _NVIDIA_AVAILABLE
 
@@ -37,7 +49,7 @@ class NvidiaStreamCapture:
     """
     Drop-in replacement for cv2.VideoCapture using GStreamer + DeepStream hardware decoding.
     """
-    def __init__(self, uri: str, width: int = 1280, height: int = 720):
+    def __init__(self, uri: str, width: int = DEFAULT_FRAME_WIDTH, height: int = DEFAULT_FRAME_HEIGHT):
         self.uri = uri
         self.width = width
         self.height = height
@@ -75,10 +87,21 @@ class NvidiaStreamCapture:
             if ret == GstEnum.StateChangeReturn.FAILURE:
                 self.release()
                 self._opened = False
+                error_tracker.capture_error(
+                    message=f"Pipeline state change to PLAYING failed for {self.uri}",
+                    component="NvidiaIngest",
+                    effect="Failed to start DeepStream NVDEC pipeline; falling back to CPU decoder",
+                    severity="WARNING",
+                )
             else:
                 self._opened = True
         except Exception as e:
-            print(f"[NvidiaIngest] Failed to build pipeline for {self.uri}: {e}")
+            error_tracker.capture_exception(
+                e,
+                component="NvidiaIngest",
+                effect=f"Failed to build DeepStream pipeline for {self.uri}; falling back to CPU",
+                severity="WARNING",
+            )
             self.release()
             self._opened = False
 
@@ -97,7 +120,12 @@ class NvidiaStreamCapture:
             if msg:
                 if msg.type == Gst.MessageType.ERROR:
                     err, debug = msg.parse_error()
-                    print(f"[NvidiaIngest] Bus error: {err}, debug: {debug}")
+                    error_tracker.capture_error(
+                        message=f"Bus error: {err}, debug: {debug}",
+                        component="NvidiaIngest",
+                        effect=f"DeepStream bus error on {self.uri}; closing pipeline",
+                        severity="ERROR",
+                    )
                 self._opened = False
                 return False, None
 
@@ -121,7 +149,12 @@ class NvidiaStreamCapture:
             bgr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
             return True, bgr
         except Exception as e:
-            print(f"[NvidiaIngest] Buffer parse error: {e}")
+            error_tracker.capture_exception(
+                e,
+                component="NvidiaIngest",
+                effect=f"Failed to parse NVDEC frame buffer into image array for {self.uri}",
+                severity="ERROR",
+            )
             return False, None
         finally:
             buf.unmap(map_info)

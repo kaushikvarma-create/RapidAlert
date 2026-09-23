@@ -5,6 +5,8 @@ Computes cosine embedding drift between consecutive samples.
 When drift exceeds the threshold, captures pre-trigger context, awaits post-trigger progression,
 and dispatches an Incident Event to the Scheduler for Cosmos Reason2 8B evaluation.
 """
+from __future__ import annotations
+
 import asyncio
 import time
 from typing import Callable, Dict, List, Optional
@@ -13,6 +15,19 @@ import numpy as np
 import torch
 from PIL import Image
 from transformers import AutoImageProcessor, AutoModel
+
+from backend.core.config import (
+    DEFAULT_DINOV2_MODEL,
+    DEFAULT_SCENE_THRESHOLD,
+    DEFAULT_SEMANTIC_INTERVAL,
+    DEFAULT_EVENT_COOLDOWN,
+    DINOV2_INPUT_WIDTH,
+    HIGH_RES_FRAME_WIDTH,
+    HIGH_RES_JPEG_QUALITY,
+    TEMPORAL_THUMB_WIDTH,
+    TEMPORAL_THUMB_QUALITY,
+)
+from backend.core.error_tracker import error_tracker
 
 
 class SceneTriggerEngine:
@@ -23,11 +38,11 @@ class SceneTriggerEngine:
         on_incident_callback: Callable,
         broadcast_fn: Optional[Callable] = None,
         alert_engine = None,
-        model_name: str = "facebook/dinov2-small",
+        model_name: str = DEFAULT_DINOV2_MODEL,
         device: str = "cuda",
-        default_threshold: float = 0.033,
-        semantic_interval: float = 0.5,
-        event_cooldown: float = 15.0,
+        default_threshold: float = DEFAULT_SCENE_THRESHOLD,
+        semantic_interval: float = DEFAULT_SEMANTIC_INTERVAL,
+        event_cooldown: float = DEFAULT_EVENT_COOLDOWN,
     ):
         self.frame_store = frame_store
         self.camera_manager = camera_manager
@@ -56,11 +71,20 @@ class SceneTriggerEngine:
         if self._running:
             return
         self._running = True
-        print(f"[SceneTrigger] Loading {self.model_name} on {self.device}...")
-        self._processor = AutoImageProcessor.from_pretrained(self.model_name)
-        self._model = AutoModel.from_pretrained(self.model_name).to(self.device)
-        self._model.eval()
-        print("[SceneTrigger] ✅ DINOv2 ready for scene shift detection")
+        try:
+            print(f"[SceneTrigger] Loading {self.model_name} on {self.device}...")
+            self._processor = AutoImageProcessor.from_pretrained(self.model_name)
+            self._model = AutoModel.from_pretrained(self.model_name).to(self.device)
+            self._model.eval()
+            print("[SceneTrigger] ✅ DINOv2 ready for scene shift detection")
+        except Exception as exc:
+            error_tracker.capture_exception(
+                exc,
+                component="SceneTrigger",
+                effect=f"Failed to load DINOv2 model '{self.model_name}' on {self.device}; drift triggers disabled",
+                severity="CRITICAL",
+            )
+            return
 
         self._task = asyncio.create_task(self._monitor_loop(), name="scene-trigger-loop")
 
@@ -128,14 +152,19 @@ class SceneTriggerEngine:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                print(f"[SceneTrigger] Error in loop: {e}")
+                error_tracker.capture_exception(
+                    e,
+                    component="SceneTrigger",
+                    effect="Error in DINOv2 monitor loop; pausing for 0.5s",
+                    severity="WARNING",
+                )
                 await asyncio.sleep(0.5)
 
     def _extract_embedding(self, frame: np.ndarray) -> Optional[np.ndarray]:
         try:
             # Resize frame down for fast feature extraction
             h, w = frame.shape[:2]
-            target_w = 448
+            target_w = DINOV2_INPUT_WIDTH
             target_h = int(h * (target_w / w))
             small = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
             rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
@@ -151,7 +180,12 @@ class SceneTriggerEngine:
                 emb = emb / norm
             return emb
         except Exception as e:
-            print(f"[SceneTrigger] Embedding error: {e}")
+            error_tracker.capture_exception(
+                e,
+                component="SceneTrigger",
+                effect="Failed to extract DINOv2 embedding; frame skipped",
+                severity="WARNING",
+            )
             return None
 
     def set_default_threshold(self, val: float) -> None:
@@ -164,8 +198,14 @@ class SceneTriggerEngine:
             if c.get("name") == cam_name and c.get("threshold") is not None:
                 try:
                     return float(c["threshold"])
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as exc:
+                    error_tracker.capture_exception(
+                        exc,
+                        component="SceneTrigger",
+                        camera=cam_name,
+                        effect=f"Invalid threshold for {cam_name}; using global threshold {self.default_threshold}",
+                        severity="WARNING",
+                    )
         return float(self.default_threshold)
 
     async def _collect_incident(
@@ -178,42 +218,63 @@ class SceneTriggerEngine:
         """
         Immediately collects 4 temporal frames over the past 10 seconds:
         - Frame 1: Scene baseline (t -10.0s)
-        - Frame 2: Developing activity (t -5.0s, last 6s window)
-        - Frame 3: Immediate lead-up (t -2.0s, last 6s window)
-        - Frame 4: Trigger moment (t 0.0s, trigger frame)
-        Zero waiting delay so incident VLM analysis dispatches instantaneously!
+        - Frame 2: Pre-motion development (t -5.0s)
+        - Frame 3: Acceleration / trigger onset (t -2.0s)
+        - Frame 4: Peak scene shift (t 0.0s / trigger moment)
+        Concentrates 3/4 frames in the critical last 5-6 seconds.
         """
-        if trigger_time is None:
-            trigger_time = time.monotonic()
         try:
-            # Extract 4 frames directly from rolling buffer: t-10.0s, t-5.0s, t-2.0s, t 0.0s
-            offsets = [-10.0, -5.0, -2.0, 0.0]
-            frames = self.frame_store.get_pre_trigger_frames(
-                cam_name, trigger_ts, offsets=offsets
+            if trigger_time is None:
+                trigger_time = time.monotonic()
+
+            # Retrieve temporal historical sequence: [-10.0, -5.0, -2.0]
+            pre_frames = self.frame_store.get_pre_trigger_frames(
+                cam_name,
+                trigger_time=trigger_time,
+                offsets=[-10.0, -5.0, -2.0],
             )
+            latest_entry = self.frame_store.get_latest(cam_name)
+            current_frame = latest_entry[0] if latest_entry else None
 
-            if not frames:
-                fallback = self.frame_store.get_latest(cam_name)
-                frames = [fallback[0].copy()] * 4 if fallback else []
-            elif len(frames) < 4:
-                while len(frames) < 4:
-                    frames.insert(0, frames[0].copy())
+            all_raw_frames = []
+            if pre_frames:
+                all_raw_frames.extend(pre_frames)
+            if current_frame is not None:
+                all_raw_frames.append(current_frame)
 
-            # Base64 encode for VLM (downscaled to 512 for fast multi-frame processing)
-            frames_b64 = self.frame_store.encode_frames(frames, max_w=512, quality=75)
-            # Crisp temporal sequence frames (480px) for event timeline inspection
-            thumbs_b64 = self.frame_store.encode_frames(frames, max_w=480, quality=68)
-            # High resolution snapshot (960px, quality 78) for sharp incident inspector
-            high_res_snap = self.frame_store.encode_frames([frames[-1]], max_w=960, quality=78)[0] if frames else (thumbs_b64[-1] if thumbs_b64 else None)
+            # Fallback if buffer does not have 10 seconds of history yet
+            if len(all_raw_frames) < 4:
+                sampled = self.frame_store.get_temporal_snapshots_b64(
+                    cam_name, count=4, span_sec=10.0, max_w=512, quality=80
+                )
+                frames_b64 = sampled or []
+                thumbs_b64 = self.frame_store.get_temporal_snapshots_b64(
+                    cam_name, count=4, span_sec=10.0, max_w=TEMPORAL_THUMB_WIDTH, quality=TEMPORAL_THUMB_QUALITY
+                ) or []
+            else:
+                frames_b64 = self.frame_store.encode_frames(all_raw_frames, max_w=512, quality=80)
+                thumbs_b64 = self.frame_store.encode_frames(
+                    all_raw_frames, max_w=TEMPORAL_THUMB_WIDTH, quality=TEMPORAL_THUMB_QUALITY
+                )
 
-            labels = ["t -10.0s", "t -5.0s", "t -2.0s", "t 0.0s (Trigger)"]
+            # Capture high-resolution snapshot for sharp modal preview
+            high_res_snap = self.frame_store.get_snapshot_b64(
+                cam_name, max_w=HIGH_RES_FRAME_WIDTH, quality=HIGH_RES_JPEG_QUALITY
+            ) or (thumbs_b64[-1] if thumbs_b64 else None)
+
+            labels = [
+                "t -10.0s (Baseline)",
+                "t -5.0s (Pre-incident)",
+                "t -2.0s (Onset)",
+                "t 0.0s (Trigger)",
+            ]
 
             incident_data = {
                 "cam": cam_name,
-                "drift": drift_score,
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "epoch": time.time(),
+                "trigger_ts": trigger_ts,
                 "trigger_time": trigger_time,
+                "drift": drift_score,
                 "frames_b64": frames_b64,
                 "thumbs_b64": thumbs_b64,
                 "thumbnail_b64": high_res_snap,
@@ -237,6 +298,12 @@ class SceneTriggerEngine:
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            print(f"[SceneTrigger] Error collecting incident for {cam_name}: {e}")
+            error_tracker.capture_exception(
+                e,
+                component="SceneTrigger",
+                camera=cam_name,
+                effect=f"Error collecting incident temporal frames for {cam_name}; incident evaluation aborted",
+                severity="ERROR",
+            )
         finally:
             self._active_collectors.pop(cam_name, None)

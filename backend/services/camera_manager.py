@@ -3,10 +3,12 @@ CameraManager: one daemon thread per enabled camera.
 Each thread continuously reads RTSP frames → FrameStore.
 Watches cameras.json for mtime changes; adds/removes streams dynamically.
 """
-import threading
-import time
+from __future__ import annotations
+
 import json
 import os
+import threading
+import time
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -14,12 +16,20 @@ import cv2
 
 os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
 
-from frame_store import FrameStore
-from nvidia_ingest import NvidiaStreamCapture, is_nvidia_available
+from backend.services.frame_store import FrameStore
+from backend.services.nvidia_ingest import NvidiaStreamCapture, is_nvidia_available
+from backend.core.config import (
+    CAMERA_RETRY_DELAY_SEC,
+    CAMERA_READ_TIMEOUT_SEC,
+    CAMERA_BUFFER_SIZE,
+    DEFAULT_FRAME_WIDTH,
+    DEFAULT_FRAME_HEIGHT,
+)
+from backend.core.error_tracker import error_tracker
 
 
 class CameraThread(threading.Thread):
-    RETRY_DELAY = 15  # seconds between reconnect attempts
+    RETRY_DELAY = CAMERA_RETRY_DELAY_SEC
 
     def __init__(
         self,
@@ -44,7 +54,7 @@ class CameraThread(threading.Thread):
 
             if self.use_nvidia:
                 try:
-                    cap = NvidiaStreamCapture(self.url, width=1280, height=720)
+                    cap = NvidiaStreamCapture(self.url, width=DEFAULT_FRAME_WIDTH, height=DEFAULT_FRAME_HEIGHT)
                     if cap.isOpened():
                         is_hw = True
                         print(f"[CamMgr] ⚡ {self.cam_name} using NVIDIA Hardware Decoder (NVDEC)")
@@ -52,18 +62,24 @@ class CameraThread(threading.Thread):
                         cap.release()
                         cap = None
                 except Exception as e:
-                    print(f"[CamMgr] ⚠️  {self.cam_name} NVDEC init failed ({e}), falling back to OpenCV")
+                    error_tracker.capture_exception(
+                        e,
+                        component="CameraManager",
+                        camera=self.cam_name,
+                        effect=f"NVIDIA NVDEC hardware decode initialization failed for {self.cam_name}; falling back to CPU OpenCV decoder",
+                        severity="WARNING",
+                    )
                     cap = None
 
             if cap is None:
                 cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, CAMERA_BUFFER_SIZE)
 
             got_frame = False
 
             while not self.stop_event.is_set():
                 if is_hw:
-                    ok, frame = cap.read(timeout_sec=1.5)
+                    ok, frame = cap.read(timeout_sec=CAMERA_READ_TIMEOUT_SEC)
                 else:
                     ok, frame = cap.read()
 
@@ -77,9 +93,12 @@ class CameraThread(threading.Thread):
                 else:
                     if got_frame:
                         self.connected = False
-                        print(
-                            f"[CamMgr] ⚠  {self.cam_name} stream lost "
-                            f"— retrying in {self.RETRY_DELAY}s"
+                        error_tracker.capture_error(
+                            message=f"RTSP stream connection lost for {self.cam_name}",
+                            component="CameraManager",
+                            camera=self.cam_name,
+                            effect=f"Stream ingestion halted; entering reconnect backoff ({self.RETRY_DELAY}s)",
+                            severity="WARNING",
                         )
                         break
                     time.sleep(0.05)
@@ -133,7 +152,12 @@ class CameraManager:
             with open(self.config_path) as f:
                 cameras: list[dict] = json.load(f)
         except Exception as e:
-            print(f"[CamMgr] Config load error: {e}")
+            error_tracker.capture_exception(
+                e,
+                component="CameraManager",
+                effect=f"Failed to load cameras config from {self.config_path}; sync skipped",
+                severity="ERROR",
+            )
             return False
 
         with self._lock:

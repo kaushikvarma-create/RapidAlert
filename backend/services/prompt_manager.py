@@ -1,8 +1,10 @@
 """
-PromptManager: hot-reload prompts from prompts.json (watches mtime every 2s).
+PromptManager: hot-reload prompts from config/prompts.json (watches mtime every 2s).
 Supports a master prompt template with {normal_context} placeholder,
 and per-camera override prompts stored under "cameras": {name: str}.
 """
+from __future__ import annotations
+
 import asyncio
 import json
 import os
@@ -11,51 +13,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-DEFAULT_MASTER = (
-    "You are an expert CCTV surveillance AI.\n"
-    "Analyse the provided temporal sequence of 4 CCTV frames capturing an incident window over the past 10 seconds:\n"
-    "- Frame 1: Scene baseline (t -10s)\n"
-    "- Frame 2: Developing activity (t -5s)\n"
-    "- Frame 3: Immediate lead-up (t -2s)\n"
-    "- Frame 4: Trigger moment (t 0s)\n\n"
-    "{normal_context}\n\n"
-    "Return EXACTLY this format, no extra text:\n"
-    "OBSERVATION: <1-2 sentences describing the sequence of events and what changed>\n"
-    "ACTIVITY: <ACTIVE|IDLE|UNKNOWN>\n"
-    "WORKERS: <integer count of people in scene>\n"
-    "MACHINERY: <comma-separated list or None>\n"
-    "SAFETY: <OK|WARNING|DANGER>\n"
-    "SEVERITY: <LOW|MEDIUM|HIGH|EXTREME>\n"
-    "EVOLUTION: <concise summary of movement and changes across the sequence>\n\n"
-    "CRITICAL: Do NOT use extended thinking, reasoning steps, or <think> tags. Output the final format immediately."
-)
-
-DEFAULT_FOLLOWUP = (
-    "You are an expert CCTV surveillance AI.\n"
-    "Analyse the provided temporal sequence of 4 CCTV frames capturing the scene follow-up window:\n"
-    "- Frame 1: Sequence start\n"
-    "- Frame 2: Mid-sequence progression\n"
-    "- Frame 3: Recent status\n"
-    "- Frame 4: Current outcome\n\n"
-    "{normal_context}\n"
-    "{followup_context}\n\n"
-    "CRITICAL INSTRUCTIONS TO PREVENT FALSE POSITIVES & HALLUCINATION:\n"
-    "- Objectively evaluate ONLY the visual evidence visible in these CURRENT 4 frames.\n"
-    "- Do NOT carry forward or hallucinate hazards/severity from earlier triggers.\n"
-    "- If earlier movement/activity has subsided, people have departed, or normal operations have resumed, you MUST mark:\n"
-    "  SAFETY: OK\n"
-    "  SEVERITY: LOW\n"
-    "- Only output MEDIUM, HIGH, or DANGER if you directly observe an active violation, hazard, or aggressive motion in the CURRENT frames.\n\n"
-    "Return EXACTLY this format, no extra text:\n"
-    "OBSERVATION: <1-2 sentences stating current scene status, explicitly noting if earlier activity has resolved, stabilized, or continued>\n"
-    "ACTIVITY: <ACTIVE|IDLE|UNKNOWN>\n"
-    "WORKERS: <integer count of people in scene>\n"
-    "MACHINERY: <comma-separated list or None>\n"
-    "SAFETY: <OK|WARNING|DANGER>\n"
-    "SEVERITY: <LOW|MEDIUM|HIGH|EXTREME>\n"
-    "EVOLUTION: <concise summary of changes across the 4 frames>\n\n"
-    "CRITICAL: Do NOT use extended thinking, reasoning steps, or <think> tags. Output the final format immediately."
-)
+from backend.core.config import PROMPTS_CONFIG_PATH, load_prompts_config
+from backend.core.error_tracker import error_tracker
 
 
 class PromptManager:
@@ -63,14 +22,17 @@ class PromptManager:
 
     def __init__(
         self,
-        prompts_path: Path,
+        prompts_path: Path = PROMPTS_CONFIG_PATH,
         cameras_config_provider: Optional[Callable[[], list[dict]]] = None,
     ):
         self.path = prompts_path
         self._cameras_config_provider = cameras_config_provider
-        self._master: str = DEFAULT_MASTER
-        self._followup: str = DEFAULT_FOLLOWUP
-        self._cam_overrides: dict[str, str] = {}
+        
+        # Load initial prompts from config file
+        initial_cfg = load_prompts_config()
+        self._master: str = initial_cfg.get("master", "")
+        self._followup: str = initial_cfg.get("followup", "")
+        self._cam_overrides: dict[str, str] = initial_cfg.get("cameras", {})
         self._mtime: float = 0.0
         self._reload_sync()
 
@@ -130,7 +92,7 @@ class PromptManager:
         cam_name: Optional[str] = None,
         cam_prompt: Optional[str] = None,
     ) -> None:
-        """Update one or more fields and persist to prompts.json."""
+        """Update one or more fields and persist to config/prompts.json."""
         if master is not None:
             self._master = master
         if cam_name is not None:
@@ -139,22 +101,41 @@ class PromptManager:
             else:
                 self._cam_overrides.pop(cam_name, None)
 
-        data = {"master": self._master, "cameras": self._cam_overrides}
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.path, "w") as f:
-            json.dump(data, f, indent=2)
-        # Bump mtime tracker so watch_loop doesn't re-read what we just wrote
+        data = {
+            "master": self._master,
+            "followup": self._followup,
+            "cameras": self._cam_overrides,
+        }
         try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
             self._mtime = os.path.getmtime(self.path)
-        except OSError:
-            pass
+        except Exception as exc:
+            error_tracker.capture_exception(
+                exc,
+                component="PromptManager",
+                camera=cam_name,
+                effect=f"Failed to save prompt configuration to {self.path}",
+                severity="ERROR",
+            )
 
     # ── Background watcher ──────────────────────────────────────────
 
     async def watch_loop(self) -> None:
         while True:
-            await asyncio.sleep(self.RELOAD_INTERVAL)
-            self._reload_sync()
+            try:
+                await asyncio.sleep(self.RELOAD_INTERVAL)
+                self._reload_sync()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                error_tracker.capture_exception(
+                    exc,
+                    component="PromptManager",
+                    effect="Error in prompts file watcher loop; continuing",
+                    severity="WARNING",
+                )
 
     # ── Internal ────────────────────────────────────────────────────
 
@@ -165,15 +146,22 @@ class PromptManager:
             mtime = os.path.getmtime(self.path)
             if mtime <= self._mtime:
                 return
-            with open(self.path) as f:
+            with open(self.path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            self._master = data.get("master", DEFAULT_MASTER)
-            self._followup = data.get("followup", DEFAULT_FOLLOWUP)
+            if "master" in data:
+                self._master = data["master"]
+            if "followup" in data:
+                self._followup = data["followup"]
             self._cam_overrides = data.get("cameras", {})
             self._mtime = mtime
             print("[PromptMgr] Prompts reloaded from disk")
         except Exception as exc:
-            print(f"[PromptMgr] Reload error: {exc}")
+            error_tracker.capture_exception(
+                exc,
+                component="PromptManager",
+                effect=f"Failed to reload prompts from {self.path}; using in-memory prompts",
+                severity="WARNING",
+            )
 
     def _get_cam_context(self, cam_name: str, hour: int) -> str:
         if not self._cameras_config_provider:
@@ -186,6 +174,12 @@ class PromptManager:
                         return c.get("normal_context_day", "").strip()
                     else:
                         return c.get("normal_context_night", "").strip()
-        except Exception:
-            pass
+        except Exception as exc:
+            error_tracker.capture_exception(
+                exc,
+                component="PromptManager",
+                camera=cam_name,
+                effect=f"Failed to retrieve normal context for {cam_name}",
+                severity="WARNING",
+            )
         return ""

@@ -1,15 +1,16 @@
 """
-AlertEngine: fires and logs alerts for AI incidents (HIGH/MEDIUM severity, DANGER/WARNING safety),
-and DINOv2 scene drift shift triggers.
+AlertEngine: fires and logs alerts for AI incidents and scene drift shift triggers.
+Reads alert conditions dynamically from system configuration (no hardcoded severity sets).
 Broadcasts to all WebSocket clients via an injected broadcast function.
 """
+from __future__ import annotations
+
 import time
 from collections import deque
 from typing import Callable, Optional, List
 
-# Conditions that trigger an alert
-_SEVERITY_TRIGGER = {"HIGH", "MEDIUM"}
-_SAFETY_TRIGGER = {"DANGER", "WARNING"}
+from backend.core.config import DEFAULT_VLM_MODEL, config_manager
+from backend.core.error_tracker import error_tracker
 
 
 class AlertEngine:
@@ -20,6 +21,11 @@ class AlertEngine:
     def set_broadcaster(self, fn: Callable) -> None:
         """Inject the async broadcast function (from WSManager)."""
         self._broadcast_fn = fn
+
+    def _get_trigger_conditions(self):
+        """Dynamic retrieval of alert trigger levels from configuration."""
+        cfg = config_manager.get()
+        return set(cfg.alert_severity_triggers), set(cfg.alert_safety_triggers)
 
     async def record_scene_shift(
         self,
@@ -39,7 +45,16 @@ class AlertEngine:
             "thumbnails_b64": thumbnails_b64 or [],
         }
         if self._broadcast_fn:
-            await self._broadcast_fn(payload)
+            try:
+                await self._broadcast_fn(payload)
+            except Exception as exc:
+                error_tracker.capture_exception(
+                    exc,
+                    component="AlertEngine",
+                    camera=cam_name,
+                    effect=f"Failed to broadcast scene shift event for {cam_name}",
+                    severity="WARNING",
+                )
         return payload
 
     async def process(
@@ -63,9 +78,11 @@ class AlertEngine:
         raw_sev = (result.get("severity") or "LOW").upper()
         raw_safety = (result.get("safety") or "UNKNOWN").upper()
 
+        severity_triggers, safety_triggers = self._get_trigger_conditions()
+
         is_alert = (
-            raw_sev in _SEVERITY_TRIGGER
-            or raw_safety in _SAFETY_TRIGGER
+            raw_sev in severity_triggers
+            or raw_safety in safety_triggers
             or is_incident
             or is_followup
         )
@@ -79,8 +96,8 @@ class AlertEngine:
             severity = raw_sev
             safety = raw_safety
         elif is_incident:
-            severity = raw_sev if raw_sev in _SEVERITY_TRIGGER else "MEDIUM"
-            safety = raw_safety if raw_safety in _SAFETY_TRIGGER else "WARNING"
+            severity = raw_sev if raw_sev in severity_triggers else "MEDIUM"
+            safety = raw_safety if raw_safety in safety_triggers else "WARNING"
         else:
             severity = raw_sev
             safety = raw_safety
@@ -140,7 +157,7 @@ class AlertEngine:
             "workers": result.get("workers", "0"),
             "machinery": result.get("machinery", "None"),
             "evolution": result.get("evolution", ""),
-            "model": result.get("model", "vrfai/Cosmos-Reason2-8B-NVFP4"),
+            "model": result.get("model", DEFAULT_VLM_MODEL),
             "is_incident": is_incident,
             "is_followup": is_followup,
             "is_periodic": not is_incident and not is_followup,
@@ -157,14 +174,23 @@ class AlertEngine:
         self._alerts.append(alert)
 
         if self._broadcast_fn:
-            await self._broadcast_fn({"type": "alert", "data": alert})
-            if is_followup and parent_id:
-                await self._broadcast_fn({
-                    "type": "alert_linked",
-                    "parent_id": parent_id,
-                    "followup_id": event_id,
-                    "incident_id": incident_id,
-                })
+            try:
+                await self._broadcast_fn({"type": "alert", "data": alert})
+                if is_followup and parent_id:
+                    await self._broadcast_fn({
+                        "type": "alert_linked",
+                        "parent_id": parent_id,
+                        "followup_id": event_id,
+                        "incident_id": incident_id,
+                    })
+            except Exception as exc:
+                error_tracker.capture_exception(
+                    exc,
+                    component="AlertEngine",
+                    camera=cam_name,
+                    effect=f"Failed to broadcast alert {event_id} over WebSocket",
+                    severity="WARNING",
+                )
 
         return alert
 
@@ -182,6 +208,8 @@ class AlertEngine:
             if not a.get("is_drift") and not str(a.get("observation", "")).startswith("⚡ DINOv2")
         ]
         recent = alerts[-n:] if len(alerts) > n else alerts
+        # Return newest first (chronological descending) so API consumers get the latest alerts first
+        recent = list(reversed(recent))
         if not summary:
             return recent
         summaries = []
@@ -194,4 +222,3 @@ class AlertEngine:
 
     def clear(self) -> None:
         self._alerts.clear()
-

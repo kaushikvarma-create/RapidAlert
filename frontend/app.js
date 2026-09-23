@@ -156,13 +156,19 @@ const App = {
       case 'cameras': return this.onCameras(msg);
       case 'prompts': return this.onPrompts(msg);
       case 'config_updated': return this.onConfigUpdated(msg);
+      case 'system_error': return this.onSystemError(msg);
       case 'ping':    break; // keep-alive, no-op
     }
   },
 
+  _sortAlerts() {
+    this.alerts.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+    this.alertCount = this.alerts.length;
+  },
+
   async _fetchInitialAlerts() {
     try {
-      const res = await fetch('/api/alerts?n=35');
+      const res = await fetch('/api/alerts?n=60');
       if (res.ok) {
         const alerts = await res.json();
         if (Array.isArray(alerts) && alerts.length > 0) {
@@ -172,8 +178,7 @@ const App = {
               this.alerts.push(a);
             }
           }
-          this.alertCount = this.alerts.length;
-          this._syncAlertCount();
+          this._sortAlerts();
           this._renderAllAlerts();
         }
       }
@@ -185,22 +190,38 @@ const App = {
   _renderAllAlerts() {
     const feed = document.getElementById('alerts-feed');
     if (!feed) return;
-    // Remove only alert cards, preserving #alerts-empty
-    feed.querySelectorAll('.alert-item').forEach(el => el.remove());
+
+    // Ensure empty placeholder exists at the top
     let empty = document.getElementById('alerts-empty');
     if (!empty) {
-      feed.insertAdjacentHTML('beforeend', `
+      feed.insertAdjacentHTML('afterbegin', `
         <div class="alerts-empty" id="alerts-empty">
           <div class="alerts-empty-icon">🛡️</div>
           <p>System Normal</p>
           <small>Real-time AI incidents and scene shifts will appear here.</small>
         </div>
       `);
+      empty = document.getElementById('alerts-empty');
     }
+
+    // Remove existing alert cards
+    feed.querySelectorAll('.alert-item').forEach(el => el.remove());
+
+    const af = this.activeAlertFilter || 'medium';
+    let visibleCount = 0;
+    const frag = document.createDocumentFragment();
+
     for (const a of this.alerts) {
-      this._renderAlert(a, false);
+      const item = this._createAlertElement(a, false);
+      const show = this._matchesAlertFilter(a, af);
+      item.style.display = show ? '' : 'none';
+      if (show) visibleCount++;
+      frag.appendChild(item);
     }
-    this._applyAlertFilter();
+
+    feed.appendChild(frag);
+    this._updateEmptyState(visibleCount);
+    this._syncAlertCount(visibleCount);
   },
 
   // ════════════════════════════════════════════════════════════
@@ -261,8 +282,7 @@ const App = {
           this.alerts.push(a);
         }
       }
-      this.alertCount = this.alerts.length;
-      this._syncAlertCount();
+      this._sortAlerts();
       this._renderAllAlerts();
     }
 
@@ -282,6 +302,10 @@ const App = {
       if (elPersistent && msg.system.persistent_followup != null) elPersistent.checked = Boolean(msg.system.persistent_followup);
     }
     this._updateCamSelect();
+
+    if (msg.recent_errors && Array.isArray(msg.recent_errors)) {
+      this._updateErrorBadge(msg.recent_errors.length);
+    }
 
     // Render fixed camera grid
     this._renderCameraGrid();
@@ -704,20 +728,44 @@ const App = {
   },
 
   // ════════════════════════════════════════════════════════════
-  //  Alerts
+  //  Alerts & Filtering
   // ════════════════════════════════════════════════════════════
-  _renderAlert(alert, animate = false) {
-    const feed = document.getElementById('alerts-feed');
-    if (!feed) return;
+  _matchesAlertFilter(alert, filter) {
+    if (!alert) return false;
+    const af = filter || this.activeAlertFilter || 'medium';
+    if (af === 'all') return true;
 
-    const empty = document.getElementById('alerts-empty');
-    if (empty) empty.style.display = 'none';
+    const sev = String(alert.severity || 'low').trim().toLowerCase();
+    const safety = String(alert.safety || '').trim().toLowerCase();
+    const isHigh = sev === 'high' || sev === 'extreme' || sev === 'critical' || safety === 'danger';
+    const isMedPlus = isHigh || sev === 'medium' || safety === 'warning';
 
+    if (af === 'high') {
+      return isHigh;
+    }
+
+    if (af === 'medium') {
+      return isMedPlus;
+    }
+
+    if (af === 'trigger' || af === 'drift') {
+      const triggerMode = String(alert.trigger_mode || '').toUpperCase();
+      const isTrigger = triggerMode === 'TRIGGER' || Boolean(alert.is_incident);
+      const isFollowup = triggerMode === 'FOLLOWUP' || Boolean(alert.is_followup);
+      const isDrift = Boolean(alert.is_drift || (alert.drift != null && alert.drift > 0));
+      return isTrigger || isFollowup || isDrift;
+    }
+
+    return true;
+  },
+
+  _createAlertElement(alert, animate = false) {
     const sev = (alert.severity || 'LOW').toLowerCase();
+    const safety = (alert.safety || '').toLowerCase();
     const ts  = alert.ts ? new Date(alert.ts * 1000).toLocaleTimeString() : '—';
-    const sevCls = { low: 'green', medium: 'amber', high: 'red' }[sev] || 'muted';
+    const sevCls = { low: 'green', medium: 'amber', high: 'red', extreme: 'red' }[sev] || 'muted';
 
-    const isFollowup = alert.trigger_mode === 'FOLLOWUP' || alert.is_followup;
+    const isFollowup = alert.trigger_mode === 'FOLLOWUP' || Boolean(alert.is_followup);
     const isIncident = Boolean(alert.is_incident || alert.trigger_mode === 'TRIGGER') && !isFollowup;
     let triggerTagHtml = '';
     if (alert.trigger_badge) {
@@ -743,7 +791,9 @@ const App = {
 
     const item = document.createElement('div');
     item.className = `alert-item sev-${sev || 'low'}${animate ? ' alert-enter' : ''}`;
+    item.setAttribute('data-id', alert.id || '');
     item.setAttribute('data-sev', sev);
+    item.setAttribute('data-safety', safety);
     item.setAttribute('data-trigger', isFollowup ? 'followup' : (isIncident ? 'trigger' : 'periodic'));
     item.setAttribute('data-is-drift', (alert.is_drift || isIncident || (alert.drift != null && alert.drift > 0)) ? 'true' : 'false');
     item.title = 'Click to inspect this particular alert and incident history';
@@ -768,62 +818,96 @@ const App = {
       this.openAlertModal(alert);
     });
 
-    if (animate && sev === 'high') {
+    if (animate && (sev === 'high' || sev === 'extreme')) {
       item.classList.add('alert-shake');
       setTimeout(() => item.classList.remove('alert-shake'), 800);
     }
 
-    // Filter check
-    const af = this.activeAlertFilter || 'medium';
-    const isDrift = Boolean(alert.is_drift || isIncident || (alert.drift != null && alert.drift > 0));
-    let matchFilter = true;
-    if (af === 'high') {
-      matchFilter = (sev === 'high' || sev === 'extreme');
-    } else if (af === 'medium') {
-      matchFilter = (sev === 'medium' || sev === 'high' || sev === 'extreme' || isIncident || isFollowup);
-    } else if (af === 'drift' || af === 'trigger') {
-      matchFilter = isIncident || isFollowup || isDrift;
-    } else if (af === 'all') {
-      matchFilter = true;
+    return item;
+  },
+
+  _renderAlert(alert, animate = false) {
+    const feed = document.getElementById('alerts-feed');
+    if (!feed) return;
+
+    const item = this._createAlertElement(alert, animate);
+    const show = this._matchesAlertFilter(alert, this.activeAlertFilter);
+    item.style.display = show ? '' : 'none';
+
+    // Insert before the first alert card so empty state stays at the very top if ever needed
+    const firstItem = feed.querySelector('.alert-item');
+    if (firstItem) {
+      feed.insertBefore(item, firstItem);
+    } else {
+      feed.appendChild(item);
     }
 
-    if (!matchFilter) item.style.display = 'none';
+    // Trim feed to 100 alert items maximum without deleting #alerts-empty
+    const allItems = feed.querySelectorAll('.alert-item');
+    if (allItems.length > 100) {
+      for (let i = 100; i < allItems.length; i++) {
+        allItems[i].remove();
+      }
+    }
 
-    feed.insertBefore(item, feed.firstChild);
+    this._applyAlertFilter();
+  },
 
-    while (feed.children.length > 80) feed.removeChild(feed.lastChild);
+  _updateEmptyState(visibleCount) {
+    const empty = document.getElementById('alerts-empty');
+    if (!empty) return;
+    const af = this.activeAlertFilter || 'medium';
+    empty.style.display = visibleCount === 0 ? 'flex' : 'none';
+
+    const p = empty.querySelector('p');
+    const small = empty.querySelector('small');
+    if (p && small) {
+      if (this.alerts.length === 0) {
+        p.textContent = 'System Normal';
+        small.textContent = 'Real-time AI incidents and scene shifts will appear here.';
+      } else {
+        const labels = {
+          all: 'Alerts',
+          high: 'High Severity',
+          medium: 'Med+ (Medium & High)',
+          trigger: 'Trigger / Follow-Up'
+        };
+        p.textContent = `No ${labels[af] || af} Alerts`;
+        small.textContent = `${this.alerts.length} total incident(s) in session. Switch to "All" to view full history.`;
+      }
+    }
   },
 
   _applyAlertFilter() {
     const af = this.activeAlertFilter || 'medium';
     const items = document.querySelectorAll('#alerts-feed .alert-item');
-    let visible = 0;
+    let visibleCount = 0;
+
     items.forEach(item => {
-      const sev = (item.getAttribute('data-sev') || 'low').toLowerCase();
-      const trigger = item.getAttribute('data-trigger') || 'periodic';
-      const isDrift = item.getAttribute('data-is-drift') === 'true';
+      const alertId = item.getAttribute('data-id');
+      const alert = this.alerts.find(a => a.id === alertId);
       let show = false;
-      if (af === 'all') {
-        show = true;
-      } else if (af === 'high') {
-        show = (sev === 'high' || sev === 'extreme');
-      } else if (af === 'medium') {
-        show = (sev === 'medium' || sev === 'high' || sev === 'extreme' || trigger === 'trigger' || trigger === 'followup');
-      } else if (af === 'drift' || af === 'trigger') {
-        show = (trigger === 'trigger' || trigger === 'followup' || isDrift);
+      if (alert) {
+        show = this._matchesAlertFilter(alert, af);
+      } else {
+        const sev = (item.getAttribute('data-sev') || 'low').toLowerCase();
+        const safety = (item.getAttribute('data-safety') || '').toLowerCase();
+        const trigger = item.getAttribute('data-trigger') || 'periodic';
+        const isDrift = item.getAttribute('data-is-drift') === 'true';
+        const isHigh = sev === 'high' || sev === 'extreme' || sev === 'critical' || safety === 'danger';
+        const isMedPlus = isHigh || sev === 'medium' || safety === 'warning';
+        if (af === 'all') show = true;
+        else if (af === 'high') show = isHigh;
+        else if (af === 'medium') show = isMedPlus;
+        else if (af === 'trigger' || af === 'drift') show = (trigger === 'trigger' || trigger === 'followup' || isDrift);
       }
 
       item.style.display = show ? '' : 'none';
-      if (show) visible++;
+      if (show) visibleCount++;
     });
-    const empty = document.getElementById('alerts-empty');
-    if (empty) {
-      if (items.length === 0) {
-        empty.style.display = 'flex';
-      } else {
-        empty.style.display = visible === 0 ? 'flex' : 'none';
-      }
-    }
+
+    this._updateEmptyState(visibleCount);
+    this._syncAlertCount(visibleCount);
   },
 
   _timeAgo(epochTs) {
@@ -1194,9 +1278,36 @@ const App = {
     this.activeAlert = null;
   },
 
-  _syncAlertCount() {
+  _syncAlertCount(count) {
     const badge = document.getElementById('alert-count');
-    if (badge) badge.textContent = this.alertCount;
+    if (!badge) return;
+    const af = this.activeAlertFilter || 'medium';
+    const vis = count !== undefined ? count : (
+      this.alerts.filter(a => this._matchesAlertFilter(a, af)).length
+    );
+    badge.textContent = vis;
+    badge.title = `${vis} visible alert(s) under "${af.toUpperCase()}" filter (${this.alerts.length} total in session)`;
+    if (vis === 0) {
+      badge.style.background = 'var(--bg-card-hover)';
+      badge.style.color = 'var(--text-3)';
+      badge.style.border = '1px solid var(--border)';
+    } else if (af === 'high') {
+      badge.style.background = 'var(--red)';
+      badge.style.color = '#fff';
+      badge.style.border = 'none';
+    } else if (af === 'medium') {
+      badge.style.background = 'var(--amber)';
+      badge.style.color = '#000';
+      badge.style.border = 'none';
+    } else if (af === 'trigger') {
+      badge.style.background = 'var(--cyan)';
+      badge.style.color = '#000';
+      badge.style.border = 'none';
+    } else {
+      badge.style.background = 'var(--accent)';
+      badge.style.color = '#fff';
+      badge.style.border = 'none';
+    }
   },
 
   // ════════════════════════════════════════════════════════════
@@ -1924,6 +2035,12 @@ const App = {
     document.getElementById('btn-close-settings')?.addEventListener('click', () => this._closeSettings());
     document.getElementById('settings-backdrop')?.addEventListener('click', () => this._closeSettings());
 
+    // Diagnostics & Errors open/close
+    document.getElementById('btn-errors')?.addEventListener('click', () => this._openErrorsModal());
+    document.getElementById('btn-close-errors')?.addEventListener('click', () => this._closeErrorsModal());
+    document.getElementById('btn-refresh-errors')?.addEventListener('click', () => this._fetchErrors());
+    document.getElementById('btn-clear-errors')?.addEventListener('click', () => this._clearErrors());
+
     // Modal close
     document.getElementById('btn-close-modal')?.addEventListener('click', () => this._closeModal());
     document.getElementById('modal-backdrop')?.addEventListener('click', () => this._closeModal());
@@ -2263,17 +2380,10 @@ const App = {
     // Clear alerts
     document.getElementById('btn-clear-alerts')?.addEventListener('click', () => {
       this.alerts = [];
-      const feed = document.getElementById('alerts-feed');
-      if (feed) feed.innerHTML = `
-        <div class="alerts-empty" id="alerts-empty">
-          <div class="alerts-empty-icon">🛡️</div>
-          <p>System Normal</p>
-          <small>Real-time AI incidents and scene shifts will appear here.</small>
-        </div>
-      `;
       this.alertCount = 0;
-      this._syncAlertCount();
+      this._renderAllAlerts();
       fetch('/api/alerts', { method: 'DELETE' }).catch(() => {});
+      this._showToast('Cleared alerts feed', 'ok');
     });
 
     // Trigger Test Alert
@@ -2281,7 +2391,11 @@ const App = {
       try {
         const res = await fetch('/api/alerts/test', { method: 'POST' });
         if (res.ok) {
+          const body = await res.json();
           this._showToast('⚡ Triggered test incident alert!', 'ok');
+          if (body && body.alert) {
+            this.onAlert({ alert: body.alert });
+          }
         } else {
           this._showToast('Failed to trigger test alert', 'err');
         }
@@ -2299,8 +2413,156 @@ const App = {
 
     // Keyboard shortcuts
     document.addEventListener('keydown', e => {
-      if (e.key === 'Escape') { this.closeAlertModal(); this._closeModal(); this._closeSettings(); }
+      if (e.key === 'Escape') {
+        this.closeAlertModal();
+        this._closeModal();
+        this._closeSettings();
+        this._closeErrorsModal();
+      }
     });
+  },
+
+  // ════════════════════════════════════════════════════════════
+  //  System Diagnostics & Error Inspector
+  // ════════════════════════════════════════════════════════════
+  onSystemError(msg) {
+    const err = msg.data;
+    this.errorCount = (this.errorCount || 0) + 1;
+    this._updateErrorBadge(this.errorCount);
+    if (err && (err.severity === 'CRITICAL' || err.severity === 'ERROR')) {
+      const target = err.camera ? `[${err.camera}]` : `[${err.component}]`;
+      this._showToast(`⚠️ ${target} ${err.effect || err.message}`, 'err');
+    }
+    const modal = document.getElementById('modal-errors');
+    if (modal && modal.style.display !== 'none') {
+      this._fetchErrors();
+    }
+  },
+
+  _updateErrorBadge(count) {
+    this.errorCount = count;
+    const badge = document.getElementById('error-badge');
+    if (badge) {
+      if (count > 0) {
+        badge.textContent = count > 99 ? '99+' : String(count);
+        badge.style.display = 'inline-block';
+      } else {
+        badge.style.display = 'none';
+      }
+    }
+  },
+
+  _openErrorsModal() {
+    const modal = document.getElementById('modal-errors');
+    if (!modal) return;
+    modal.style.display = 'flex';
+    this._fetchErrors();
+  },
+
+  _closeErrorsModal() {
+    const modal = document.getElementById('modal-errors');
+    if (modal) modal.style.display = 'none';
+  },
+
+  async _fetchErrors() {
+    try {
+      const [resList, resSum] = await Promise.all([
+        fetch('/api/errors?limit=50'),
+        fetch('/api/errors/summary')
+      ]);
+      if (resList.ok) {
+        const data = await resList.json();
+        const summary = resSum.ok ? await resSum.json() : null;
+        this._renderErrors(data.errors || [], summary);
+        this._updateErrorBadge(data.count || 0);
+      }
+    } catch (e) {
+      console.error('Failed to fetch system errors:', e);
+    }
+  },
+
+  _renderErrors(errors, summary) {
+    const container = document.getElementById('errors-list');
+    const empty = document.getElementById('empty-errors');
+    const elTotal = document.getElementById('err-count-total');
+    const elCrit = document.getElementById('err-count-critical');
+    const elWarn = document.getElementById('err-count-warnings');
+
+    if (summary) {
+      if (elTotal) elTotal.textContent = summary.total_errors || 0;
+      if (elCrit) elCrit.textContent = (summary.by_severity?.CRITICAL || 0) + (summary.by_severity?.ERROR || 0);
+      if (elWarn) elWarn.textContent = summary.by_severity?.WARNING || 0;
+    } else {
+      if (elTotal) elTotal.textContent = errors.length;
+    }
+
+    if (!container) return;
+    container.innerHTML = '';
+
+    if (!errors || errors.length === 0) {
+      if (empty) empty.style.display = 'block';
+      return;
+    }
+    if (empty) empty.style.display = 'none';
+
+    for (const err of errors) {
+      const sevClass = err.severity === 'CRITICAL' ? 'sev-critical' : (err.severity === 'WARNING' ? 'sev-warning' : '');
+      const card = document.createElement('div');
+      card.className = `error-card ${sevClass}`;
+
+      const camHtml = err.camera ? `<span class="error-cam-badge">📷 ${this._escapeHtml(err.camera)}</span>` : '';
+      const traceId = `trace-${err.id}`;
+
+      card.innerHTML = `
+        <div class="error-card-header">
+          <div class="error-meta-tags">
+            <span class="error-comp-badge">${this._escapeHtml(err.component)}</span>
+            ${camHtml}
+            <span class="badge ${err.severity === 'WARNING' ? 'badge-warning' : 'badge-danger'} badge-sm">${err.severity}</span>
+          </div>
+          <span class="error-time">${this._escapeHtml(err.timestamp)}</span>
+        </div>
+        <div class="error-title">${this._escapeHtml(err.error_type)}: ${this._escapeHtml(err.message)}</div>
+        <div class="error-effect-box">
+          <span class="error-effect-label">↳ OPERATIONAL IMPACT:</span>
+          <span>${this._escapeHtml(err.effect)}</span>
+        </div>
+        <div class="error-origin">Location: ${this._escapeHtml(err.file)} in ${this._escapeHtml(err.function || 'unknown')}()</div>
+        ${err.stack_trace ? `
+          <button class="error-trace-toggle" data-target="${traceId}">▶ View Traceback</button>
+          <pre class="error-traceback" id="${traceId}">${this._escapeHtml(err.stack_trace)}</pre>
+        ` : ''}
+      `;
+
+      // Accordion toggle
+      const btnTrace = card.querySelector('.error-trace-toggle');
+      if (btnTrace) {
+        btnTrace.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const target = document.getElementById(btnTrace.dataset.target);
+          if (target) {
+            const isHidden = target.style.display === 'none' || !target.style.display;
+            target.style.display = isHidden ? 'block' : 'none';
+            btnTrace.textContent = isHidden ? '▼ Hide Traceback' : '▶ View Traceback';
+          }
+        });
+      }
+
+      container.appendChild(card);
+    }
+  },
+
+  async _clearErrors() {
+    try {
+      const res = await fetch('/api/errors', { method: 'DELETE' });
+      if (res.ok) {
+        this._updateErrorBadge(0);
+        this._showToast('Error log cleared', 'ok');
+        this._fetchErrors();
+      }
+    } catch (e) {
+      this._showToast(`Failed to clear errors: ${e.message}`, 'err');
+    }
   },
 };
 

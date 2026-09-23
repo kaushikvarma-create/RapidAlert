@@ -1,0 +1,53 @@
+"""
+RapidAlert Request Schemas
+Pydantic models for REST API request payloads.
+"""
+from __future__ import annotations
+
+from typing import Optional
+from pydantic import BaseModel, Field
+
+
+class CameraBody(BaseModel):
+    """Payload for creating or updating a camera stream."""
+    name: str = Field(..., description="Unique camera identifier or stream name")
+    url: str = Field("", description="RTSP, HTTP, or video file source URL")
+    enabled: bool = Field(True, description="Whether this camera feed is actively ingested")
+    normal_context_day: str = Field("", description="Expected daytime activity context to reduce false positives")
+    normal_context_night: str = Field("", description="Expected nighttime activity context")
+    priority: str = Field("normal", description="Priority level: 'normal', 'high', 'critical'")
+    threshold: Optional[float] = Field(None, description="Per-camera DINOv2 scene drift sensitivity override")
+    heartbeat_sec: Optional[float] = Field(None, description="Per-camera periodic analysis heartbeat interval")
+
+
+class SystemConfigBody(BaseModel):
+    """Payload for updating system surveillance and model configuration."""
+    default_threshold: Optional[float] = Field(None, description="Global DINOv2 scene drift trigger threshold")
+    default_heartbeat_sec: Optional[float] = Field(None, description="Global fallback heartbeat analysis interval")
+    event_cooldown: Optional[float] = Field(None, description="Cooldown between triggers on the same camera in seconds")
+    semantic_interval: Optional[float] = Field(None, description="Interval between DINOv2 frame embedding checks")
+    followup_interval_sec: Optional[float] = Field(None, description="Delay before follow-up re-analysis in seconds")
+    persistent_followup: Optional[bool] = Field(None, description="Whether follow-ups repeat until scene stabilizes")
+    followup_max_cycles: Optional[int] = Field(None, description="Maximum number of persistent follow-up cycles")
+
+
+class PromptBody(BaseModel):
+    """Payload for updating master system prompt or per-camera prompt overrides."""
+    master: Optional[str] = Field(None, description="Master VLM system prompt for standard analysis")
+    cam_name: Optional[str] = Field(None, description="Target camera name for custom override")
+    cam_prompt: Optional[str] = Field(None, description="Per-camera prompt text (empty string removes override)")
+
+
+class ScanBody(BaseModel):
+    """Payload for triggering RTSP / ONVIF network camera scan."""
+    subnet: Optional[str] = Field(None, description="Subnet CIDR (e.g. '192.168.1.0/24') or None for auto-detect")
+    ws_timeout: float = Field(3.0, description="ONVIF WS-Discovery probe timeout in seconds")
+    port_timeout: float = Field(0.4, description="RTSP TCP port 554 connection timeout in seconds")
+    username: Optional[str] = Field(None, description="Optional camera RTSP username for auth probe")
+    password: Optional[str] = Field(None, description="Optional camera RTSP password for auth probe")
+
+
+class TestAlertBody(BaseModel):
+    """Payload for initiating a synthetic test incident."""
+    cam: Optional[str] = Field(None, description="Camera to trigger test on, or first active camera if omitted")
+    severity: str = Field("HIGH", description="Target severity for synthetic alert ('HIGH' or 'MEDIUM')")

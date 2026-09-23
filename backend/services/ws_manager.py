@@ -2,10 +2,13 @@
 WSManager: manages all active WebSocket connections.
 broadcast() fans out to every connected client, auto-prunes dead connections.
 """
+from __future__ import annotations
+
 import asyncio
 from typing import Any
-
 from fastapi import WebSocket
+
+from backend.core.error_tracker import error_tracker
 
 
 class WSManager:
@@ -34,8 +37,16 @@ class WSManager:
         for ws in targets:
             try:
                 await ws.send_json(data)
-            except Exception:
+            except Exception as exc:
                 dead.append(ws)
+                # Don't recurse if data was an error broadcast itself
+                if not (isinstance(data, dict) and data.get("type") == "system_error"):
+                    error_tracker.capture_exception(
+                        exc,
+                        component="WebSocketManager",
+                        effect="WebSocket client connection dropped during broadcast; client pruned",
+                        severity="WARNING",
+                    )
         if dead:
             async with self._lock:
                 for ws in dead:
