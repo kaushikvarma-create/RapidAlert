@@ -76,6 +76,30 @@ class FrameStore:
             pass
         return None
 
+    def get_latest_jpeg_entry(
+        self,
+        cam_name: str,
+        max_w: Optional[int] = None,
+        quality: Optional[int] = None,
+    ) -> Optional[Tuple[float, bytes]]:
+        """Returns (timestamp, jpeg_bytes) of the latest frame."""
+        entry = self.get_latest(cam_name)
+        if entry is None:
+            return None
+        frame, ts = entry
+        try:
+            mw = max_w if max_w is not None else self.max_w
+            q = quality if quality is not None else self.jpeg_quality
+            h, w = frame.shape[:2]
+            if w > mw:
+                frame = cv2.resize(frame, (mw, int(h * mw / w)), interpolation=cv2.INTER_AREA)
+            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, q])
+            if ok:
+                return ts, buf.tobytes()
+        except Exception:
+            pass
+        return None
+
     def get_pre_trigger_frames(
         self,
         cam_name: str,

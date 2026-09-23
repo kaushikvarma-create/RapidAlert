@@ -457,17 +457,21 @@ def api_get_frame(name: str, width: int = 640, quality: int = 80):
 
 @app.get("/api/cameras/{name}/stream")
 async def api_camera_stream(name: str, width: int = 640, quality: int = 70):
-    """Continuous real-time MJPEG live video stream (25 FPS, multipart/x-mixed-replace)."""
+    """Continuous real-time MJPEG live video stream (25+ FPS, multipart/x-mixed-replace)."""
     async def frame_generator():
+        last_ts = 0.0
         try:
             while True:
-                jpeg_bytes = frame_store.get_snapshot_jpeg(name, max_w=width, quality=quality)
-                if jpeg_bytes:
-                    yield (
-                        b"--frame\r\n"
-                        b"Content-Type: image/jpeg\r\n\r\n" + jpeg_bytes + b"\r\n"
-                    )
-                await asyncio.sleep(0.04)  # ~25 FPS ultra-smooth real-time video
+                entry = frame_store.get_latest_jpeg_entry(name, max_w=width, quality=quality)
+                if entry is not None:
+                    ts, jpeg_bytes = entry
+                    if ts > last_ts:
+                        last_ts = ts
+                        yield (
+                            b"--frame\r\n"
+                            b"Content-Type: image/jpeg\r\n\r\n" + jpeg_bytes + b"\r\n"
+                        )
+                await asyncio.sleep(0.02)  # 50Hz poll for instant push as soon as camera thread writes
         except (asyncio.CancelledError, GeneratorExit):
             pass
 
