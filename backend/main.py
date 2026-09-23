@@ -518,6 +518,7 @@ def api_cam_stats(name: str, hours: float = 24):
 def api_get_prompts():
     return {
         "master": prompt_manager.get_master(),
+        "followup": prompt_manager._followup,
         "cameras": prompt_manager.get_cam_overrides(),
     }
 
@@ -526,6 +527,7 @@ def api_get_prompts():
 async def api_update_prompts(body: PromptBody):
     prompt_manager.save(
         master=body.master,
+        followup=body.followup,
         cam_name=body.cam_name,
         cam_prompt=body.cam_prompt,
     )
@@ -533,6 +535,7 @@ async def api_update_prompts(body: PromptBody):
         "type": "prompts",
         "data": {
             "master": prompt_manager.get_master(),
+            "followup": prompt_manager._followup,
             "cameras": prompt_manager.get_cam_overrides(),
         },
     })

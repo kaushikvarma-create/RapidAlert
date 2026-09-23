@@ -32,8 +32,9 @@ class SystemConfigBody(BaseModel):
 
 
 class PromptBody(BaseModel):
-    """Payload for updating master system prompt or per-camera prompt overrides."""
-    master: Optional[str] = Field(None, description="Master VLM system prompt for standard analysis")
+    """Payload for updating master system prompt or follow-up prompt templates."""
+    master: Optional[str] = Field(None, description="Master VLM system prompt for initial trigger analysis")
+    followup: Optional[str] = Field(None, description="Follow-up VLM prompt template for re-check analysis")
     cam_name: Optional[str] = Field(None, description="Target camera name for custom override")
     cam_prompt: Optional[str] = Field(None, description="Per-camera prompt text (empty string removes override)")
 

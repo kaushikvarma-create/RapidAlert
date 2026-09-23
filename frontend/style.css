@@ -2043,9 +2043,31 @@ select.input option {
   color: var(--accent);
 }
 
-.theater-prompt-ta {
+.theater-context-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
   width: 100%;
-  min-height: 85px;
+}
+
+@media (max-width: 600px) {
+  .theater-context-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.theater-context-label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.theater-context-ta {
+  width: 100%;
+  min-height: 75px;
   background: var(--bg-input);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -2053,20 +2075,30 @@ select.input option {
   font-family: inherit;
   font-size: 0.82rem;
   line-height: 1.45;
-  padding: 9px 10px;
+  padding: 8px 10px;
   resize: vertical;
   outline: none;
   transition: border-color 0.2s, background-color 0.3s;
 }
 
-.theater-prompt-ta:focus {
+.theater-context-ta:focus {
   border-color: var(--accent);
+}
+
+.prompt-section-hint-block {
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 0.82rem;
+  color: var(--text-muted);
 }
 
 .theater-prompt-actions {
   display: flex;
   align-items: center;
   gap: 8px;
+  margin-top: 4px;
 }
 
 .theater-tune-box {

@@ -301,7 +301,6 @@ const App = {
       if (elFollowup && msg.system.followup_interval_sec != null) elFollowup.value = msg.system.followup_interval_sec;
       if (elPersistent && msg.system.persistent_followup != null) elPersistent.checked = Boolean(msg.system.persistent_followup);
     }
-    this._updateCamSelect();
 
     if (msg.recent_errors && Array.isArray(msg.recent_errors)) {
       this._updateErrorBadge(msg.recent_errors.length);
@@ -468,7 +467,6 @@ const App = {
     }
 
     this._updateCamCount();
-    this._updateCamSelect();
     this._syncEmptyState();
     this._syncCamTable(cams);
     this._renderSidebar();
@@ -679,7 +677,13 @@ const App = {
       </div>
     `;
 
-    // Click handlers: Video or header/footer clicks open Live Stream Theater
+    // Click handlers: Clicking anywhere on camera card opens Live Stream Theater
+    card.style.cursor = 'pointer';
+    card.addEventListener('click', (e) => {
+      if (e.target.closest('.cam-event-thumb-item') || e.target.closest('button') || e.target.closest('input')) return;
+      this._openCamModal(name, null);
+    });
+
     const videoEl = card.querySelector('.cam-card-video');
     if (videoEl) {
       videoEl.addEventListener('click', (e) => {
@@ -1334,23 +1338,9 @@ const App = {
   _applyPrompts(p) {
     this.prompts = p;
     const masterTA = document.getElementById('master-prompt-ta');
+    const followupTA = document.getElementById('followup-prompt-ta');
     if (masterTA && masterTA !== document.activeElement) masterTA.value = p.master || '';
-    this._updateCamSelect();
-  },
-
-  _updateCamSelect() {
-    const sel = document.getElementById('cam-prompt-sel');
-    if (!sel) return;
-    const cur = sel.value;
-    sel.innerHTML = '<option value="">— Select camera —</option>';
-    for (const name of Object.keys(this.cameras)) {
-      const opt = document.createElement('option');
-      opt.value = name;
-      const hasOverride = !!(this.prompts.cameras?.[name]);
-      opt.textContent = name + (hasOverride ? ' ✎' : '');
-      sel.appendChild(opt);
-    }
-    if (cur) sel.value = cur;
+    if (followupTA && followupTA !== document.activeElement) followupTA.value = p.followup || '';
   },
 
   // ════════════════════════════════════════════════════════════
@@ -1368,31 +1358,28 @@ const App = {
     const backdrop = document.getElementById('modal-backdrop');
     if (!modal || !backdrop) return;
 
-    document.getElementById('modal-cam-name').textContent = name;
-    this._updateModalFrameView(name);
-    this._updateModalLiveContent(name);
+    try {
+      const nameEl = document.getElementById('modal-cam-name');
+      if (nameEl) nameEl.textContent = name;
+      this._updateModalFrameView(name);
+      this._updateModalLiveContent(name);
 
-    // Populate Per-Camera Prompt Override
-    const promptTa = document.getElementById('modal-cam-prompt-ta');
-    const promptStatusTag = document.getElementById('modal-prompt-status-tag');
-    const currentOverride = this.prompts.cameras?.[name] || '';
-    if (promptTa) promptTa.value = currentOverride;
-    if (promptStatusTag) {
-      if (currentOverride) {
-        promptStatusTag.textContent = 'CUSTOM OVERRIDE';
-        promptStatusTag.className = 'badge badge-accent';
-      } else {
-        promptStatusTag.textContent = 'INHERITING MASTER';
-        promptStatusTag.className = 'badge badge-muted';
-      }
+      // Populate Normal Context textareas (day / night)
+      const camCfgCtx = cam.config || {};
+      const ctxDay   = document.getElementById('modal-cam-ctx-day');
+      const ctxNight = document.getElementById('modal-cam-ctx-night');
+      if (ctxDay)   ctxDay.value   = camCfgCtx.normal_context_day   || '';
+      if (ctxNight) ctxNight.value = camCfgCtx.normal_context_night || '';
+
+      // Populate Quick Tune Fields
+      const camCfg = cam.config || {};
+      const inpThresh = document.getElementById('modal-cam-thresh');
+      const inpHb = document.getElementById('modal-cam-hb');
+      if (inpThresh) inpThresh.value = camCfg.threshold !== undefined ? camCfg.threshold : (this.systemConfig?.default_threshold || 0.033);
+      if (inpHb) inpHb.value = camCfg.heartbeat_sec !== undefined ? camCfg.heartbeat_sec : (this.systemConfig?.default_heartbeat_sec || 30);
+    } catch (err) {
+      console.error('Error populating cam modal:', err);
     }
-
-    // Populate Quick Tune Fields
-    const camCfg = cam.config || {};
-    const inpThresh = document.getElementById('modal-cam-thresh');
-    const inpHb = document.getElementById('modal-cam-hb');
-    if (inpThresh) inpThresh.value = camCfg.threshold !== undefined ? camCfg.threshold : (this.systemConfig?.default_threshold || 0.033);
-    if (inpHb) inpHb.value = camCfg.heartbeat_sec !== undefined ? camCfg.heartbeat_sec : (this.systemConfig?.default_heartbeat_sec || 30);
 
     backdrop.removeAttribute('hidden');
     modal.removeAttribute('hidden');
@@ -1594,6 +1581,9 @@ const App = {
     // Sync master prompt
     const masterTA = document.getElementById('master-prompt-ta');
     if (masterTA) masterTA.value = this.prompts.master || '';
+    // Sync followup prompt
+    const followupTA = document.getElementById('followup-prompt-ta');
+    if (followupTA) followupTA.value = this.prompts.followup || '';
     // Sync VLM info
     this._fetchVLMEndpoints();
   },
@@ -1659,39 +1649,54 @@ const App = {
     this._flashSaveFeedback('master-save-fb', '✓ Saved');
   },
 
-  async _saveCamPrompt() {
-    const name = document.getElementById('cam-prompt-sel')?.value;
-    const text = document.getElementById('cam-prompt-ta')?.value;
-    if (!name) return;
+  async _saveFollowupPrompt() {
+    const text = document.getElementById('followup-prompt-ta')?.value;
+    if (text == null) return;
     await fetch('/api/prompts', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ cam_name: name, cam_prompt: text || null }),
+      body:    JSON.stringify({ followup: text }),
     });
-    this._flashSaveFeedback('cam-save-fb', '✓ Saved');
+    this._flashSaveFeedback('followup-save-fb', '✓ Saved');
   },
 
-  async _clearCamPrompt() {
-    const name = document.getElementById('cam-prompt-sel')?.value;
+  async _saveModalContext() {
+    const name = this.activeCamModal;
     if (!name) return;
-    await fetch('/api/prompts', {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ cam_name: name, cam_prompt: null }),
-    });
-    const ta = document.getElementById('cam-prompt-ta');
-    if (ta) ta.value = '';
-    this._flashSaveFeedback('cam-save-fb', '✓ Cleared');
+    const ctxDay   = document.getElementById('modal-cam-ctx-day')?.value ?? '';
+    const ctxNight = document.getElementById('modal-cam-ctx-night')?.value ?? '';
+    const fb = document.getElementById('modal-context-fb');
+    const cam = this.cameras[name];
+    if (!cam) return;
+    const cfg = { ...(cam.config || {}), name, normal_context_day: ctxDay, normal_context_night: ctxNight };
+    try {
+      await this._apiUpsertCamera(cfg);
+      if (fb) {
+        fb.textContent = '✅ Context Saved!';
+        fb.style.color = 'var(--green)';
+        setTimeout(() => { if (fb) fb.textContent = ''; }, 3000);
+      }
+      this._showToast(`Saved scene context for ${name}`, 'ok');
+    } catch (err) {
+      if (fb) {
+        fb.textContent = '❌ Failed to save';
+        fb.style.color = 'var(--red)';
+      }
+    }
   },
 
   async _addCamera() {
-    const name = document.getElementById('new-cam-name')?.value.trim();
-    const url  = document.getElementById('new-cam-url')?.value.trim();
-    if (!name || !url) { this._toast('Enter a name and RTSP URL'); return; }
-    await this._apiUpsertCamera({ name, url, enabled: true });
+    const name     = document.getElementById('new-cam-name')?.value.trim();
+    const url      = document.getElementById('new-cam-url')?.value.trim();
+    const ctxDay   = document.getElementById('new-cam-ctx-day')?.value.trim() || '';
+    const ctxNight = document.getElementById('new-cam-ctx-night')?.value.trim() || '';
+    if (!name || !url) { this._showToast('Enter a name and RTSP URL', 'warn'); return; }
+    await this._apiUpsertCamera({ name, url, enabled: true, normal_context_day: ctxDay, normal_context_night: ctxNight });
     document.getElementById('new-cam-name').value = '';
     document.getElementById('new-cam-url').value  = '';
-    this._toast(`Camera "${name}" added`);
+    if (document.getElementById('new-cam-ctx-day')) document.getElementById('new-cam-ctx-day').value = '';
+    if (document.getElementById('new-cam-ctx-night')) document.getElementById('new-cam-ctx-night').value = '';
+    this._showToast(`Camera "${name}" added`, 'ok');
   },
 
   async _fetchVLMEndpoints() {
@@ -2127,8 +2132,7 @@ const App = {
 
     // Prompt actions
     document.getElementById('btn-save-master')?.addEventListener('click', () => this._saveMasterPrompt());
-    document.getElementById('btn-save-cam-prompt')?.addEventListener('click', () => this._saveCamPrompt());
-    document.getElementById('btn-clear-cam-prompt')?.addEventListener('click', () => this._clearCamPrompt());
+    document.getElementById('btn-save-followup')?.addEventListener('click', () => this._saveFollowupPrompt());
 
     // Save System Config (Threshold, Heartbeat, Cooldown, Followup Delay & Persistent Followup)
     document.getElementById('btn-save-sys-config')?.addEventListener('click', async () => {
@@ -2162,13 +2166,6 @@ const App = {
       }
     });
 
-    // Cam prompt select → load current override
-    document.getElementById('cam-prompt-sel')?.addEventListener('change', e => {
-      const name = e.target.value;
-      const ta   = document.getElementById('cam-prompt-ta');
-      if (ta) ta.value = name ? (this.prompts.cameras?.[name] || '') : '';
-    });
-
     // Camera Matrix Filter buttons
     document.querySelectorAll('.filter-chip').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -2189,118 +2186,9 @@ const App = {
       });
     });
 
-    // Theater Modal Prompt Presets
-    const presetPrompts = {
-      ppe: 'Strictly inspect and flag any worker or visitor without hard hats, high-visibility reflective safety vests, or required PPE. Note worker count and exact locations.',
-      forklift: 'Monitor industrial forklift and heavy machinery movements. Alert immediately on excessive speed, pedestrian proximity within 3 meters, or blocked safety aisles.',
-      restricted: 'Detect unauthorized personnel entry into designated red hazard zones or restricted areas. Report intrusion timestamp and person count.',
-      crowd: 'Detect crowd gathering or loitering exceeding 4 persons in one cluster. Flag unauthorized assemblies or blocked emergency exit paths.',
-      fire: 'Identify any visual indicators of smoke, open flame, electrical sparks, or hazardous gas plumes immediately.'
-    };
+    // Theater Modal Save Normal Context (day / night)
+    document.getElementById('btn-modal-save-context')?.addEventListener('click', () => this._saveModalContext());
 
-    document.querySelectorAll('.preset-chip').forEach(chip => {
-      chip.addEventListener('click', () => {
-        const key = chip.dataset.preset;
-        const text = presetPrompts[key];
-        const ta = document.getElementById('modal-cam-prompt-ta');
-        if (text && ta) {
-          if (ta.value.trim().length > 0) {
-            ta.value = ta.value.trim() + ' ' + text;
-          } else {
-            ta.value = text;
-          }
-          ta.focus();
-          this._showToast(`Added ${chip.textContent.trim()} preset`, 'ok');
-        }
-      });
-    });
-
-    // Theater Modal Save Custom Prompt Override
-    document.getElementById('btn-modal-save-prompt')?.addEventListener('click', async () => {
-      const name = this.activeCamModal;
-      if (!name) return;
-      const ta = document.getElementById('modal-cam-prompt-ta');
-      const val = ta ? ta.value.trim() : '';
-      const fb = document.getElementById('modal-prompt-fb');
-      const tag = document.getElementById('modal-prompt-status-tag');
-      try {
-        const res = await fetch('/api/prompts', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            cam_name: name,
-            cam_prompt: val || ''
-          })
-        });
-        if (res.ok) {
-          if (!this.prompts.cameras) this.prompts.cameras = {};
-          if (val) {
-            this.prompts.cameras[name] = val;
-            if (tag) {
-              tag.textContent = 'CUSTOM OVERRIDE';
-              tag.className = 'badge badge-accent';
-            }
-          } else {
-            delete this.prompts.cameras[name];
-            if (tag) {
-              tag.textContent = 'INHERITING MASTER';
-              tag.className = 'badge badge-muted';
-            }
-          }
-          if (fb) {
-            fb.textContent = '✅ Saved & Hot-applied!';
-            fb.style.color = 'var(--green)';
-            setTimeout(() => { fb.textContent = ''; }, 3000);
-          }
-          this._showToast(`Saved custom prompt for ${name}`, 'ok');
-          this._renderCamCard(name);
-          this._updateCamSelect();
-        }
-      } catch (err) {
-        console.error('Error saving cam prompt:', err);
-        if (fb) {
-          fb.textContent = '❌ Failed to save';
-          fb.style.color = 'var(--red)';
-        }
-      }
-    });
-
-    // Theater Modal Clear Prompt (Reset to Master)
-    document.getElementById('btn-modal-clear-prompt')?.addEventListener('click', async () => {
-      const name = this.activeCamModal;
-      if (!name) return;
-      const ta = document.getElementById('modal-cam-prompt-ta');
-      const fb = document.getElementById('modal-prompt-fb');
-      const tag = document.getElementById('modal-prompt-status-tag');
-      try {
-        const res = await fetch('/api/prompts', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            cam_name: name,
-            cam_prompt: ''
-          })
-        });
-        if (res.ok) {
-          if (this.prompts.cameras) delete this.prompts.cameras[name];
-          if (ta) ta.value = '';
-          if (tag) {
-            tag.textContent = 'INHERITING MASTER';
-            tag.className = 'badge badge-muted';
-          }
-          if (fb) {
-            fb.textContent = '✅ Reverted to Master';
-            fb.style.color = 'var(--green)';
-            setTimeout(() => { fb.textContent = ''; }, 3000);
-          }
-          this._showToast(`Reverted ${name} to master prompt`, 'ok');
-          this._renderCamCard(name);
-          this._updateCamSelect();
-        }
-      } catch (err) {
-        console.error('Error clearing cam prompt:', err);
-      }
-    });
 
     // Theater Modal Save Drift/Heartbeat Tune
     document.getElementById('btn-modal-save-tune')?.addEventListener('click', async () => {

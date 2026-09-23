@@ -89,12 +89,15 @@ class PromptManager:
     def save(
         self,
         master: Optional[str] = None,
+        followup: Optional[str] = None,
         cam_name: Optional[str] = None,
         cam_prompt: Optional[str] = None,
     ) -> None:
         """Update one or more fields and persist to config/prompts.json."""
         if master is not None:
             self._master = master
+        if followup is not None:
+            self._followup = followup
         if cam_name is not None:
             if cam_prompt:
                 self._cam_overrides[cam_name] = cam_prompt

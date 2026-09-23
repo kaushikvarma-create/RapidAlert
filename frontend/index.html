@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/style.css?v=24" />
+  <link rel="stylesheet" href="/style.css?v=30" />
   <script>
     (function() {
       var saved = localStorage.getItem('rapidalert_theme') || localStorage.getItem('theme');
@@ -162,9 +162,11 @@
     <div class="stab-content active" id="stab-cameras">
       <div class="add-cam-form" id="add-cam-form">
         <h3 class="form-label">Add Camera</h3>
-        <div class="form-grid">
+        <div class="form-grid" style="display: grid; grid-template-columns: 140px 1fr 1fr 1fr auto; gap: 8px;">
           <input id="new-cam-name" type="text" placeholder="Name (e.g. GATE_1)" class="input" />
           <input id="new-cam-url"  type="text" placeholder="rtsp://..." class="input url-input" />
+          <input id="new-cam-ctx-day" type="text" placeholder="Day normal context..." class="input" />
+          <input id="new-cam-ctx-night" type="text" placeholder="Night normal context..." class="input" />
           <button class="btn-primary" id="btn-add-camera">+ Add</button>
         </div>
       </div>
@@ -197,10 +199,11 @@
 
     <!-- ── Prompts Tab ─────────────────────────────────────────── -->
     <div class="stab-content" id="stab-prompts">
+      <!-- Master Prompt -->
       <div class="prompt-section">
         <div class="prompt-section-header">
           <h3>Master Prompt</h3>
-          <span class="prompt-hint">Use <code>{normal_context}</code> for per-camera context</span>
+          <span class="prompt-hint">Used for all initial trigger analyses &mdash; use <code>{normal_context}</code> to inject the camera&rsquo;s scene context</span>
         </div>
         <textarea id="master-prompt-ta" class="prompt-ta" spellcheck="false"></textarea>
         <div class="prompt-actions">
@@ -209,20 +212,22 @@
         </div>
       </div>
 
+      <!-- Followup Prompt -->
       <div class="prompt-section prompt-section-alt">
         <div class="prompt-section-header">
-          <h3>Per-Camera Override</h3>
-          <span class="prompt-hint">Leave blank to use master prompt</span>
+          <h3>Follow-Up Prompt</h3>
+          <span class="prompt-hint">Used for HIGH &amp; EXTREME alert re-check cycles &mdash; use <code>{normal_context}</code> and <code>{followup_context}</code></span>
         </div>
-        <select id="cam-prompt-sel" class="input select-input">
-          <option value="">— Select camera —</option>
-        </select>
-        <textarea id="cam-prompt-ta" class="prompt-ta" spellcheck="false" placeholder="Leave blank to use master prompt for this camera…"></textarea>
+        <textarea id="followup-prompt-ta" class="prompt-ta" spellcheck="false"></textarea>
         <div class="prompt-actions">
-          <button class="btn-primary" id="btn-save-cam-prompt">💾 Save Camera Prompt</button>
-          <button class="btn-ghost" id="btn-clear-cam-prompt">✕ Clear Override</button>
-          <span class="save-feedback" id="cam-save-fb"></span>
+          <button class="btn-primary" id="btn-save-followup">💾 Save Follow-Up Prompt</button>
+          <span class="save-feedback" id="followup-save-fb"></span>
         </div>
+      </div>
+
+      <!-- Context hint -->
+      <div class="prompt-section-hint-block">
+        <span class="prompt-hint">💡 Per-camera normal context (day &amp; night) is set per camera via the <strong>camera card</strong> or the <strong>Cameras</strong> tab &mdash; not here.</span>
       </div>
     </div>
 
@@ -463,32 +468,31 @@
           <div class="modal-meta" id="modal-meta"></div>
         </div>
 
-        <!-- Per-Camera Custom Prompt Box -->
+        <!-- Per-Camera Normal Context Box -->
         <div class="theater-box theater-prompt-box">
           <div class="theater-box-header">
             <div>
-              <span class="theater-box-title">🎯 Per-Camera Requirements Prompt</span>
-              <span class="prompt-hint-small">Overrides master prompt with camera-specific safety rules</span>
+              <span class="theater-box-title">🌅 Normal Scene Context</span>
+              <span class="prompt-hint-small">Injected into <code>{normal_context}</code> in the master &amp; follow-up prompts &mdash; describe what is <em>normal</em> for this camera</span>
             </div>
-            <span class="badge badge-accent" id="modal-prompt-status-tag">INHERITED</span>
           </div>
 
-          <!-- Quick Preset Chips -->
-          <div class="prompt-presets-row">
-            <span class="preset-label">Quick Presets:</span>
-            <button type="button" class="preset-chip" data-preset="ppe">+ 🦺 PPE Check</button>
-            <button type="button" class="preset-chip" data-preset="forklift">+ 🚜 Forklift / Machinery</button>
-            <button type="button" class="preset-chip" data-preset="restricted">+ 🚧 Restricted Area</button>
-            <button type="button" class="preset-chip" data-preset="crowd">+ 👥 Crowd / Loitering</button>
-            <button type="button" class="preset-chip" data-preset="fire">+ 🔥 Fire &amp; Smoke</button>
+          <div class="theater-context-grid">
+            <label class="theater-context-label">
+              <span>☀️ Day Context <span class="prompt-hint-small">(06:00&ndash;20:59)</span></span>
+              <textarea id="modal-cam-ctx-day" class="theater-context-ta" spellcheck="false" rows="3"
+                placeholder="e.g. 3&ndash;4 office workers at desks, normal foot traffic through entrance…"></textarea>
+            </label>
+            <label class="theater-context-label">
+              <span>🌙 Night Context <span class="prompt-hint-small">(21:00&ndash;05:59)</span></span>
+              <textarea id="modal-cam-ctx-night" class="theater-context-ta" spellcheck="false" rows="3"
+                placeholder="e.g. Area should be empty, security guard rounds expected…"></textarea>
+            </label>
           </div>
-
-          <textarea id="modal-cam-prompt-ta" class="theater-prompt-ta" spellcheck="false" placeholder="Enter custom prompt for this specific camera feed... (e.g. Verify hard hats and hi-vis vests on all personnel). Leave blank to inherit master prompt."></textarea>
 
           <div class="theater-prompt-actions">
-            <button class="btn-primary btn-sm" id="btn-modal-save-prompt">💾 Save &amp; Hot-Apply</button>
-            <button class="btn-ghost btn-sm" id="btn-modal-clear-prompt">✕ Reset to Master</button>
-            <span class="save-feedback" id="modal-prompt-fb"></span>
+            <button class="btn-primary btn-sm" id="btn-modal-save-context">💾 Save Context</button>
+            <span class="save-feedback" id="modal-context-fb"></span>
           </div>
         </div>
 
@@ -652,6 +656,6 @@
   <!-- ═══════════════════════════════════════════════════════════ TOAST -->
   <div class="toast-container" id="toast-container"></div>
 
-  <script src="/app.js?v=24"></script>
+  <script src="/app.js?v=30"></script>
 </body>
 </html>
