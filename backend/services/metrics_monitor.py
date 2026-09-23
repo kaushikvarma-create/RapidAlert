@@ -15,45 +15,64 @@ from backend.core.error_tracker import error_tracker
 _LAST_GPU_WARN = 0.0
 _LAST_CPU_WARN = 0.0
 _LAST_RAM_WARN = 0.0
+_CACHED_GPU_CMD: Optional[list[str]] = None
 
 
 async def get_gpu_util() -> int:
     """
-    Query GPU/MIG compute utilization.
-
-    MIG mode causes `utilization.gpu` to return `[N/A]` for the parent GPU.
-    Strategy:
-      1. Try standard `utilization.gpu` — works on non-MIG systems.
-      2. On [N/A]/failure, query per-MIG-instance SM utilization via
-         `--query-mig=gpu.utilization` (available on driver 520+).
-      3. Final fallback: count active compute processes via nvidia-smi pmon.
+    Query GPU/MIG compute utilization with command caching and direct execution.
     """
-    global _LAST_GPU_WARN
+    global _LAST_GPU_WARN, _CACHED_GPU_CMD
 
-    # ── Attempt 1: standard GPU utilization ────────────────────────────────
+    # Try cached working command first
+    if _CACHED_GPU_CMD:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *_CACHED_GPU_CMD,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
+            if proc.returncode == 0 and stdout:
+                lines = [l.strip() for l in stdout.decode().strip().splitlines() if l.strip()]
+                vals = []
+                for line in lines:
+                    if line and not line.startswith("["):
+                        try:
+                            vals.append(int(line))
+                        except ValueError:
+                            pass
+                if vals:
+                    return max(vals)
+        except Exception:
+            _CACHED_GPU_CMD = None
+
+    # Probe 1: Standard GPU utilization
     try:
-        proc = await asyncio.create_subprocess_shell(
-            "nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits",
+        cmd1 = ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd1,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=3.0)
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
         if proc.returncode == 0 and stdout:
             val = stdout.decode().strip()
-            # MIG mode returns '[N/A]' — fall through to MIG-specific queries
             if val and not val.startswith("["):
+                _CACHED_GPU_CMD = cmd1
                 return int(val)
     except Exception:
         pass
 
-    # ── Attempt 2: MIG per-instance utilization (driver 520+) ─────────────
+    # Probe 2: MIG per-instance utilization
     try:
-        proc = await asyncio.create_subprocess_shell(
-            "nvidia-smi --query-mig=gpu.utilization --format=csv,noheader,nounits 2>/dev/null",
+        cmd2 = ["nvidia-smi", "--query-mig=gpu.utilization", "--format=csv,noheader,nounits"]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd2,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=3.0)
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
         if proc.returncode == 0 and stdout:
             lines = [l.strip() for l in stdout.decode().strip().splitlines() if l.strip()]
             values = []
@@ -64,30 +83,17 @@ async def get_gpu_util() -> int:
                     except ValueError:
                         pass
             if values:
-                return max(values)  # report the busiest MIG slice
+                _CACHED_GPU_CMD = cmd2
+                return max(values)
     except Exception:
         pass
 
-    # ── Attempt 3: count active compute processes via nvidia-smi pmon ──────
-    try:
-        proc = await asyncio.create_subprocess_shell(
-            "nvidia-smi pmon -c 1 -s u 2>/dev/null | awk 'NR>2 && $2 != \"-\" {count++} END {print count+0}'",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=3.0)
-        if proc.returncode == 0 and stdout:
-            n = int(stdout.decode().strip() or "0")
-            return min(99, n * 20)  # each active process implies load; cap at 99
-    except Exception:
-        pass
-
-    # ── All methods failed ─────────────────────────────────────────────────
+    # All methods failed
     now = time.time()
-    if now - _LAST_GPU_WARN > 300:   # warn at most once per 5 minutes
+    if now - _LAST_GPU_WARN > 300:
         _LAST_GPU_WARN = now
         error_tracker.capture_error(
-            message="All GPU utilization query methods returned [N/A] or failed (MIG mode may restrict access)",
+            message="All GPU utilization query methods returned [N/A] or failed",
             component="MetricsMonitor",
             effect="GPU utilization telemetry unavailable; dashboard will show 0%",
             severity="WARNING",

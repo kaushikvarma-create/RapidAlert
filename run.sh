@@ -110,22 +110,23 @@ fi
 ok "Pre-flight checks passed."
 echo ""
 
+# ── Pre-flight checks & Automated System Audit ───────────────────────
+log "Running automated pre-flight system health & integrity audit ..."
+python3 scripts/system_health_audit.py --fix || warn "System audit completed with warnings; continuing..."
+
 # ── Kill orphaned processes from previous runs ───────────────────────
 log "Cleaning up any orphaned backend processes ..."
-pids=$(pgrep -f "backend.main:app" 2>/dev/null || true)
-if [[ -n "${pids}" ]]; then
-    warn "  Killing orphaned uvicorn backend (PIDs: ${pids}) ..."
-    # If the process was suspended (CTRL+Z), it can't process SIGTERM. Wake it up first!
-    pkill -CONT -f "backend.main:app" 2>/dev/null || true
-    sleep 0.1
-    pkill -15 -f "backend.main:app" 2>/dev/null || true
-    sleep 1
-    pkill -9 -f "backend.main:app" 2>/dev/null || true
-    fuser -k "${DASHBOARD_PORT}/tcp" 2>/dev/null || true
-    sleep 0.5
-fi
+pkill -CONT -f "backend.main" 2>/dev/null || true
+pkill -CONT -f "uvicorn.*backend" 2>/dev/null || true
+sleep 0.1
+pkill -15 -f "backend.main" 2>/dev/null || true
+pkill -15 -f "uvicorn.*backend" 2>/dev/null || true
+sleep 0.5
+pkill -9 -f "backend.main" 2>/dev/null || true
+pkill -9 -f "uvicorn.*backend" 2>/dev/null || true
 fuser -k "${DASHBOARD_PORT}/tcp" 2>/dev/null || true
-ok "Cleanup done."
+sleep 0.2
+ok "Process cleanup and pre-flight audit done."
 echo ""
 
 # ── Manage vLLM Docker Containers ─────────────────────────────────────
