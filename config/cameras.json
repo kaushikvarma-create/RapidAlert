@@ -3,11 +3,13 @@
     "name": "SERVER_ENTRY",
     "url": "rtsp://malliswar:Cl0ve%40123@10.91.87.35:554/cam/realmonitor?channel=1&subtype=0",
     "enabled": true,
-    "normal_context_day": "",
-    "normal_context_night": "",
-    "priority": "high",
+    "normal_context_day": "Normal day office activity with desks and staff",
+    "normal_context_night": "Facility closed and lights dimmed",
+    "priority": "normal",
     "threshold": 0.045,
-    "heartbeat_sec": 25.0
+    "heartbeat_sec": 25.0,
+    "major_threshold": null,
+    "minor_threshold": null
   },
   {
     "name": "1ST_ENTRANCE",

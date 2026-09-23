@@ -1,6 +1,4 @@
 {
-  "_comment": "RapidAlert system configuration. Edit and restart or hot-reload via dashboard.",
-
   "vllm_endpoints": [
     {
       "url": "http://localhost:8000",
@@ -11,7 +9,7 @@
       "weight": 3,
       "max_concurrent": 4,
       "queue_depth": 12,
-      "gpu_utilization": 0.80
+      "gpu_utilization": 0.8
     },
     {
       "url": "http://localhost:8001",
@@ -25,40 +23,40 @@
       "gpu_utilization": 0.95
     }
   ],
-
   "auto_start_vllm": true,
-  "vllm_instances": 2,
   "vllm_model": "vrfai/Cosmos-Reason2-8B-NVFP4",
-  "primary_model": "vrfai/Cosmos-Reason2-8B-NVFP4",
-  "vllm_port_start": 8000,
+  "vllm_port": 8000,
   "vllm_max_seqs": 4,
   "vllm_max_model_len": 4096,
   "vllm_gpu_utilization": 0.95,
+  "vllm_instances": 2,
+  "primary_model": "vrfai/Cosmos-Reason2-8B-NVFP4",
   "vllm_quantization": "",
-
+  "vllm_port_start": 8000,
   "ingest_backend": "nvidia",
   "trigger_backend": "dinov2",
   "dinov2_model": "facebook/dinov2-small",
-
   "scene_threshold": 0.034,
   "default_threshold": 0.034,
-  "dino_major_threshold": 0.060,
-  "dino_minor_threshold": 0.030,
+  "dino_major_threshold": 0.06,
+  "dino_minor_threshold": 0.03,
   "default_heartbeat_sec": 35.0,
   "semantic_interval": 0.5,
   "event_cooldown": 15.0,
-
   "followup_interval_sec": 10.0,
   "persistent_followup": true,
   "followup_max_cycles": 6,
-
   "clip_recording_enabled": true,
   "clip_rolling_buffer_enabled": true,
   "clip_retention_hours": 24.0,
-
-  "alert_severity_triggers": ["HIGH", "MEDIUM"],
-  "alert_safety_triggers": ["DANGER", "WARNING"],
-
+  "alert_severity_triggers": [
+    "HIGH",
+    "MEDIUM"
+  ],
+  "alert_safety_triggers": [
+    "DANGER",
+    "WARNING"
+  ],
   "initial_concurrency": 5,
   "max_concurrency": 10,
   "frame_width": 1280,

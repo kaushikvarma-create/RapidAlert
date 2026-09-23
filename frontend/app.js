@@ -2260,6 +2260,27 @@ const App = {
       }
     });
 
+    // Theater Modal Save Context (Day/Night)
+    document.getElementById('btn-modal-save-context')?.addEventListener('click', async () => {
+      const name = this.activeCamModal;
+      if (!name) return;
+      const ctxDay = document.getElementById('modal-cam-ctx-day')?.value || '';
+      const ctxNight = document.getElementById('modal-cam-ctx-night')?.value || '';
+      const fb = document.getElementById('modal-context-fb');
+      const currentCfg = { ...(this.cameras[name]?.config || { name: name, url: '' }) };
+      currentCfg.normal_context_day = ctxDay;
+      currentCfg.normal_context_night = ctxNight;
+      if (!this.cameras[name]) this.cameras[name] = {};
+      this.cameras[name].config = currentCfg;
+      await this._apiUpsertCamera(currentCfg);
+      if (fb) {
+        fb.textContent = '✅ Saved';
+        fb.style.color = 'var(--green)';
+        setTimeout(() => { fb.textContent = ''; }, 2500);
+      }
+      this._showToast(`Updated normal context for ${name}`, 'ok');
+    });
+
     // Theater Modal Save Drift/Heartbeat Tune
     document.getElementById('btn-modal-save-tune')?.addEventListener('click', async () => {
       const name = this.activeCamModal;
