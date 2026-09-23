@@ -46,6 +46,7 @@ class CameraThread(threading.Thread):
         self.stop_event = stop_event
         self.use_nvidia = use_nvidia and is_nvidia_available()
         self.connected = False
+        self.connected_mode = "OFFLINE"
 
     def run(self) -> None:
         while not self.stop_event.is_set():
@@ -88,11 +89,12 @@ class CameraThread(threading.Thread):
                     if not got_frame:
                         got_frame = True
                         self.connected = True
-                        mode = "NVDEC" if is_hw else "CPU-OpenCV"
-                        print(f"[CamMgr] ✅ {self.cam_name} connected ({mode})")
+                        self.connected_mode = "NVDEC" if is_hw else "CPU-OpenCV"
+                        print(f"[CamMgr] ✅ {self.cam_name} connected ({self.connected_mode})")
                 else:
                     if got_frame:
                         self.connected = False
+                        self.connected_mode = "DISCONNECTED"
                         error_tracker.capture_error(
                             message=f"RTSP stream connection lost for {self.cam_name}",
                             component="CameraManager",
@@ -132,6 +134,10 @@ class CameraManager:
     def get_active_cameras(self) -> list[str]:
         with self._lock:
             return list(self._threads.keys())
+
+    def get_camera_modes(self) -> dict[str, str]:
+        with self._lock:
+            return {name: thread.connected_mode for name, thread in self._threads.items()}
 
     def get_config(self) -> list[dict]:
         with self._lock:

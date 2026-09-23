@@ -45,6 +45,18 @@ def is_nvidia_available() -> bool:
     return _NVIDIA_AVAILABLE
 
 
+def is_deepstream_available() -> bool:
+    """Check if DeepStream batched elements (nvurisrcbin, nvstreammux, nvvideoconvert) are present."""
+    if not is_nvidia_available():
+        return False
+    try:
+        from gi.repository import Gst
+        return Gst.ElementFactory.find("nvstreammux") is not None
+    except Exception:
+        return False
+
+
+
 class NvidiaStreamCapture:
     """
     Drop-in replacement for cv2.VideoCapture using GStreamer + DeepStream hardware decoding.
@@ -167,3 +179,36 @@ class NvidiaStreamCapture:
             self._pipeline = None
             self._sink = None
             self._bus = None
+
+
+class DeepStreamBatchedCapture:
+    """
+    Batched multi-camera hardware-accelerated video ingestion using nvstreammux + NVDEC.
+    Decodes multiple RTSP streams in parallel on NVDEC, multiplexes into batched NVMM buffers,
+    and dispatches extracted frames directly into the FrameStore.
+    """
+    def __init__(
+        self,
+        frame_store,
+        width: int = DEFAULT_FRAME_WIDTH,
+        height: int = DEFAULT_FRAME_HEIGHT,
+        batch_timeout_us: int = 33000,
+        compute_hw: int = 1,
+    ):
+        self.frame_store = frame_store
+        self.width = width
+        self.height = height
+        self.batch_timeout_us = batch_timeout_us
+        self.compute_hw = compute_hw
+
+        self._cameras: dict[str, str] = {}
+        self._pipeline = None
+        self._mux = None
+        self._sink = None
+        self._bus = None
+        self._running = False
+
+    @staticmethod
+    def is_available() -> bool:
+        return is_deepstream_available()
+
