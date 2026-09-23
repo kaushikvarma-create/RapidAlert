@@ -642,6 +642,42 @@ code { font-family: var(--font-mono); font-size: 0.82em; color: var(--accent); b
   box-shadow: none;
 }
 
+.cam-live-indicator.event-mode {
+  background: rgba(220, 38, 38, 0.88);
+  border-color: rgba(255, 255, 255, 0.35);
+  color: #fff;
+}
+
+.cam-return-live-btn {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  display: none;
+  align-items: center;
+  gap: 4px;
+  background: rgba(16, 185, 129, 0.92);
+  color: #fff;
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 4px 9px;
+  border-radius: 4px;
+  cursor: pointer;
+  z-index: 5;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+  transition: all 0.15s ease;
+}
+
+.cam-return-live-btn:hover {
+  background: #059669;
+  transform: translateY(-1px);
+}
+
+.cam-event-thumb-item.active {
+  border: 2px solid var(--cyan) !important;
+  box-shadow: 0 0 8px var(--cyan) !important;
+}
+
 /* Dedicated Event-Based Photos Strip in Camera Card */
 .cam-event-strip {
   background: var(--bg-card);

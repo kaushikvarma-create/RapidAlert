@@ -655,13 +655,13 @@ const App = {
 
       <div class="cam-card-video" id="cam-video-${this._eid(name)}">
         <img id="cam-card-img-${this._eid(name)}" src="${liveSrc}" class="cam-card-img" alt="${this._esc(name)}" onerror="this.style.opacity='0.4'">
-        <div class="cam-live-indicator">
+        <div class="cam-live-indicator" id="cam-live-ind-${this._eid(name)}">
           <span class="cam-live-dot ${isEnabled ? 'pulsing' : 'offline'}"></span>
           <span>${isEnabled ? 'LIVE RTSP' : 'OFFLINE'}</span>
         </div>
-        <div class="cam-hover-overlay">
-          <span>🔍 Inspect Live Feed &amp; Set Prompts</span>
-        </div>
+        <button class="cam-return-live-btn" id="cam-return-live-${this._eid(name)}" title="Return to Real-Time Video Stream">
+          ▶ Return to Live
+        </button>
       </div>
 
       ${eventPhotosHtml}
@@ -686,43 +686,58 @@ const App = {
       </div>
     `;
 
-    // Click handlers: Clicking anywhere on camera card opens Live Stream Theater
-    card.style.cursor = 'pointer';
-    card.addEventListener('click', (e) => {
-      if (e.target.closest('.cam-event-thumb-item') || e.target.closest('button') || e.target.closest('input')) return;
-      this._openCamModal(name, null);
-    });
+    const imgEl = card.querySelector(`#cam-card-img-${this._eid(name)}`);
+    const indEl = card.querySelector(`#cam-live-ind-${this._eid(name)}`);
+    const returnBtn = card.querySelector(`#cam-return-live-${this._eid(name)}`);
+
+    const resetToLive = () => {
+      if (imgEl) {
+        imgEl.src = `/api/cameras/${encodeURIComponent(name)}/stream`;
+      }
+      if (indEl) {
+        indEl.innerHTML = `<span class="cam-live-dot ${isEnabled ? 'pulsing' : 'offline'}"></span><span>${isEnabled ? 'LIVE RTSP' : 'OFFLINE'}</span>`;
+        indEl.className = 'cam-live-indicator';
+      }
+      if (returnBtn) {
+        returnBtn.style.display = 'none';
+      }
+      card.querySelectorAll('.cam-event-thumb-item').forEach(t => t.classList.remove('active'));
+    };
+
+    if (returnBtn) {
+      returnBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        resetToLive();
+      });
+    }
 
     const videoEl = card.querySelector('.cam-card-video');
     if (videoEl) {
       videoEl.addEventListener('click', (e) => {
         e.stopPropagation();
-        this._openCamModal(name, null); // Live stream mode
+        if (returnBtn && returnBtn.style.display === 'inline-flex') {
+          resetToLive();
+        }
       });
     }
 
-    const headerEl = card.querySelector('.cam-card-header');
-    if (headerEl) {
-      headerEl.addEventListener('click', (e) => {
-        e.stopPropagation();
-        this._openCamModal(name, null);
-      });
-    }
-
-    const infoEl = card.querySelector('.cam-card-info');
-    if (infoEl) {
-      infoEl.addEventListener('click', (e) => {
-        e.stopPropagation();
-        this._openCamModal(name, null);
-      });
-    }
-
-    // Click handlers: Clicking any event photo thumbnail opens that specific event photo in Theater!
+    // In-place event photo inspection: Clicking thumbnail replaces the image right on the card
     card.querySelectorAll('.cam-event-thumb-item').forEach(thumb => {
       thumb.addEventListener('click', (e) => {
         e.stopPropagation();
         const idx = parseInt(thumb.getAttribute('data-idx'), 10);
-        this._openCamModal(name, idx); // Event photo inspection mode
+        if (cam.eventPhotos && cam.eventPhotos[idx] && imgEl) {
+          imgEl.src = `data:image/jpeg;base64,${cam.eventPhotos[idx]}`;
+          if (indEl) {
+            indEl.innerHTML = `📸 EVENT FRAME #${idx + 1} (t-${cam.eventPhotos.length - 1 - idx})`;
+            indEl.className = 'cam-live-indicator event-mode';
+          }
+          if (returnBtn) {
+            returnBtn.style.display = 'inline-flex';
+          }
+          card.querySelectorAll('.cam-event-thumb-item').forEach(t => t.classList.remove('active'));
+          thumb.classList.add('active');
+        }
       });
     });
 
