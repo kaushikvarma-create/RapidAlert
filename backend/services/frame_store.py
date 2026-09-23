@@ -23,13 +23,34 @@ class FrameStore:
         self._store: dict[str, collections.deque[Tuple[np.ndarray, float]]] = collections.defaultdict(
             lambda: collections.deque(maxlen=300)
         )
+        self._latest_jpeg: dict[str, Tuple[float, bytes, str]] = {}
         self._lock = threading.Lock()
         self.max_w = max_w
         self.jpeg_quality = jpeg_quality
 
     def put(self, cam_name: str, frame: np.ndarray) -> None:
+        ts = time.monotonic()
+        # Fast one-pass JPEG encode upon frame ingestion for zero-latency multi-client streaming
+        try:
+            h, w = frame.shape[:2]
+            if w > 640:
+                small = cv2.resize(frame, (640, int(h * 640 / w)), interpolation=cv2.INTER_AREA)
+            else:
+                small = frame
+            ok, buf = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            if ok:
+                raw_bytes = buf.tobytes()
+                b64_str = base64.b64encode(buf).decode()
+                cached_tuple = (ts, raw_bytes, b64_str)
+            else:
+                cached_tuple = None
+        except Exception:
+            cached_tuple = None
+
         with self._lock:
-            self._store[cam_name].append((frame, time.monotonic()))
+            self._store[cam_name].append((frame, ts))
+            if cached_tuple is not None:
+                self._latest_jpeg[cam_name] = cached_tuple
 
     def get_latest(self, cam_name: str) -> Optional[Tuple[np.ndarray, float]]:
         with self._lock:
@@ -38,6 +59,14 @@ class FrameStore:
                 return None
             frame, ts = q[-1]
             return frame.copy(), ts
+
+    def get_cached_snapshot_b64(self, cam_name: str) -> Optional[str]:
+        """Returns pre-encoded base64 string with zero CPU overhead."""
+        with self._lock:
+            entry = self._latest_jpeg.get(cam_name)
+            if entry is not None:
+                return entry[2]
+        return self.get_snapshot_b64(cam_name)
 
     def get_snapshot_b64(
         self,
@@ -83,6 +112,11 @@ class FrameStore:
         quality: Optional[int] = None,
     ) -> Optional[Tuple[float, bytes]]:
         """Returns (timestamp, jpeg_bytes) of the latest frame."""
+        with self._lock:
+            cached = self._latest_jpeg.get(cam_name)
+            if cached is not None and (max_w is None or max_w == 640 or max_w >= 640):
+                return cached[0], cached[1]
+
         entry = self.get_latest(cam_name)
         if entry is None:
             return None

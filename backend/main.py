@@ -216,21 +216,25 @@ async def _config_sync_loop() -> None:
 
 
 async def _snapshot_stream_loop() -> None:
-    """Broadcast live camera snapshots every 2 seconds so the dashboard preview stays live."""
+    """Broadcast live camera snapshots at 10 FPS over WebSocket for zero-delay grid streaming."""
+    last_pushed_ts: dict[str, float] = {}
     while True:
         try:
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(0.1)  # 10 FPS smooth grid refresh
             active = camera_manager.get_active_cameras()
             for cam in active:
-                snap = frame_store.get_snapshot_b64(
-                    cam, max_w=PREVIEW_FRAME_WIDTH, quality=PREVIEW_JPEG_QUALITY
-                )
-                if snap:
-                    await ws_manager.broadcast({
-                        "type": "camera_frame",
-                        "cam": cam,
-                        "thumbnail_b64": snap,
-                    })
+                latest = frame_store.get_latest(cam)
+                if latest is not None:
+                    _, ts = latest
+                    if ts > last_pushed_ts.get(cam, 0.0):
+                        last_pushed_ts[cam] = ts
+                        snap = frame_store.get_cached_snapshot_b64(cam)
+                        if snap:
+                            await ws_manager.broadcast({
+                                "type": "camera_frame",
+                                "cam": cam,
+                                "thumbnail_b64": snap,
+                            })
         except asyncio.CancelledError:
             break
         except Exception as exc:

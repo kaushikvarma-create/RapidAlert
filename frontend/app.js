@@ -357,15 +357,24 @@ const App = {
     if (!this.cameras[cam]) return;
     this.cameras[cam].thumbB64 = thumbnail_b64;
 
-    // Ensure live stream is active on camera card
+    // 1. Direct in-place update of live feed image in grid (10 FPS fluid stream over single WS)
     const cardImg = document.getElementById(`cam-card-img-${this._eid(cam)}`);
     if (cardImg) {
-      const streamUrl = `/api/cameras/${encodeURIComponent(cam)}/stream`;
-      if (!cardImg.src.includes('/stream')) {
-        cardImg.src = streamUrl;
-      }
+      cardImg.src = `data:image/jpeg;base64,${thumbnail_b64}`;
     } else {
       this._renderCamCard(cam);
+    }
+
+    // 2. Direct update of modal frame if viewing live stream
+    if (this.activeCamModal === cam && this.modalViewMode === 'live') {
+      const modalImg = document.getElementById('modal-frame');
+      const loading = document.getElementById('modal-frame-loading');
+      if (modalImg) {
+        if (!modalImg.src || modalImg.src === '' || modalImg.src.includes('data:image')) {
+          modalImg.src = `data:image/jpeg;base64,${thumbnail_b64}`;
+        }
+        if (loading) loading.style.display = 'none';
+      }
     }
   },
 
@@ -591,8 +600,10 @@ const App = {
       statusBadgeClass = 'badge-green';
     }
 
-    // 1. Continuous Live Real-Time Video Stream (25 FPS MJPEG)
-    const liveSrc = `/api/cameras/${encodeURIComponent(name)}/stream`;
+    // 1. Live Video Viewport (Instant frame from cache, updated at 10 FPS over WebSocket)
+    const liveSrc = cam.thumbB64
+      ? `data:image/jpeg;base64,${cam.thumbB64}`
+      : `/api/cameras/${encodeURIComponent(name)}/frame?t=${Date.now()}`;
 
     // 2. Dedicated Event-Based Photos Strip (Trigger sequence captured for AI analysis)
     let eventPhotosHtml = '';
@@ -655,13 +666,13 @@ const App = {
 
       <div class="cam-card-video" id="cam-video-${this._eid(name)}">
         <img id="cam-card-img-${this._eid(name)}" src="${liveSrc}" class="cam-card-img" alt="${this._esc(name)}" onerror="this.style.opacity='0.4'">
-        <div class="cam-live-indicator" id="cam-live-ind-${this._eid(name)}">
+        <div class="cam-live-indicator">
           <span class="cam-live-dot ${isEnabled ? 'pulsing' : 'offline'}"></span>
           <span>${isEnabled ? 'LIVE RTSP' : 'OFFLINE'}</span>
         </div>
-        <button class="cam-return-live-btn" id="cam-return-live-${this._eid(name)}" title="Return to Real-Time Video Stream">
-          ▶ Return to Live
-        </button>
+        <div class="cam-hover-overlay">
+          <span>🔍 Inspect Live Feed &amp; Set Prompts</span>
+        </div>
       </div>
 
       ${eventPhotosHtml}
@@ -686,58 +697,43 @@ const App = {
       </div>
     `;
 
-    const imgEl = card.querySelector(`#cam-card-img-${this._eid(name)}`);
-    const indEl = card.querySelector(`#cam-live-ind-${this._eid(name)}`);
-    const returnBtn = card.querySelector(`#cam-return-live-${this._eid(name)}`);
-
-    const resetToLive = () => {
-      if (imgEl) {
-        imgEl.src = `/api/cameras/${encodeURIComponent(name)}/stream`;
-      }
-      if (indEl) {
-        indEl.innerHTML = `<span class="cam-live-dot ${isEnabled ? 'pulsing' : 'offline'}"></span><span>${isEnabled ? 'LIVE RTSP' : 'OFFLINE'}</span>`;
-        indEl.className = 'cam-live-indicator';
-      }
-      if (returnBtn) {
-        returnBtn.style.display = 'none';
-      }
-      card.querySelectorAll('.cam-event-thumb-item').forEach(t => t.classList.remove('active'));
-    };
-
-    if (returnBtn) {
-      returnBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        resetToLive();
-      });
-    }
+    // Click handlers: Clicking anywhere on camera card opens Live Stream Theater
+    card.style.cursor = 'pointer';
+    card.addEventListener('click', (e) => {
+      if (e.target.closest('.cam-event-thumb-item') || e.target.closest('button') || e.target.closest('input')) return;
+      this._openCamModal(name, null);
+    });
 
     const videoEl = card.querySelector('.cam-card-video');
     if (videoEl) {
       videoEl.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (returnBtn && returnBtn.style.display === 'inline-flex') {
-          resetToLive();
-        }
+        this._openCamModal(name, null); // Live stream mode
       });
     }
 
-    // In-place event photo inspection: Clicking thumbnail replaces the image right on the card
+    const headerEl = card.querySelector('.cam-card-header');
+    if (headerEl) {
+      headerEl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this._openCamModal(name, null);
+      });
+    }
+
+    const infoEl = card.querySelector('.cam-card-info');
+    if (infoEl) {
+      infoEl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this._openCamModal(name, null);
+      });
+    }
+
+    // Click handlers: Clicking any event photo thumbnail opens that specific event photo in Theater!
     card.querySelectorAll('.cam-event-thumb-item').forEach(thumb => {
       thumb.addEventListener('click', (e) => {
         e.stopPropagation();
         const idx = parseInt(thumb.getAttribute('data-idx'), 10);
-        if (cam.eventPhotos && cam.eventPhotos[idx] && imgEl) {
-          imgEl.src = `data:image/jpeg;base64,${cam.eventPhotos[idx]}`;
-          if (indEl) {
-            indEl.innerHTML = `📸 EVENT FRAME #${idx + 1} (t-${cam.eventPhotos.length - 1 - idx})`;
-            indEl.className = 'cam-live-indicator event-mode';
-          }
-          if (returnBtn) {
-            returnBtn.style.display = 'inline-flex';
-          }
-          card.querySelectorAll('.cam-event-thumb-item').forEach(t => t.classList.remove('active'));
-          thumb.classList.add('active');
-        }
+        this._openCamModal(name, idx); // Event photo inspection mode
       });
     });
 
@@ -1484,10 +1480,8 @@ const App = {
       this.modalViewMode = 'live';
       this.selectedEventIdx = null;
       if (img) {
-        const streamSrc = `/api/cameras/${encodeURIComponent(name)}/stream?width=1280&quality=85`;
-        if (img.src !== window.location.origin + streamSrc) {
-          img.src = streamSrc;
-        }
+        const streamSrc = `/api/cameras/${encodeURIComponent(name)}/stream`;
+        img.src = streamSrc;
         img.style.display = 'block';
         if (loading) loading.style.display = 'none';
       }
