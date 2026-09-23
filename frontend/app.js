@@ -357,25 +357,29 @@ const App = {
     if (!this.cameras[cam]) return;
     this.cameras[cam].thumbB64 = thumbnail_b64;
 
-    // 1. Direct in-place update of live feed image in grid (10 FPS fluid stream over single WS)
-    const cardImg = document.getElementById(`cam-card-img-${this._eid(cam)}`);
-    if (cardImg) {
-      cardImg.src = `data:image/jpeg;base64,${thumbnail_b64}`;
-    } else {
-      this._renderCamCard(cam);
+    if (!this._frameRafPending) {
+      this._frameRafPending = {};
     }
+    if (this._frameRafPending[cam]) return;
+    this._frameRafPending[cam] = true;
 
-    // 2. Direct update of modal frame if viewing live stream
-    if (this.activeCamModal === cam && this.modalViewMode === 'live') {
-      const modalImg = document.getElementById('modal-frame');
-      const loading = document.getElementById('modal-frame-loading');
-      if (modalImg) {
-        if (!modalImg.src || modalImg.src === '' || modalImg.src.includes('data:image')) {
-          modalImg.src = `data:image/jpeg;base64,${thumbnail_b64}`;
-        }
-        if (loading) loading.style.display = 'none';
+    requestAnimationFrame(() => {
+      this._frameRafPending[cam] = false;
+      const cardImg = document.getElementById(`cam-card-img-${this._eid(cam)}`);
+      if (cardImg) {
+        cardImg.src = `data:image/jpeg;base64,${thumbnail_b64}`;
       }
-    }
+      if (this.activeCamModal === cam && this.modalViewMode === 'live') {
+        const modalImg = document.getElementById('modal-frame');
+        const loading = document.getElementById('modal-frame-loading');
+        if (modalImg) {
+          if (!modalImg.src || modalImg.src === '' || modalImg.src.includes('data:image')) {
+            modalImg.src = `data:image/jpeg;base64,${thumbnail_b64}`;
+          }
+          if (loading) loading.style.display = 'none';
+        }
+      }
+    });
   },
 
   onSysMetrics(msg) {

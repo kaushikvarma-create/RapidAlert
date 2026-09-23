@@ -216,11 +216,15 @@ async def _config_sync_loop() -> None:
 
 
 async def _snapshot_stream_loop() -> None:
-    """Broadcast live camera snapshots at 10 FPS over WebSocket for zero-delay grid streaming."""
+    """Broadcast live camera snapshots over WebSocket for fluid grid streaming."""
     last_pushed_ts: dict[str, float] = {}
     while True:
         try:
-            await asyncio.sleep(0.1)  # 10 FPS smooth grid refresh
+            if not ws_manager._clients:
+                await asyncio.sleep(0.5)
+                continue
+
+            await asyncio.sleep(0.2)  # 5 FPS balanced refresh (silky smooth, zero UI lag)
             active = camera_manager.get_active_cameras()
             for cam in active:
                 latest = frame_store.get_latest(cam)

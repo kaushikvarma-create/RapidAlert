@@ -223,21 +223,33 @@ class _EndpointShard:
                     self._latencies.append(result["latency"])
                     return result
 
+            except (aiohttp.ServerDisconnectedError, aiohttp.ClientConnectionError) as exc:
+                # Stale HTTP keep-alive socket closed by server; retry immediately on fresh socket
+                if attempt == _RETRY_COUNT - 1:
+                    error_tracker.capture_exception(
+                        exc, component="VLMClient", camera=cam_name,
+                        effect=f"Connection failure on {self.url} after {_RETRY_COUNT} attempts",
+                        severity="ERROR",
+                    )
+                await asyncio.sleep(0.1)
+
             except asyncio.TimeoutError as exc:
-                error_tracker.capture_exception(
-                    exc, component="VLMClient", camera=cam_name,
-                    effect=f"Timeout on {self.url} (attempt {attempt+1}/{_RETRY_COUNT}); retrying in 1s",
-                    severity="WARNING",
-                )
-                await asyncio.sleep(1)
+                if attempt == _RETRY_COUNT - 1:
+                    error_tracker.capture_exception(
+                        exc, component="VLMClient", camera=cam_name,
+                        effect=f"Timeout on {self.url} after {_RETRY_COUNT} attempts",
+                        severity="WARNING",
+                    )
+                await asyncio.sleep(0.5)
 
             except Exception as exc:
-                error_tracker.capture_exception(
-                    exc, component="VLMClient", camera=cam_name,
-                    effect=f"Request error on {self.url} (attempt {attempt+1}/{_RETRY_COUNT}); retrying in 1s",
-                    severity="WARNING",
-                )
-                await asyncio.sleep(1)
+                if attempt == _RETRY_COUNT - 1:
+                    error_tracker.capture_exception(
+                        exc, component="VLMClient", camera=cam_name,
+                        effect=f"Request error on {self.url} (attempt {attempt+1}/{_RETRY_COUNT}); retrying",
+                        severity="WARNING",
+                    )
+                await asyncio.sleep(0.5)
 
         # All retries exhausted
         error_tracker.capture_error(
@@ -304,8 +316,13 @@ class MIGAwareVLMPool:
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
     async def start(self) -> None:
-        connector = aiohttp.TCPConnector(limit=128, limit_per_host=64)
-        timeout   = aiohttp.ClientTimeout(total=90, connect=5)
+        connector = aiohttp.TCPConnector(
+            limit=128,
+            limit_per_host=64,
+            keepalive_timeout=15.0,
+            enable_cleanup_closed=True,
+        )
+        timeout = aiohttp.ClientTimeout(total=90, connect=5)
         self._session = aiohttp.ClientSession(connector=connector, timeout=timeout)
 
         for cfg in self._endpoint_configs:
