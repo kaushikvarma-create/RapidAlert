@@ -52,6 +52,30 @@ class FrameStore:
         frame, _ = entry
         return self._encode_frame(frame, max_w, quality, cam_name=cam_name)
 
+    def get_snapshot_jpeg(
+        self,
+        cam_name: str,
+        max_w: Optional[int] = None,
+        quality: Optional[int] = None,
+    ) -> Optional[bytes]:
+        """Returns raw JPEG bytes of the latest frame with zero base64 overhead."""
+        entry = self.get_latest(cam_name)
+        if entry is None:
+            return None
+        frame, _ = entry
+        try:
+            mw = max_w if max_w is not None else self.max_w
+            q = quality if quality is not None else self.jpeg_quality
+            h, w = frame.shape[:2]
+            if w > mw:
+                frame = cv2.resize(frame, (mw, int(h * mw / w)), interpolation=cv2.INTER_AREA)
+            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, q])
+            if ok:
+                return buf.tobytes()
+        except Exception:
+            pass
+        return None
+
     def get_pre_trigger_frames(
         self,
         cam_name: str,

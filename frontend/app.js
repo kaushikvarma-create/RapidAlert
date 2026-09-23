@@ -357,22 +357,15 @@ const App = {
     if (!this.cameras[cam]) return;
     this.cameras[cam].thumbB64 = thumbnail_b64;
 
-    // 1. Direct in-place update of live feed image in grid (no card re-render / screen tearing)
+    // Ensure live stream is active on camera card
     const cardImg = document.getElementById(`cam-card-img-${this._eid(cam)}`);
     if (cardImg) {
-      cardImg.src = `data:image/jpeg;base64,${thumbnail_b64}`;
+      const streamUrl = `/api/cameras/${encodeURIComponent(cam)}/stream`;
+      if (!cardImg.src.includes('/stream')) {
+        cardImg.src = streamUrl;
+      }
     } else {
       this._renderCamCard(cam);
-    }
-
-    // 2. Direct update of modal frame if viewing live stream
-    if (this.activeCamModal === cam && this.modalViewMode === 'live') {
-      const modalImg = document.getElementById('modal-frame');
-      if (modalImg) {
-        modalImg.src = `data:image/jpeg;base64,${thumbnail_b64}`;
-        const loading = document.getElementById('modal-frame-loading');
-        if (loading) loading.style.display = 'none';
-      }
     }
   },
 
@@ -598,10 +591,8 @@ const App = {
       statusBadgeClass = 'badge-green';
     }
 
-    // 1. Continuous Live Video Viewport (NEVER static screenshots)
-    const liveSrc = cam.thumbB64
-      ? `data:image/jpeg;base64,${cam.thumbB64}`
-      : `/api/cameras/${encodeURIComponent(name)}/frame?t=${Date.now()}`;
+    // 1. Continuous Live Real-Time Video Stream (25 FPS MJPEG)
+    const liveSrc = `/api/cameras/${encodeURIComponent(name)}/stream`;
 
     // 2. Dedicated Event-Based Photos Strip (Trigger sequence captured for AI analysis)
     let eventPhotosHtml = '';
@@ -1478,15 +1469,12 @@ const App = {
       this.modalViewMode = 'live';
       this.selectedEventIdx = null;
       if (img) {
-        if (cam.thumbB64) {
-          img.src = `data:image/jpeg;base64,${cam.thumbB64}`;
-          img.style.display = 'block';
-          if (loading) loading.style.display = 'none';
-        } else {
-          img.src = `/api/cameras/${encodeURIComponent(name)}/frame?t=${Date.now()}`;
-          img.style.display = 'block';
-          if (loading) loading.style.display = 'none';
+        const streamSrc = `/api/cameras/${encodeURIComponent(name)}/stream?width=1280&quality=85`;
+        if (img.src !== window.location.origin + streamSrc) {
+          img.src = streamSrc;
         }
+        img.style.display = 'block';
+        if (loading) loading.style.display = 'none';
       }
       if (liveIndicator) {
         liveIndicator.innerHTML = `<span class="live-pulse-dot"></span> LIVE RTSP`;
@@ -1495,15 +1483,6 @@ const App = {
       if (btnReturnLive) btnReturnLive.style.display = 'none';
       if (btnLive) btnLive.classList.add('active');
       if (btnEvents) btnEvents.classList.remove('active');
-
-      // Refresh full-resolution snapshot in parallel
-      fetch(`/api/cameras/${encodeURIComponent(name)}/frame?width=1280`)
-        .then(r => r.ok ? r.blob() : null)
-        .then(blob => {
-          if (!blob || this.activeCamModal !== name || this.modalViewMode !== 'live') return;
-          if (img) img.src = URL.createObjectURL(blob);
-        })
-        .catch(() => {});
     }
   },
 
