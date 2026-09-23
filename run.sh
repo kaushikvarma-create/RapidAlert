@@ -50,7 +50,6 @@ VLLM_IMAGE="ghcr.io/nvidia-ai-iot/vllm:latest-jetson-thor"
 HF_CACHE="$HOME/huggingface"
 declare -a LOG_PIDS=()
 
-# ── Cleanup on exit ─────────────────────────────────────────────────
 cleanup() {
     echo ""
     warn "Shutting down RapidAlert..."
@@ -59,9 +58,16 @@ cleanup() {
     done
     if [[ -n "${UVICORN_PID:-}" ]] && kill -0 "${UVICORN_PID}" 2>/dev/null; then
         kill -15 "${UVICORN_PID}" 2>/dev/null || true
+        for _ in {1..20}; do
+            if ! kill -0 "${UVICORN_PID}" 2>/dev/null; then break; fi
+            sleep 0.1
+        done
+        if kill -0 "${UVICORN_PID}" 2>/dev/null; then
+            kill -9 "${UVICORN_PID}" 2>/dev/null || true
+        fi
     fi
+    fuser -k "${DASHBOARD_PORT}/tcp" 2>/dev/null || true
     # Don't kill vLLM docker here, keep it running for faster subsequent restarts!
-    # The user can manage Docker independently, or the orphan killer will restart it if needed.
     ok "Dashboard closed. vLLM container left running for speed."
 }
 trap cleanup EXIT INT TERM

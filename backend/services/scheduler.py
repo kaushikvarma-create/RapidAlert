@@ -97,6 +97,7 @@ class DeadlineScheduler:
         self.followup_interval_sec: float = DEFAULT_FOLLOWUP_INTERVAL
         self.persistent_followup: bool = DEFAULT_PERSISTENT_FOLLOWUP
         self.followup_max_cycles: int = DEFAULT_FOLLOWUP_MAX_CYCLES
+        self._followup_tasks: set[asyncio.Task] = set()
 
     def get_cam_heartbeat_interval(self, cam_name: str) -> float:
         """Returns the mandatory analysis interval in seconds for the given camera."""
@@ -159,6 +160,9 @@ class DeadlineScheduler:
             w.cancel()
         for t in self._bg_tasks:
             t.cancel()
+        for ft in list(self._followup_tasks):
+            ft.cancel()
+        self._followup_tasks.clear()
         self._workers.clear()
         self._bg_tasks.clear()
 
@@ -358,7 +362,7 @@ class DeadlineScheduler:
         if is_incident and not is_followup and alert:
             evt_id = alert["id"]
             inc_id = alert.get("incident_id")
-            asyncio.create_task(
+            fu_task = asyncio.create_task(
                 self._schedule_followup(
                     cam_name=cam_name,
                     incident_id=inc_id,
@@ -370,6 +374,8 @@ class DeadlineScheduler:
                     delay_sec=self.followup_interval_sec,
                 )
             )
+            self._followup_tasks.add(fu_task)
+            fu_task.add_done_callback(self._followup_tasks.discard)
 
         # 2. If this was a follow-up and persistent follow-up is enabled:
         elif is_followup and self.persistent_followup:
@@ -381,7 +387,7 @@ class DeadlineScheduler:
             )
             if is_elevated and cycle < self.followup_max_cycles:
                 next_cycle = cycle + 1
-                asyncio.create_task(
+                fu_task = asyncio.create_task(
                     self._schedule_followup(
                         cam_name=cam_name,
                         incident_id=incident_id,
@@ -393,6 +399,8 @@ class DeadlineScheduler:
                         delay_sec=self.followup_interval_sec,
                     )
                 )
+                self._followup_tasks.add(fu_task)
+                fu_task.add_done_callback(self._followup_tasks.discard)
                 print(
                     f"[Scheduler] 🔄 Persistent follow-up: {cam_name} severity remains {current_sev} "
                     f"({current_safety}). Next follow-up #{next_cycle} scheduled in {self.followup_interval_sec:.1f}s."
