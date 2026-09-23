@@ -452,6 +452,12 @@ VLMPool = MIGAwareVLMPool
 #  Helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
+import json
+import re
+
+_COMMA_HEAL_RE = re.compile(r'("\s*:\s*[^",{}\[\]]+?)(\n\s*")')
+
+
 def _parse_response(raw: str, cam_name: str) -> dict:
     result: dict = {
         "cam":         cam_name,
@@ -462,7 +468,52 @@ def _parse_response(raw: str, cam_name: str) -> dict:
         "safety":      "UNKNOWN",
         "severity":    "LOW",
         "evolution":   "None",
+        "verdict":     "SETTLED",
+        "keywords":    "",
     }
+
+    # Strip markdown code fences if present
+    clean = raw.strip()
+    if clean.startswith("```"):
+        clean = re.sub(r"^```[a-zA-Z]*\n?", "", clean)
+        clean = re.sub(r"\n?```$", "", clean).strip()
+
+    # Tier 1: Try direct JSON parse
+    try:
+        data = json.loads(clean)
+        if isinstance(data, dict):
+            for k, v in data.items():
+                k_lower = k.lower()
+                for key in _PARSE_KEYS:
+                    if key in k_lower:
+                        result[key] = str(v).upper() if key not in ("observation", "workers", "machinery", "evolution", "keywords") else str(v)
+            if "verdict" in data:
+                result["verdict"] = str(data["verdict"]).upper()
+            if "keywords" in data:
+                result["keywords"] = str(data["keywords"])
+            return result
+    except Exception:
+        pass
+
+    # Tier 2: Try comma-healed JSON parse
+    try:
+        healed = _COMMA_HEAL_RE.sub(r'\1,\2', clean)
+        data = json.loads(healed)
+        if isinstance(data, dict):
+            for k, v in data.items():
+                k_lower = k.lower()
+                for key in _PARSE_KEYS:
+                    if key in k_lower:
+                        result[key] = str(v).upper() if key not in ("observation", "workers", "machinery", "evolution", "keywords") else str(v)
+            if "verdict" in data:
+                result["verdict"] = str(data["verdict"]).upper()
+            if "keywords" in data:
+                result["keywords"] = str(data["keywords"])
+            return result
+    except Exception:
+        pass
+
+    # Tier 3: Line-by-line formatted header parsing
     for line in raw.split("\n"):
         if ":" not in line:
             continue
@@ -473,11 +524,17 @@ def _parse_response(raw: str, cam_name: str) -> dict:
             if key in k:
                 result[key] = (
                     v.upper()
-                    if key not in ("observation", "workers", "machinery")
+                    if key not in ("observation", "workers", "machinery", "evolution")
                     else v
                 )
                 break
+        if "verdict" in k:
+            result["verdict"] = v.upper()
+        if "keyword" in k:
+            result["keywords"] = v
+
     return result
+
 
 
 def _fallback_result(cam_name: str, latency: float) -> dict:
