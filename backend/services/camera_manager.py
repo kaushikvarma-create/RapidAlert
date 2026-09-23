@@ -49,11 +49,12 @@ class CameraThread(threading.Thread):
         self.connected_mode = "OFFLINE"
 
     def run(self) -> None:
+        hw_failed_once = False
         while not self.stop_event.is_set():
             cap = None
             is_hw = False
 
-            if self.use_nvidia:
+            if self.use_nvidia and not hw_failed_once:
                 try:
                     cap = NvidiaStreamCapture(self.url, width=DEFAULT_FRAME_WIDTH, height=DEFAULT_FRAME_HEIGHT)
                     if cap.isOpened():
@@ -71,12 +72,15 @@ class CameraThread(threading.Thread):
                         severity="WARNING",
                     )
                     cap = None
+                    hw_failed_once = True
 
             if cap is None:
+                is_hw = False
                 cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, CAMERA_BUFFER_SIZE)
 
             got_frame = False
+            failed_attempts = 0
 
             while not self.stop_event.is_set():
                 if is_hw:
@@ -86,12 +90,18 @@ class CameraThread(threading.Thread):
 
                 if ok and frame is not None:
                     self.frame_store.put(self.cam_name, frame)
+                    failed_attempts = 0
                     if not got_frame:
                         got_frame = True
                         self.connected = True
                         self.connected_mode = "NVDEC" if is_hw else "CPU-OpenCV"
                         print(f"[CamMgr] ✅ {self.cam_name} connected ({self.connected_mode})")
                 else:
+                    failed_attempts += 1
+                    if is_hw and not got_frame and failed_attempts >= 2:
+                        print(f"[CamMgr] ⚠️ {self.cam_name} NVDEC bufferpool/read error; switching to CPU OpenCV fallback")
+                        hw_failed_once = True
+                        break
                     if got_frame:
                         self.connected = False
                         self.connected_mode = "DISCONNECTED"
