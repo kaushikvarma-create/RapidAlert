@@ -47,7 +47,11 @@
       </div>
     </div>
 
-    <div class="header-actions">
+      <div class="vlm-shards-pill" id="vlm-shards-pill" style="display: inline-flex; gap: 6px; align-items: center; background: var(--bg-card); border: 1px solid var(--border); padding: 3px 10px; border-radius: 20px; font-size: 0.72rem; font-family: var(--font-mono);">
+        <span style="color: var(--text-muted); font-size: 0.7rem;">MIG:</span>
+        <span id="shard-0-gauge" class="badge badge-mono" style="padding: 1px 6px; font-size: 0.68rem;">8000: [0/4]</span>
+        <span id="shard-1-gauge" class="badge badge-mono" style="padding: 1px 6px; font-size: 0.68rem;">8001: [0/4]</span>
+      </div>
       <div class="ws-pill" id="ws-pill">
         <span class="ws-dot" id="ws-dot"></span>
         <span id="ws-status">Connecting</span>
@@ -343,18 +347,23 @@
       <!-- System Drift & Heartbeat Configuration -->
       <div class="sys-settings-section" style="margin-top: 20px; padding: 16px; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);">
         <h3 style="margin-bottom: 12px; font-size: 0.95rem; display: flex; align-items: center; gap: 8px;">
-          <span>⚡</span> DINOv2 Drift & Mandatory Heartbeat Configuration
+          <span>⚡</span> DINOv2 Dual-Threshold & Surveillance Configuration
         </h3>
         <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 14px;">
           <div>
-            <label class="field-label" for="sys-input-thresh">Global Default Drift Threshold</label>
-            <input id="sys-input-thresh" type="number" step="0.005" min="0.005" max="0.5" class="input" placeholder="0.033" />
-            <small style="color: var(--text-3); font-size: 0.68rem; display:block; margin-top:4px;">Cosine shift to trigger Cosmos analysis</small>
+            <label class="field-label" for="sys-input-dino-major">Major Drift Threshold (Tier-2)</label>
+            <input id="sys-input-dino-major" type="number" step="0.005" min="0.005" max="0.5" class="input" placeholder="0.060" />
+            <small style="color: var(--text-3); font-size: 0.68rem; display:block; margin-top:4px;">Urgent shift: vehicles, new persons (Tier-2 Incident)</small>
+          </div>
+          <div>
+            <label class="field-label" for="sys-input-dino-minor">Minor Drift Threshold (Tier-3)</label>
+            <input id="sys-input-dino-minor" type="number" step="0.005" min="0.005" max="0.5" class="input" placeholder="0.030" />
+            <small style="color: var(--text-3); font-size: 0.68rem; display:block; margin-top:4px;">Subtle shift: posture, distant activity (Tier-3 Monitoring)</small>
           </div>
           <div>
             <label class="field-label" for="sys-input-hb">Global Mandatory Interval (sec)</label>
-            <input id="sys-input-hb" type="number" step="5" min="5" max="600" class="input" placeholder="30" />
-            <small style="color: var(--text-3); font-size: 0.68rem; display:block; margin-top:4px;">Forced analysis even without scene drift</small>
+            <input id="sys-input-hb" type="number" step="5" min="5" max="600" class="input" placeholder="35" />
+            <small style="color: var(--text-3); font-size: 0.68rem; display:block; margin-top:4px;">Forced routine analysis without scene drift</small>
           </div>
           <div>
             <label class="field-label" for="sys-input-cooldown">Trigger Cooldown (sec)</label>
@@ -367,14 +376,43 @@
             <small style="color: var(--text-3); font-size: 0.68rem; display:block; margin-top:4px;">Delay after trigger for temporal follow-up</small>
           </div>
           <div style="display: flex; flex-direction: column; justify-content: flex-start;">
-            <label class="field-label" for="sys-input-persistent-followup">Persistent Follow-Up</label>
+            <label class="field-label" for="sys-input-persistent-followup">Persistent Follow-Up Loop</label>
             <label style="display: inline-flex; align-items: center; gap: 8px; cursor: pointer; height: 38px; margin-top: 2px;">
               <input id="sys-input-persistent-followup" type="checkbox" style="width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer;" />
               <span style="font-size: 0.82rem; color: var(--text-1); font-weight: 500;">Enable Persistent Loop</span>
             </label>
-            <small style="color: var(--text-3); font-size: 0.68rem; display:block; margin-top:0px;">Repeat follow-ups until scene severity reduces to OK / LOW</small>
+            <small style="color: var(--text-3); font-size: 0.68rem; display:block; margin-top:0px;">Repeat follow-ups until scene reduces to OK / LOW</small>
           </div>
         </div>
+
+        <!-- Video Clipping & Retention Controls -->
+        <h3 style="margin-top: 18px; margin-bottom: 12px; font-size: 0.95rem; display: flex; align-items: center; gap: 8px;">
+          <span>🎬</span> Incident Video Clipping & Rolling Buffer Retention
+        </h3>
+        <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 14px;">
+          <div style="display: flex; flex-direction: column; justify-content: flex-start;">
+            <label class="field-label" for="sys-input-clip-enabled">Incident Video Clips</label>
+            <label style="display: inline-flex; align-items: center; gap: 8px; cursor: pointer; height: 38px; margin-top: 2px;">
+              <input id="sys-input-clip-enabled" type="checkbox" style="width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer;" />
+              <span style="font-size: 0.82rem; color: var(--text-1); font-weight: 500;">Record H.264 Clips</span>
+            </label>
+            <small style="color: var(--text-3); font-size: 0.68rem; display:block; margin-top:0px;">Auto-stitch 4-frame sequences into MP4</small>
+          </div>
+          <div style="display: flex; flex-direction: column; justify-content: flex-start;">
+            <label class="field-label" for="sys-input-clip-rolling">Auto-Prune Rolling Buffer</label>
+            <label style="display: inline-flex; align-items: center; gap: 8px; cursor: pointer; height: 38px; margin-top: 2px;">
+              <input id="sys-input-clip-rolling" type="checkbox" style="width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer;" />
+              <span style="font-size: 0.82rem; color: var(--text-1); font-weight: 500;">Enable Auto-Pruning</span>
+            </label>
+            <small style="color: var(--text-3); font-size: 0.68rem; display:block; margin-top:0px;">Prune clips past retention window</small>
+          </div>
+          <div>
+            <label class="field-label" for="sys-input-clip-retention">Retention Window (hours)</label>
+            <input id="sys-input-clip-retention" type="number" step="1" min="1" max="720" class="input" placeholder="24" />
+            <small style="color: var(--text-3); font-size: 0.68rem; display:block; margin-top:4px;">Hours to retain MP4 files before deletion</small>
+          </div>
+        </div>
+
         <div style="display:flex; align-items:center; gap:12px;">
           <button class="btn-primary" id="btn-save-sys-config">💾 Save & Hot-Reload</button>
           <span id="sys-config-saved" style="font-size: 0.75rem; color: var(--green); display: none;">✅ Hot-reloaded!</span>
@@ -504,14 +542,18 @@
         <!-- Inline Drift & Heartbeat Tuning -->
         <div class="theater-box theater-tune-box">
           <span class="theater-box-title">⚡ Quick Drift &amp; Heartbeat Tune</span>
-          <div class="theater-tune-row">
-            <label class="tune-field">
-              <span>Drift Thresh:</span>
-              <input type="number" step="0.005" min="0.005" max="0.5" id="modal-cam-thresh" class="tune-input" />
+          <div class="theater-tune-row" style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+            <label class="tune-field" title="Major drift threshold to trigger urgent Tier-2 Incident">
+              <span>Major (T2):</span>
+              <input type="number" step="0.005" min="0.005" max="0.5" id="modal-cam-major-thresh" class="tune-input" style="width: 65px;" placeholder="0.060" />
             </label>
-            <label class="tune-field">
+            <label class="tune-field" title="Minor drift threshold to trigger Tier-3 Monitoring check">
+              <span>Minor (T3):</span>
+              <input type="number" step="0.005" min="0.005" max="0.5" id="modal-cam-minor-thresh" class="tune-input" style="width: 65px;" placeholder="0.030" />
+            </label>
+            <label class="tune-field" title="Baseline periodic surveillance interval">
               <span>Heartbeat:</span>
-              <input type="number" step="5" min="5" max="600" id="modal-cam-hb" class="tune-input" />s
+              <input type="number" step="5" min="5" max="600" id="modal-cam-hb" class="tune-input" style="width: 60px;" placeholder="30" />s
             </label>
             <button class="btn-ghost btn-sm" id="btn-modal-save-tune">Apply</button>
             <span class="save-feedback" id="modal-tune-fb"></span>

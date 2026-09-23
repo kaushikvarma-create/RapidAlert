@@ -16,19 +16,27 @@ class CameraBody(BaseModel):
     normal_context_day: str = Field("", description="Expected daytime activity context to reduce false positives")
     normal_context_night: str = Field("", description="Expected nighttime activity context")
     priority: str = Field("normal", description="Priority level: 'normal', 'high', 'critical'")
-    threshold: Optional[float] = Field(None, description="Per-camera DINOv2 scene drift sensitivity override")
+    threshold: Optional[float] = Field(None, description="Legacy DINOv2 scene drift sensitivity override")
+    major_threshold: Optional[float] = Field(None, description="Per-camera DINOv2 Major Shift trigger threshold [T2]")
+    minor_threshold: Optional[float] = Field(None, description="Per-camera DINOv2 Minor Shift trigger threshold [T3]")
     heartbeat_sec: Optional[float] = Field(None, description="Per-camera periodic analysis heartbeat interval")
 
 
 class SystemConfigBody(BaseModel):
     """Payload for updating system surveillance and model configuration."""
     default_threshold: Optional[float] = Field(None, description="Global DINOv2 scene drift trigger threshold")
+    dino_major_threshold: Optional[float] = Field(None, description="Global DINOv2 Major Shift threshold [T2]")
+    dino_minor_threshold: Optional[float] = Field(None, description="Global DINOv2 Minor Shift threshold [T3]")
     default_heartbeat_sec: Optional[float] = Field(None, description="Global fallback heartbeat analysis interval")
     event_cooldown: Optional[float] = Field(None, description="Cooldown between triggers on the same camera in seconds")
     semantic_interval: Optional[float] = Field(None, description="Interval between DINOv2 frame embedding checks")
+    followup_enabled: Optional[bool] = Field(None, description="Master toggle for temporal follow-up analysis")
     followup_interval_sec: Optional[float] = Field(None, description="Delay before follow-up re-analysis in seconds")
     persistent_followup: Optional[bool] = Field(None, description="Whether follow-ups repeat until scene stabilizes")
     followup_max_cycles: Optional[int] = Field(None, description="Maximum number of persistent follow-up cycles")
+    clip_recording_enabled: Optional[bool] = Field(None, description="Enable automatic MP4 video clip recording on alerts")
+    clip_rolling_buffer_enabled: Optional[bool] = Field(None, description="Enable rolling retention window pruner for clips")
+    clip_retention_hours: Optional[float] = Field(None, description="Retention window for video clips in hours")
 
 
 class PromptBody(BaseModel):

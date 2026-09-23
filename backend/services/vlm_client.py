@@ -513,25 +513,41 @@ def _parse_response(raw: str, cam_name: str) -> dict:
     except Exception:
         pass
 
-    # Tier 3: Line-by-line formatted header parsing
+    # Tier 3: Robust regex and line-by-line fallback field extraction
     for line in raw.split("\n"):
-        if ":" not in line:
-            continue
-        k, _, v = line.partition(":")
-        k = k.strip().lower()
-        v = v.strip()
-        for key in _PARSE_KEYS:
-            if key in k:
-                result[key] = (
-                    v.upper()
-                    if key not in ("observation", "workers", "machinery", "evolution")
-                    else v
-                )
-                break
-        if "verdict" in k:
-            result["verdict"] = v.upper()
-        if "keyword" in k:
-            result["keywords"] = v
+        if ":" in line:
+            k, _, v = line.partition(":")
+            k = k.strip().lower()
+            v = v.strip().strip('"\'')
+            for key in _PARSE_KEYS:
+                if key in k:
+                    result[key] = (
+                        v.upper()
+                        if key not in ("observation", "workers", "machinery", "evolution")
+                        else v
+                    )
+                    break
+            if "verdict" in k:
+                result["verdict"] = v.upper()
+            if "keyword" in k:
+                result["keywords"] = v
+
+    # Inline regex sweeps for critical fields if still at default/unknown
+    for field in ("safety", "severity", "verdict"):
+        if result[field] in ("UNKNOWN", "LOW", "SETTLED"):
+            m = re.search(rf"\b{field}\b\s*(?:[:=]|is)?\s*[\"']?([a-zA-Z_]+)", raw, re.IGNORECASE)
+            if m:
+                extracted = m.group(1).strip().upper()
+                if field == "safety" and extracted in ("OK", "WARNING", "DANGER", "CRITICAL", "UNKNOWN"):
+                    result["safety"] = extracted
+                elif field == "severity" and extracted in ("LOW", "MEDIUM", "HIGH", "EXTREME"):
+                    result["severity"] = extracted
+                elif field == "verdict" and extracted in ("ALERT", "MONITORING", "SETTLED"):
+                    result["verdict"] = extracted
+
+    m_obs = re.search(r"\bobservation\b\s*(?:[:=]|is)?\s*[\"']?([^\"\n\r]+)", raw, re.IGNORECASE)
+    if m_obs and (not result["observation"] or result["observation"] == raw[:300]):
+        result["observation"] = m_obs.group(1).strip()
 
     return result
 

@@ -217,6 +217,8 @@ class SystemConfig(BaseModel):
     
     scene_threshold: float = DEFAULT_SCENE_THRESHOLD
     default_threshold: float = DEFAULT_SCENE_THRESHOLD
+    dino_major_threshold: float = DINO_MAJOR_THRESHOLD
+    dino_minor_threshold: float = DINO_MINOR_THRESHOLD
     default_heartbeat_sec: float = DEFAULT_HEARTBEAT_SEC
     semantic_interval: float = DEFAULT_SEMANTIC_INTERVAL
     event_cooldown: float = DEFAULT_EVENT_COOLDOWN
@@ -225,6 +227,10 @@ class SystemConfig(BaseModel):
     persistent_followup: bool = DEFAULT_PERSISTENT_FOLLOWUP
     followup_max_cycles: int = DEFAULT_FOLLOWUP_MAX_CYCLES
     
+    clip_recording_enabled: bool = True
+    clip_rolling_buffer_enabled: bool = True
+    clip_retention_hours: float = 24.0
+
     alert_severity_triggers: List[str] = Field(default_factory=lambda: list(DEFAULT_ALERT_SEVERITIES))
     alert_safety_triggers: List[str] = Field(default_factory=lambda: list(DEFAULT_ALERT_SAFETIES))
 

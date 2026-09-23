@@ -290,16 +290,25 @@ const App = {
     if (msg.prompts) this._applyPrompts(msg.prompts);
     if (msg.system) {
       this.systemConfig = msg.system;
-      const elThresh = document.getElementById('sys-input-thresh');
+      const elMajor = document.getElementById('sys-input-dino-major');
+      const elMinor = document.getElementById('sys-input-dino-minor');
       const elHb = document.getElementById('sys-input-hb');
       const elCooldown = document.getElementById('sys-input-cooldown');
       const elFollowup = document.getElementById('sys-input-followup-interval');
       const elPersistent = document.getElementById('sys-input-persistent-followup');
-      if (elThresh) elThresh.value = msg.system.default_threshold || msg.system.scene_threshold || 0.033;
-      if (elHb) elHb.value = msg.system.default_heartbeat_sec || 30;
-      if (elCooldown) elCooldown.value = msg.system.event_cooldown || 15;
+      const elClip = document.getElementById('sys-input-clip-enabled');
+      const elRolling = document.getElementById('sys-input-clip-rolling');
+      const elRetention = document.getElementById('sys-input-clip-retention');
+
+      if (elMajor) elMajor.value = msg.system.dino_major_threshold ?? 0.060;
+      if (elMinor) elMinor.value = msg.system.dino_minor_threshold ?? 0.030;
+      if (elHb) elHb.value = msg.system.default_heartbeat_sec ?? 35;
+      if (elCooldown) elCooldown.value = msg.system.event_cooldown ?? 15;
       if (elFollowup && msg.system.followup_interval_sec != null) elFollowup.value = msg.system.followup_interval_sec;
       if (elPersistent && msg.system.persistent_followup != null) elPersistent.checked = Boolean(msg.system.persistent_followup);
+      if (elClip && msg.system.clip_recording_enabled != null) elClip.checked = Boolean(msg.system.clip_recording_enabled);
+      if (elRolling && msg.system.clip_rolling_buffer_enabled != null) elRolling.checked = Boolean(msg.system.clip_rolling_buffer_enabled);
+      if (elRetention && msg.system.clip_retention_hours != null) elRetention.value = msg.system.clip_retention_hours;
     }
 
     if (msg.recent_errors && Array.isArray(msg.recent_errors)) {
@@ -313,16 +322,25 @@ const App = {
   onConfigUpdated(msg) {
     if (msg.system) {
       this.systemConfig = msg.system;
-      const elThresh = document.getElementById('sys-input-thresh');
+      const elMajor = document.getElementById('sys-input-dino-major');
+      const elMinor = document.getElementById('sys-input-dino-minor');
       const elHb = document.getElementById('sys-input-hb');
       const elCooldown = document.getElementById('sys-input-cooldown');
       const elFollowup = document.getElementById('sys-input-followup-interval');
       const elPersistent = document.getElementById('sys-input-persistent-followup');
-      if (elThresh) elThresh.value = msg.system.default_threshold || msg.system.scene_threshold || 0.033;
-      if (elHb) elHb.value = msg.system.default_heartbeat_sec || 30;
-      if (elCooldown) elCooldown.value = msg.system.event_cooldown || 15;
+      const elClip = document.getElementById('sys-input-clip-enabled');
+      const elRolling = document.getElementById('sys-input-clip-rolling');
+      const elRetention = document.getElementById('sys-input-clip-retention');
+
+      if (elMajor) elMajor.value = msg.system.dino_major_threshold ?? 0.060;
+      if (elMinor) elMinor.value = msg.system.dino_minor_threshold ?? 0.030;
+      if (elHb) elHb.value = msg.system.default_heartbeat_sec ?? 35;
+      if (elCooldown) elCooldown.value = msg.system.event_cooldown ?? 15;
       if (elFollowup && msg.system.followup_interval_sec != null) elFollowup.value = msg.system.followup_interval_sec;
       if (elPersistent && msg.system.persistent_followup != null) elPersistent.checked = Boolean(msg.system.persistent_followup);
+      if (elClip && msg.system.clip_recording_enabled != null) elClip.checked = Boolean(msg.system.clip_recording_enabled);
+      if (elRolling && msg.system.clip_rolling_buffer_enabled != null) elRolling.checked = Boolean(msg.system.clip_rolling_buffer_enabled);
+      if (elRetention && msg.system.clip_retention_hours != null) elRetention.value = msg.system.clip_retention_hours;
     }
     if (msg.cameras) {
       for (const c of msg.cameras) {
@@ -1410,10 +1428,16 @@ const App = {
 
       // Populate Quick Tune Fields
       const camCfg = cam.config || {};
-      const inpThresh = document.getElementById('modal-cam-thresh');
+      const inpMajor = document.getElementById('modal-cam-major-thresh');
+      const inpMinor = document.getElementById('modal-cam-minor-thresh');
       const inpHb = document.getElementById('modal-cam-hb');
-      if (inpThresh) inpThresh.value = camCfg.threshold !== undefined ? camCfg.threshold : (this.systemConfig?.default_threshold || 0.033);
-      if (inpHb) inpHb.value = camCfg.heartbeat_sec !== undefined ? camCfg.heartbeat_sec : (this.systemConfig?.default_heartbeat_sec || 30);
+
+      const sysMajor = this.systemConfig?.dino_major_threshold || 0.060;
+      const sysMinor = this.systemConfig?.dino_minor_threshold || 0.030;
+
+      if (inpMajor) inpMajor.value = camCfg.major_threshold !== undefined ? camCfg.major_threshold : (camCfg.threshold !== undefined ? camCfg.threshold : sysMajor);
+      if (inpMinor) inpMinor.value = camCfg.minor_threshold !== undefined ? camCfg.minor_threshold : (camCfg.threshold !== undefined ? Math.max(0.010, camCfg.threshold * 0.5) : sysMinor);
+      if (inpHb) inpHb.value = camCfg.heartbeat_sec !== undefined ? camCfg.heartbeat_sec : (this.systemConfig?.default_heartbeat_sec || 35);
     } catch (err) {
       console.error('Error populating cam modal:', err);
     }
@@ -1738,18 +1762,39 @@ const App = {
 
   async _fetchVLMEndpoints() {
     try {
-      const r = await fetch('/api/health/vlm');
-      const data = await r.json();
-      const container = document.getElementById('vlm-health-items');
-      const sysEpEl   = document.getElementById('sys-endpoints');
-      if (sysEpEl) sysEpEl.textContent = Object.keys(data).length;
-      if (container) {
-        container.innerHTML = Object.entries(data).map(([url, ok]) => `
-          <div class="vlm-health-item vlm-health-${ok ? 'ok' : 'err'}">
-            <span class="vlm-url">${this._esc(url)}</span>
-            <span class="vlm-health-status">${ok ? '✓ Online' : '✗ Offline'}</span>
-          </div>
-        `).join('');
+      const [rHealth, rStats] = await Promise.all([
+        fetch('/api/health/vlm').catch(() => null),
+        fetch('/api/vlm/stats').catch(() => null),
+      ]);
+      if (rHealth && rHealth.ok) {
+        const data = await rHealth.json();
+        const container = document.getElementById('vlm-health-items');
+        const sysEpEl   = document.getElementById('sys-endpoints');
+        if (sysEpEl) sysEpEl.textContent = Object.keys(data).length;
+        if (container) {
+          container.innerHTML = Object.entries(data).map(([url, ok]) => `
+            <div class="vlm-health-item vlm-health-${ok ? 'ok' : 'err'}">
+              <span class="vlm-url">${this._esc(url)}</span>
+              <span class="vlm-health-status">${ok ? '✓ Online' : '✗ Offline'}</span>
+            </div>
+          `).join('');
+        }
+      }
+      if (rStats && rStats.ok) {
+        const statsData = await rStats.json();
+        const shards = statsData.shards || [];
+        const g0 = document.getElementById('shard-0-gauge');
+        const g1 = document.getElementById('shard-1-gauge');
+        if (shards[0] && g0) {
+          const s0 = shards[0];
+          g0.textContent = `8000: [${s0.in_flight || 0}/${s0.max_concurrent || 4}]`;
+          g0.className = s0.healthy ? 'badge badge-green' : 'badge badge-red';
+        }
+        if (shards[1] && g1) {
+          const s1 = shards[1];
+          g1.textContent = `8001: [${s1.in_flight || 0}/${s1.max_concurrent || 4}]`;
+          g1.className = s1.healthy ? 'badge badge-green' : 'badge badge-red';
+        }
       }
     } catch { /* ignore */ }
   },
@@ -2173,23 +2218,33 @@ const App = {
     document.getElementById('btn-save-master')?.addEventListener('click', () => this._saveMasterPrompt());
     document.getElementById('btn-save-followup')?.addEventListener('click', () => this._saveFollowupPrompt());
 
-    // Save System Config (Threshold, Heartbeat, Cooldown, Followup Delay & Persistent Followup)
+    // Save System Config
     document.getElementById('btn-save-sys-config')?.addEventListener('click', async () => {
-      const thresh = parseFloat(document.getElementById('sys-input-thresh')?.value);
+      const dinoMajor = parseFloat(document.getElementById('sys-input-dino-major')?.value);
+      const dinoMinor = parseFloat(document.getElementById('sys-input-dino-minor')?.value);
       const hb = parseFloat(document.getElementById('sys-input-hb')?.value);
       const cooldown = parseFloat(document.getElementById('sys-input-cooldown')?.value);
       const followup = parseFloat(document.getElementById('sys-input-followup-interval')?.value);
       const persistent = document.getElementById('sys-input-persistent-followup')?.checked;
+      const clipEnabled = document.getElementById('sys-input-clip-enabled')?.checked;
+      const clipRolling = document.getElementById('sys-input-clip-rolling')?.checked;
+      const clipRetention = parseFloat(document.getElementById('sys-input-clip-retention')?.value);
+
       try {
         const res = await fetch('/api/config', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            default_threshold: isNaN(thresh) ? undefined : thresh,
+            dino_major_threshold: isNaN(dinoMajor) ? undefined : dinoMajor,
+            dino_minor_threshold: isNaN(dinoMinor) ? undefined : dinoMinor,
+            default_threshold: isNaN(dinoMajor) ? undefined : dinoMajor,
             default_heartbeat_sec: isNaN(hb) ? undefined : hb,
             event_cooldown: isNaN(cooldown) ? undefined : cooldown,
             followup_interval_sec: isNaN(followup) ? undefined : followup,
             persistent_followup: persistent,
+            clip_recording_enabled: clipEnabled,
+            clip_rolling_buffer_enabled: clipRolling,
+            clip_retention_hours: isNaN(clipRetention) ? undefined : clipRetention,
           })
         });
         if (res.ok) {
@@ -2205,39 +2260,18 @@ const App = {
       }
     });
 
-    // Camera Matrix Filter buttons
-    document.querySelectorAll('.filter-chip').forEach(btn => {
-      btn.addEventListener('click', () => {
-        document.querySelectorAll('.filter-chip').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        this.activeFilter = btn.dataset.filter;
-        this._renderCameraGrid();
-      });
-    });
-
-    // Alerts Feed Filter tabs
-    document.querySelectorAll('.alert-filter-tab').forEach(btn => {
-      btn.addEventListener('click', () => {
-        document.querySelectorAll('.alert-filter-tab').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        this.activeAlertFilter = btn.dataset.alertFilter;
-        this._applyAlertFilter();
-      });
-    });
-
-    // Theater Modal Save Normal Context (day / night)
-    document.getElementById('btn-modal-save-context')?.addEventListener('click', () => this._saveModalContext());
-
-
     // Theater Modal Save Drift/Heartbeat Tune
     document.getElementById('btn-modal-save-tune')?.addEventListener('click', async () => {
       const name = this.activeCamModal;
       if (!name) return;
-      const thresh = parseFloat(document.getElementById('modal-cam-thresh')?.value);
+      const major = parseFloat(document.getElementById('modal-cam-major-thresh')?.value);
+      const minor = parseFloat(document.getElementById('modal-cam-minor-thresh')?.value);
       const hb = parseFloat(document.getElementById('modal-cam-hb')?.value);
       const fb = document.getElementById('modal-tune-fb');
       const currentCfg = { ...(this.cameras[name]?.config || { name: name, url: '' }) };
-      if (!isNaN(thresh)) currentCfg.threshold = thresh;
+      if (!isNaN(major)) currentCfg.major_threshold = major;
+      if (!isNaN(minor)) currentCfg.minor_threshold = minor;
+      if (!isNaN(major)) currentCfg.threshold = major;
       if (!isNaN(hb)) currentCfg.heartbeat_sec = hb;
       this.cameras[name].config = currentCfg;
       await this._apiUpsertCamera(currentCfg);

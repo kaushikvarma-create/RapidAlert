@@ -26,6 +26,7 @@ from backend.services.vlm_client import VLMPool
 from backend.services.prompt_manager import PromptManager
 from backend.services.result_store import ResultStore
 from backend.services.alert_engine import AlertEngine
+from backend.services.priority_queue import PriorityQueueAdapter
 from backend.core.config import (
     DEFAULT_VLM_MODEL,
     DEFAULT_HEARTBEAT_SEC,
@@ -97,6 +98,8 @@ class DeadlineScheduler:
         self.followup_interval_sec: float = DEFAULT_FOLLOWUP_INTERVAL
         self.persistent_followup: bool = DEFAULT_PERSISTENT_FOLLOWUP
         self.followup_max_cycles: int = DEFAULT_FOLLOWUP_MAX_CYCLES
+        self.clip_retention_hours: float = 24.0
+        self.clip_rolling_buffer_enabled: bool = True
         self._followup_tasks: set[asyncio.Task] = set()
 
     def get_cam_heartbeat_interval(self, cam_name: str) -> float:
@@ -137,7 +140,8 @@ class DeadlineScheduler:
     # ── Lifecycle ───────────────────────────────────────────────────
 
     async def start(self) -> None:
-        self._queue = asyncio.PriorityQueue()
+        self._queue = PriorityQueueAdapter()
+        await self._queue.start()
         self._running = True
         self._workers = [
             asyncio.create_task(self._worker(i), name=f"vlm-worker-{i}")
@@ -147,6 +151,7 @@ class DeadlineScheduler:
             asyncio.create_task(self._feed_loop(), name="scheduler-feed"),
             asyncio.create_task(self._tune_loop(), name="scheduler-tune"),
             asyncio.create_task(self._metrics_loop(), name="scheduler-metrics"),
+            asyncio.create_task(self._clip_pruner_loop(), name="scheduler-clip-pruner"),
         ]
         print(
             f"[Scheduler] ✅ Started — {self._concurrency} workers, "
@@ -165,13 +170,17 @@ class DeadlineScheduler:
         self._followup_tasks.clear()
         self._workers.clear()
         self._bg_tasks.clear()
+        if self._queue:
+            await self._queue.stop()
 
     def set_concurrency_limit(self, n: int) -> None:
         """Manually set target concurrency (dashboard override)."""
         self._max_concurrency = max(self.MIN_WORKERS, n)
 
+    # ── Priority Tier Enqueueing ────────────────────────────────────
+
     async def queue_incident(self, incident: dict) -> None:
-        """Enqueue a high-priority DINOv2 incident trigger."""
+        """Enqueue a prioritized incident trigger (Tier-1 Follow-Up, Tier-2 Major, Tier-3 Minor)."""
         if not self._running or self._queue is None:
             return
         cam_name = incident.get("cam", "")
@@ -179,15 +188,20 @@ class DeadlineScheduler:
         if cam_name in self._in_flight:
             return
         self._in_flight.add(cam_name)
-        await self._queue.put((0, self._next_seq(), incident))
-        print(f"[Scheduler] 📥 Queued incident for {cam_name} (Priority 0)")
+        tier = incident.get("tier", 2)
+        # Tier-1 (Followup) and Tier-2 (Major Shift): Priority 0
+        # Tier-3 (Minor Shift / Monitoring): Priority 1
+        priority = 0 if tier <= 2 else 1
+        await self._queue.put((priority, self._next_seq(), incident))
+        tag = "Major" if tier == 2 else ("Minor" if tier == 3 else "Follow-Up")
+        print(f"[Scheduler] 📥 Queued {tag} incident for {cam_name} (Tier-{tier}, Priority {priority})")
 
     # ── Feed loop (Heartbeat check for quiet cameras) ───────────────
 
     async def _feed_loop(self) -> None:
         """
         Background heartbeat loop: checks for cameras that have been quiet
-        without an incident and queues a low-priority refresh.
+        without an incident and queues a Tier-4 low-priority refresh.
         """
         while self._running:
             try:
@@ -207,8 +221,9 @@ class DeadlineScheduler:
                         key=lambda c: now - self._last_analyzed.get(c, 0),
                     )
                     self._in_flight.add(cam)
-                    job = {"cam": cam, "is_heartbeat": True}
-                    await self._queue.put((1, self._next_seq(), job))
+                    job = {"cam": cam, "is_heartbeat": True, "tier": 4}
+                    # Tier-4 Routine Heartbeat: Priority 2 (yields to any T1/T2/T3)
+                    await self._queue.put((2, self._next_seq(), job))
                     await asyncio.sleep(self.FEED_TICK)
                 else:
                     await asyncio.sleep(self.IDLE_TICK)
@@ -584,3 +599,21 @@ class DeadlineScheduler:
                     effect="Metrics broadcast loop failed to dispatch telemetry",
                     severity="WARNING",
                 )
+
+    async def _clip_pruner_loop(self) -> None:
+        """Periodic background pruner for expired video clips (runs every 300s)."""
+        while self._running:
+            try:
+                await asyncio.sleep(300)
+                if self.storage and self.clip_rolling_buffer_enabled:
+                    await asyncio.to_thread(self.storage.prune_expired_clips, self.clip_retention_hours)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                error_tracker.capture_exception(
+                    exc,
+                    component="Scheduler",
+                    effect="Background clip pruner loop encountered an unexpected error",
+                    severity="WARNING",
+                )
+

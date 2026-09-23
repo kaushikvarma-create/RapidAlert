@@ -116,6 +116,8 @@ scene_trigger = SceneTriggerEngine(
     model_name=sys_cfg.dinov2_model,
     device="cpu",
     default_threshold=sys_cfg.scene_threshold,
+    major_threshold=sys_cfg.dino_major_threshold,
+    minor_threshold=sys_cfg.dino_minor_threshold,
     semantic_interval=sys_cfg.semantic_interval,
     event_cooldown=sys_cfg.event_cooldown,
 )
@@ -185,6 +187,7 @@ async def _config_sync_loop() -> None:
                     cfg = config_manager.load()
                     
                     scene_trigger.set_default_threshold(cfg.default_threshold)
+                    scene_trigger.set_thresholds(cfg.dino_major_threshold, cfg.dino_minor_threshold)
                     scheduler.default_heartbeat_sec = cfg.default_heartbeat_sec
                     scene_trigger.event_cooldown = cfg.event_cooldown
                     scene_trigger.semantic_interval = cfg.semantic_interval
@@ -192,9 +195,9 @@ async def _config_sync_loop() -> None:
                     scheduler.persistent_followup = cfg.persistent_followup
 
                     print(
-                        f"[Main] 🔄 Hot-reloaded system.json (default_thresh: {cfg.default_threshold}, "
-                        f"hb: {cfg.default_heartbeat_sec}s, followup: {scheduler.followup_interval_sec}s, "
-                        f"persistent: {scheduler.persistent_followup})"
+                        f"[Main] 🔄 Hot-reloaded system.json (major_thresh: {cfg.dino_major_threshold}, "
+                        f"minor_thresh: {cfg.dino_minor_threshold}, hb: {cfg.default_heartbeat_sec}s, "
+                        f"followup: {scheduler.followup_interval_sec}s, persistent: {scheduler.persistent_followup})"
                     )
                     await ws_manager.broadcast({
                         "type": "config_updated",
@@ -385,6 +388,9 @@ def api_get_config():
 
 
 @app.post("/api/config")
+@app.patch("/api/config")
+@app.post("/api/config/system")
+@app.patch("/api/config/system")
 async def api_update_system_config(body: SystemConfigBody):
     updates = body.model_dump(exclude_none=True)
     if not updates:
@@ -392,6 +398,11 @@ async def api_update_system_config(body: SystemConfigBody):
 
     try:
         cfg = config_manager.update(updates)
+        if "dino_major_threshold" in updates or "dino_minor_threshold" in updates:
+            scene_trigger.set_thresholds(
+                float(cfg.dino_major_threshold),
+                float(cfg.dino_minor_threshold),
+            )
         if "default_threshold" in updates or "scene_threshold" in updates:
             scene_trigger.set_default_threshold(cfg.default_threshold)
         if "default_heartbeat_sec" in updates:
@@ -404,6 +415,13 @@ async def api_update_system_config(body: SystemConfigBody):
             scheduler.followup_interval_sec = float(cfg.followup_interval_sec)
         if "persistent_followup" in updates:
             scheduler.persistent_followup = bool(cfg.persistent_followup)
+        if "clip_retention_hours" in updates:
+            scheduler.clip_retention_hours = float(cfg.clip_retention_hours)
+        if "clip_rolling_buffer_enabled" in updates:
+            scheduler.clip_rolling_buffer_enabled = bool(cfg.clip_rolling_buffer_enabled)
+        if "clip_recording_enabled" in updates:
+            if hasattr(alert_engine, "clip_recorder") and alert_engine.clip_recorder:
+                alert_engine.clip_recorder.enabled = bool(cfg.clip_recording_enabled)
 
         await ws_manager.broadcast({
             "type": "config_updated",

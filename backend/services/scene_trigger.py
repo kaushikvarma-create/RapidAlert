@@ -135,20 +135,20 @@ class SceneTriggerEngine:
                         distance = float(1.0 - np.dot(prev_emb, emb))
                         self.latest_drifts[cam_name] = round(distance, 4)
 
-                        # Check thresholds and cooldown
-                        threshold = self._get_cam_threshold(cam_name)
+                        # Check dual thresholds and cooldown
+                        cam_major, cam_minor = self._get_cam_thresholds(cam_name)
                         cooldown_elapsed = (now - self._last_event_time.get(cam_name, 0)) >= self.event_cooldown
 
-                        is_major = distance >= self.major_threshold
-                        is_minor = distance >= self.minor_threshold
-                        is_legacy = distance >= threshold
+                        is_major = distance >= cam_major
+                        is_minor = distance >= cam_minor
 
-                        if (is_major or is_minor or is_legacy) and cooldown_elapsed:
+                        if (is_major or is_minor) and cooldown_elapsed:
                             self._last_event_time[cam_name] = now
                             t_trigger = time.monotonic()
-                            tier = 2 if (is_major or distance >= threshold) else 3
+                            tier = 2 if is_major else 3
                             tag = "MAJOR SCENE SHIFT" if tier == 2 else "MINOR SCENE SHIFT"
-                            thresh_str = f"major_threshold: {self.major_threshold:.4f}" if tier == 2 else f"minor_threshold: {self.minor_threshold:.4f}"
+                            thresh_val = cam_major if tier == 2 else cam_minor
+                            thresh_str = f"major_threshold: {thresh_val:.4f}" if tier == 2 else f"minor_threshold: {thresh_val:.4f}"
                             print(
                                 f"[SceneTrigger] {'🚨' if tier == 2 else '⚠️ '} {tag} on {cam_name}! "
                                 f"Drift: {distance:.4f} ({thresh_str}) → Tier-{tier}"
@@ -201,23 +201,43 @@ class SceneTriggerEngine:
 
     def set_default_threshold(self, val: float) -> None:
         self.default_threshold = float(val)
-        print(f"[SceneTrigger] Global default drift threshold updated to: {self.default_threshold:.4f}")
+        self.major_threshold = float(val)
 
-    def _get_cam_threshold(self, cam_name: str) -> float:
+    def set_thresholds(self, major: float, minor: float) -> None:
+        self.major_threshold = float(major)
+        self.minor_threshold = float(minor)
+        print(f"[SceneTrigger] Dual drift thresholds updated → Major(T2): {self.major_threshold:.4f}, Minor(T3): {self.minor_threshold:.4f}")
+
+    def _get_cam_thresholds(self, cam_name: str) -> tuple[float, float]:
+        """Returns (major_threshold, minor_threshold) for a given camera feed."""
         cams = self.camera_manager.get_config()
         for c in cams:
-            if c.get("name") == cam_name and c.get("threshold") is not None:
+            if c.get("name") == cam_name:
                 try:
-                    return float(c["threshold"])
+                    c_major = c.get("major_threshold")
+                    c_minor = c.get("minor_threshold")
+                    legacy = c.get("threshold")
+                    
+                    if c_major is not None and c_minor is not None:
+                        return float(c_major), float(c_minor)
+                    elif c_major is not None:
+                        return float(c_major), max(0.010, float(c_major) * 0.5)
+                    elif legacy is not None:
+                        # Legacy single threshold: treat as major, and minor as 50%
+                        val = float(legacy)
+                        return val, max(0.010, val * 0.5)
                 except (ValueError, TypeError) as exc:
                     error_tracker.capture_exception(
                         exc,
                         component="SceneTrigger",
                         camera=cam_name,
-                        effect=f"Invalid threshold for {cam_name}; using global threshold {self.default_threshold}",
+                        effect=f"Invalid threshold for {cam_name}; using global thresholds",
                         severity="WARNING",
                     )
-        return float(self.default_threshold)
+        return float(self.major_threshold), float(self.minor_threshold)
+
+    def _get_cam_threshold(self, cam_name: str) -> float:
+        return self._get_cam_thresholds(cam_name)[0]
 
     async def _collect_incident(
         self,

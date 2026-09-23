@@ -345,3 +345,68 @@ class StorageManager:
                 severity="WARNING",
             )
             return 0
+
+    def search(
+        self,
+        query: Optional[str] = None,
+        cam: Optional[str] = None,
+        verdict: Optional[str] = None,
+        severity: Optional[str] = None,
+        safety: Optional[str] = None,
+        tier: Optional[int] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict]:
+        """Keyword and metadata search across stored analyses."""
+        return self.query(
+            cam=cam,
+            severity=severity or verdict,
+            safety=safety,
+            search=query,
+            limit=limit,
+            offset=offset,
+        )
+
+    def prune_expired_clips(self, retention_hours: float) -> int:
+        """
+        Deletes video clip files on disk and nullifies clip_path in DB
+        for incidents older than retention_hours.
+        """
+        if retention_hours <= 0:
+            return 0
+        cutoff_ts = time.time() - (retention_hours * 3600.0)
+        pruned_count = 0
+        try:
+            conn = self._conn()
+            rows = conn.execute(
+                "SELECT id, clip_path FROM analyses WHERE clip_path IS NOT NULL AND ts < ?",
+                (cutoff_ts,),
+            ).fetchall()
+
+            for r in rows:
+                row_id = r["id"]
+                clip_path_str = r["clip_path"]
+                if clip_path_str:
+                    try:
+                        p = Path(clip_path_str)
+                        if not p.is_absolute():
+                            p = Path("data") / clip_path_str
+                        if p.exists():
+                            p.unlink()
+                    except Exception as e:
+                        pass
+                conn.execute("UPDATE analyses SET clip_path = NULL WHERE id = ?", (row_id,))
+                pruned_count += 1
+
+            if pruned_count > 0:
+                conn.commit()
+                print(f"[Storage] 🧹 Pruned {pruned_count} expired video clips (retention: {retention_hours}h)")
+        except Exception as exc:
+            error_tracker.capture_exception(
+                exc,
+                component="StorageManager",
+                effect=f"Failed to prune expired video clips older than {retention_hours}h",
+                severity="WARNING",
+            )
+        return pruned_count
+
