@@ -100,6 +100,27 @@
         <!-- Live camera cards injected dynamically -->
       </div>
 
+      <!-- Camera Grid 4-Stream Pagination Controls -->
+      <div class="cam-pagination-bar" id="cam-pagination-bar" style="display: none;">
+        <div class="cam-pagination-info">
+          <span class="cam-pagination-icon">📑</span>
+          <span id="cam-pagination-text">Showing 1–4 of 7 cameras</span>
+        </div>
+        <div class="cam-pagination-controls">
+          <button class="btn-page-nav" id="btn-cam-prev-page" title="Previous Page" aria-label="Previous Page">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
+            <span>Prev</span>
+          </button>
+          <div class="cam-page-pills" id="cam-page-pills">
+            <!-- Dynamic Page Pills: [1] [2] -->
+          </div>
+          <button class="btn-page-nav" id="btn-cam-next-page" title="Next Page" aria-label="Next Page">
+            <span>Next</span>
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+          </button>
+        </div>
+      </div>
+
       <div class="empty-state" id="empty-camera-grid" style="display: none;">
         <div class="empty-icon">📷</div>
         <p>No active cameras found</p>
