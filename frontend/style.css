@@ -535,50 +535,37 @@ code { font-family: var(--font-mono); font-size: 0.82em; color: var(--accent); b
   }
 }
 
-/* Camera Grid 4-Stream Pagination Bar */
+/* Camera Grid 4-Stream Top Pagination Bar (multicam_behavior_test style) */
 .cam-pagination-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 18px;
-  border: 1px solid var(--border);
-  background: var(--bg-card);
-  margin: 0 20px 20px 20px;
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-sm);
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.cam-pagination-info {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 8px;
-  font-size: 0.76rem;
-  color: var(--text-2);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+  border-radius: 24px;
+  box-shadow: var(--shadow-sm);
+}
+
+.cam-page-indicator {
+  font-size: 0.78rem;
+  font-weight: 700;
   font-family: var(--font-mono);
-}
-
-.cam-pagination-icon {
-  font-size: 0.9rem;
-}
-
-.cam-pagination-controls {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  color: var(--text);
+  padding: 0 4px;
+  white-space: nowrap;
 }
 
 .btn-page-nav {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 5px 12px;
-  border-radius: var(--radius-sm);
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 16px;
   background: var(--surface);
   border: 1px solid var(--border);
   color: var(--text);
-  font-size: 0.75rem;
+  font-size: 0.74rem;
   font-weight: 600;
   cursor: pointer;
   transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
@@ -604,21 +591,21 @@ code { font-family: var(--font-mono); font-size: 0.82em; color: var(--accent); b
 }
 
 .cam-page-pill {
-  min-width: 28px;
-  height: 28px;
+  min-width: 24px;
+  height: 24px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--radius-sm);
+  border-radius: 12px;
   background: var(--surface);
   border: 1px solid var(--border);
   color: var(--text-2);
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   font-family: var(--font-mono);
   font-weight: 700;
   cursor: pointer;
   transition: all 0.15s ease;
-  padding: 0 6px;
+  padding: 0 4px;
 }
 
 .cam-page-pill:hover:not(.active) {

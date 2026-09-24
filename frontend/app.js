@@ -568,23 +568,36 @@ const App = {
     if (!pager) return;
 
     if (totalCams <= this.camsPerPage) {
-      pager.style.display = totalCams > 0 ? 'flex' : 'none';
-      if (textEl) textEl.textContent = `Showing all ${totalCams} cameras (Page 1 of 1)`;
-      if (btnPrev) btnPrev.disabled = true;
-      if (btnNext) btnNext.disabled = true;
+      pager.style.display = totalCams > 0 ? 'inline-flex' : 'none';
+      if (textEl) textEl.textContent = `Page 1 of 1`;
+      if (btnPrev) {
+        btnPrev.disabled = true;
+        btnPrev.style.opacity = '0.5';
+      }
+      if (btnNext) {
+        btnNext.disabled = true;
+        btnNext.style.opacity = '0.5';
+      }
       if (pillsContainer) {
         pillsContainer.innerHTML = `<button class="cam-page-pill active" data-page="1">1</button>`;
       }
       return;
     }
 
-    pager.style.display = 'flex';
+    pager.style.display = 'inline-flex';
     if (textEl) {
-      textEl.textContent = `Showing ${startIndex + 1}–${endIndex} of ${totalCams} cameras (Page ${this.camCurrentPage} of ${totalPages})`;
+      textEl.textContent = `Page ${this.camCurrentPage} of ${totalPages}`;
+      textEl.title = `Showing cameras ${startIndex + 1}–${endIndex} of ${totalCams}`;
     }
 
-    if (btnPrev) btnPrev.disabled = (this.camCurrentPage <= 1);
-    if (btnNext) btnNext.disabled = (this.camCurrentPage >= totalPages);
+    if (btnPrev) {
+      btnPrev.disabled = (this.camCurrentPage <= 1);
+      btnPrev.style.opacity = (this.camCurrentPage <= 1) ? '0.5' : '1';
+    }
+    if (btnNext) {
+      btnNext.disabled = (this.camCurrentPage >= totalPages);
+      btnNext.style.opacity = (this.camCurrentPage >= totalPages) ? '0.5' : '1';
+    }
 
     if (pillsContainer) {
       let pillsHtml = '';
@@ -595,9 +608,27 @@ const App = {
     }
   },
 
+  changePage(delta) {
+    const eligibleCams = Object.keys(this.cameras).filter(n => this._shouldShowCamCard(n));
+    const totalPages = Math.max(1, Math.ceil(eligibleCams.length / this.camsPerPage));
+    let target = this.camCurrentPage + delta;
+    if (target < 1) target = 1;
+    if (target > totalPages) target = totalPages;
+    this.setCamPage(target);
+  },
+
   setCamPage(page) {
     this.camCurrentPage = page;
     this._renderCameraGrid();
+  },
+
+  _isCamOnCurrentPage(name) {
+    if (!this._shouldShowCamCard(name)) return false;
+    const eligibleCams = Object.keys(this.cameras).filter(n => this._shouldShowCamCard(n));
+    const startIndex = (this.camCurrentPage - 1) * this.camsPerPage;
+    const endIndex = startIndex + this.camsPerPage;
+    const pageSlice = eligibleCams.slice(startIndex, endIndex);
+    return pageSlice.includes(name);
   },
 
   _shouldShowCamCard(name) {
@@ -767,6 +798,7 @@ const App = {
     // Ensure card attributes for event delegation
     card.setAttribute('data-cam', name);
     card.style.cursor = 'pointer';
+    card.style.display = this._isCamOnCurrentPage(name) ? 'flex' : 'none';
 
     // If modal is open for this camera, refresh its live frame/stats
     if (this.activeCamModal === name) {
@@ -2243,15 +2275,13 @@ const App = {
       });
     });
 
-    // Camera pagination navigation
+    // Camera pagination navigation (multicam_behavior_test style)
     document.getElementById('btn-cam-prev-page')?.addEventListener('click', () => {
-      if (this.camCurrentPage > 1) {
-        this.setCamPage(this.camCurrentPage - 1);
-      }
+      this.changePage(-1);
     });
 
     document.getElementById('btn-cam-next-page')?.addEventListener('click', () => {
-      this.setCamPage(this.camCurrentPage + 1);
+      this.changePage(1);
     });
 
     document.getElementById('cam-page-pills')?.addEventListener('click', (e) => {
@@ -2702,5 +2732,9 @@ const App = {
     }
   },
 };
+
+// Global helper exports for inline handlers / external invocation (multicam_behavior_test style)
+window.changePage = (delta) => App.changePage(delta);
+window.setCamPage = (page) => App.setCamPage(page);
 
 document.addEventListener('DOMContentLoaded', () => App.init());
