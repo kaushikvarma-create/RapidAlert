@@ -240,56 +240,19 @@ if [[ "$AUTO_START_VLLM" == "true" ]]; then
                     --disable-log-stats \
                     --no-enable-log-requests"
 
-            # Stream logs while we wait
-            docker logs -f "${CNAME}" 2>&1 | sed "s/^/  ${YELLOW}[${CNAME}]${NC} /" &
-            LOG_PIDS+=($!)
-
-            log "Waiting for ${CNAME} on port ${PORT} to become ready..."
-            MAX_WAIT=600
-            ELAPSED=0
-            while true; do
-                if curl -sf "${C_API_URL}" >/dev/null 2>&1; then
-                    ok "${CNAME} is ready."
-                    break
-                fi
-                if ! docker ps -q --filter "name=${CNAME}" | grep -q .; then
-                    echo ""
-                    die "${CNAME} crashed! Check logs."
-                fi
-                if [[ ${ELAPSED} -ge ${MAX_WAIT} ]]; then
-                    die "${CNAME} did not become ready within ${MAX_WAIT}s."
-                fi
-                sleep 5
-                ELAPSED=$((ELAPSED + 5))
-            done
-
-            # Kill this container's log tailer now it's healthy
-            if [[ ${#LOG_PIDS[@]} -gt 0 ]]; then
-                _last="${LOG_PIDS[-1]}"
-                kill -0 "$_last" 2>/dev/null && kill "$_last" 2>/dev/null || true
-                unset 'LOG_PIDS[-1]'
-            fi
-        fi
-    done
-
     echo ""
-    ok "All ${VLLM_INSTANCES} vLLM instances are online and ready."
+    log "vLLM containers initialized. Starting backend & dashboard immediately..."
 else
     warn "vLLM auto-start disabled via config/flag. Assuming model is running externally."
 fi
 
 echo ""
 echo "  ─────────────────────────────────────────────────────"
-log "Launching RapidAlert Dashboard ..."
+log "Launching RapidAlert Dashboard & Surveillance Backend ..."
 echo "  ─────────────────────────────────────────────────────"
 echo ""
 
 # ── MIG device selection for backend (DeepStream NVDEC + DINOv2) ────────────
-# In MIG mode the raw "GPU 0" is not directly accessible. We pin the backend
-# process to the first MIG UUID (GI=1, the larger 12SM/2g slice) so that
-# GStreamer nvvideoconvert, NVDEC buffer pools and PyTorch/DINOv2 all see a
-# valid CUDA device. The VLLM containers are pinned independently by their own
-# CUDA_VISIBLE_DEVICES set in the docker run commands above.
 BACKEND_MIG_UUID=$(python3 -c "
 import json
 d = json.load(open('config/system.json'))
@@ -306,14 +269,14 @@ fi
 
 mkdir -p logs data
 
-# ── Run the dashboard ────────────────────────────────────────────────
+# ── Run the dashboard backend ────────────────────────────────────────
 python3 -m uvicorn backend.main:app \
   --host 0.0.0.0 \
   --port "${DASHBOARD_PORT}" \
   --log-level info &
 UVICORN_PID=$!
 
-# Auto-open dashboard in browser for immediate monitoring across desktop sessions
+# Auto-open dashboard in browser immediately across desktop sessions
 (
   sleep 1.2
   TARGET_URL="http://localhost:${DASHBOARD_PORT}"
@@ -337,5 +300,23 @@ echo -e "${BOLD}${GREEN}  ║   RapidAlert AI Surveillance Dashboard is LIVE!   
 echo -e "${BOLD}${GREEN}  ║   Access URL: ${CYAN}http://localhost:${DASHBOARD_PORT}${GREEN}                                ║${NC}"
 echo -e "${BOLD}${GREEN}  ╚═══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
+
+# Monitor vLLM container readiness in background
+if [[ "$AUTO_START_VLLM" == "true" ]]; then
+    (
+        for (( i=0; i<VLLM_INSTANCES; i++ )); do
+            PORT=$(( VLLM_PORT_START + i ))
+            CNAME="rapidalert_vllm_${i}"
+            C_API_URL="http://localhost:${PORT}/v1/models"
+            while true; do
+                if curl -sf "${C_API_URL}" >/dev/null 2>&1; then
+                    echo -e "\n${GREEN}[$(date '+%H:%M:%S')] ✅ ${CNAME} (port ${PORT}) is online and ready.${NC}"
+                    break
+                fi
+                sleep 3
+            done
+        done
+    ) &
+fi
 
 wait $UVICORN_PID
