@@ -88,6 +88,30 @@ async def get_gpu_util() -> int:
     except Exception:
         pass
 
+    # Probe 3: Jetson Thor NVML Power & Dynamic Activity fallback (MIG mode support)
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        dev = pynvml.nvmlDeviceGetHandleByIndex(0)
+        # Try direct utilization rates first
+        try:
+            util = pynvml.nvmlDeviceGetUtilizationRates(dev)
+            if util and util.gpu is not None:
+                return int(util.gpu)
+        except Exception:
+            pass
+        
+        # When MIG mode reports Not Supported for SM %, calculate dynamic GPU load from active power draw
+        # Jetson Thor baseline idle is ~18W, dynamic TDP cap is ~120W
+        pwr_mw = pynvml.nvmlDeviceGetPowerUsage(dev)
+        if pwr_mw and pwr_mw > 0:
+            pwr_w = pwr_mw / 1000.0
+            # Scale power consumption between idle floor (18W) and TDP max (120W)
+            dynamic_pct = max(0, min(100, int(((pwr_w - 18.0) / (120.0 - 18.0)) * 100)))
+            return dynamic_pct
+    except Exception:
+        pass
+
     # All methods failed
     now = time.time()
     if now - _LAST_GPU_WARN > 300:
