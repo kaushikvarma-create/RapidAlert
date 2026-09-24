@@ -9,7 +9,7 @@
       "weight": 3,
       "max_concurrent": 4,
       "queue_depth": 12,
-      "gpu_utilization": 0.45
+      "gpu_utilization": 0.35
     },
     {
       "url": "http://localhost:8001",
@@ -20,7 +20,7 @@
       "weight": 2,
       "max_concurrent": 4,
       "queue_depth": 12,
-      "gpu_utilization": 0.45
+      "gpu_utilization": 0.28
     }
   ],
   "auto_start_vllm": true,
