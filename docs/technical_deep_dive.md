@@ -61,6 +61,12 @@ Total Unified Physical Memory: 122.8 GiB (128 GB)
 └── Uncommitted Safety Headroom ───────────────────────── 16.5 GiB (Burst Concurrency & Zero-OOM Buffer)
 ```
 
+### 2.3 Dynamic NVML Power-Curve GPU Utilization Engine
+Under Jetson Thor MIG mode, traditional static driver utilization queries return discrete sub-partition metrics. RapidAlert implements a unified **NVML Dynamic Power-Curve Model** (`backend/services/metrics_monitor.py`):
+$$\text{Activity } (\%) = \min\left(100, \max\left(0, \frac{\text{Power}_{\text{NVML}} - P_{\text{idle}}}{P_{\text{max}} - P_{\text{idle}}} \times 100\right)\right)$$
+* $P_{\text{idle}} = 18.0\text{ W}$ (Baseline idle platform power).
+* $P_{\text{max}} = 120.0\text{ W}$ (Full compute saturation under Dual-MIG parallel inference).
+
 ---
 
 ## 3. Multi-Instance GPU (MIG) & Container Virtualization
@@ -110,8 +116,6 @@ docker run -d \
     vllm serve "vrfai/Cosmos-Reason2-8B-NVFP4" --port 8001 --gpu-memory-utilization 0.30 ...
 ```
 
-Inside each container, CUDA initializes exclusively against its isolated hardware slice with zero cross-container memory contention or context thrashing.
-
 ---
 
 ## 4. Ingestion Pipeline: DeepStream NVDEC & FrameStore
@@ -147,9 +151,9 @@ flowchart LR
     DINO --> EMBED["384-Dim Embedding Vector E(t)"]
     EMBED --> DRIFT["Cosine Distance vs Baseline E(0)"]
     DRIFT --> EVAL{"Drift Value"}
-    EVAL -->|">= 0.060"| MAJOR["🚨 Major Shift (P0)<br>Tier-2 Emergency VLM"]
+    EVAL -->|">= 0.060"| MAJOR["🚨 Major Shift (P1)<br>Tier-2 Emergency VLM"]
     EVAL -->|">= 0.030"| MINOR["⚠️ Minor Shift (P1)<br>Tier-3 Scene Shift VLM"]
-    EVAL -->|"< 0.030 & > 35s"| HB["💓 Periodic Audit (P2)<br>Tier-4 Heartbeat VLM"]
+    EVAL -->|"< 0.030 & > 35s"| HB["💓 Periodic Audit (P3)<br>Tier-4 Heartbeat VLM"]
 ```
 
 ### 5.1 Cosine Distance Metric
@@ -173,16 +177,16 @@ When a trigger fires, RapidAlert constructs a multi-image payload with explicit 
 You are RapidAlert Edge Reasoning Engine running on NVIDIA Jetson AGX Thor.
 Analyze the 4-frame temporal sequence below. Frames are ordered sequentially from t-3 to t-0.
 
-[FRAME 1: t-3 (Baseline Context)]
+[FRAME 1: t -10.0s (Baseline Context)]
 <image_token_1>
 
-[FRAME 2: t-2 (Pre-Incident Initiation)]
+[FRAME 2: t -6.5s (Pre-Incident Initiation)]
 <image_token_2>
 
-[FRAME 3: t-1 (Incident Development)]
+[FRAME 3: t -3.0s (Incident Development)]
 <image_token_3>
 
-[FRAME 4: t-0 (Current Trigger State)]
+[FRAME 4: t 0.0s (Current Trigger State)]
 <image_token_4>
 
 [INSTRUCTION]
@@ -193,32 +197,60 @@ Analyze the 4-frame temporal sequence below. Frames are ordered sequentially fro
 5. Return strictly valid JSON.
 ```
 
-### 6.2 Token Economics & Preemption Avoidance
-* Each 768px frame produces **$\approx 380$ vision patch tokens**.
-* A 4-frame sequence uses **$\approx 1,520$ vision tokens** $+$ $300$ text tokens $\approx 1,820$ context tokens.
-* With **$33\text{ GiB}$ of PagedAttention KV Cache** per MIG shard, each shard can hold up to **$78\times$ parallel 4,096-token sequences** without paging to CPU memory.
-
 ---
 
-## 7. DeadlineScheduler & Load Balancing Router
+## 7. Two-Tier In-Memory Queuing & Dispatch System
 
-### 7.1 Multi-Tier Priority Queue
-The `DeadlineScheduler` utilizes a concurrent priority queue sorted by `(tier_priority, deadline_timestamp)`:
+```
+                        [ DINOv2 / Timer / API Events ]
+                                       │
+                                       ▼
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │     Tier A: Global Dispatch Priority Queue (PriorityQueue)          │
+    │     • Priority 1: Instant Scene Shift & Trigger Events (P1)         │
+    │     • Priority 2: 10s Adaptive Follow-up Verification (P2)          │
+    │     • Priority 3: Routine Ambient Heartbeat Audits (P3)             │
+    └──────────────────────────────────┬──────────────────────────────────┘
+                                       │  Deadlock Prevention: In-Flight Lock Set
+                                       ▼
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │     Weighted Least-Connections Load Balancer (MIGAwareVLMPool)      │
+    │                                                                     │
+    │                 load_score = (in_flight + queued) / weight          │
+    └──────────────────┬───────────────────────────────┬──────────────────┘
+                       │ (weight=3)                    │ (weight=2)
+                       ▼                               ▼
+    ┌────────────────────────────────────┐ ┌────────────────────────────────────┐
+    │ Tier B1: Shard 0 Bounded Queue     │ │ Tier B2: Shard 1 Bounded Queue     │
+    │ • asyncio.Queue (maxsize=12)       │ │ • asyncio.Queue (maxsize=12)       │
+    │ • asyncio.Semaphore (max=4)        │ │ • asyncio.Semaphore (max=4)        │
+    │ • 4 Coroutine Workers (Port 8000)  │ │ • 4 Coroutine Workers (Port 8001)  │
+    └────────────────────────────────────┘ └────────────────────────────────────┘
+```
 
-| Tier | Name | Priority | Trigger Condition | Latency Target |
-| :--- | :--- | :---: | :--- | :---: |
-| **Tier 1** | Real-Time Trigger | — | DINOv2 Cosine Drift | $< 10\text{ ms}$ |
-| **Tier 2** | Major Incident | **P0** | Drift $\ge 0.060$ | $< 1.8\text{ s}$ |
-| **Tier 3** | Minor Scene Shift | **P1** | Drift $\ge 0.030$ | $< 2.5\text{ s}$ |
-| **Tier 4** | Periodic Heartbeat | **P2** | Heartbeat timer $\ge 35\text{ s}$ | $< 5.0\text{ s}$ |
-| **Follow-Up** | Incident Tracking | **P1** | Active incident persistence | $< 2.0\text{ s}$ |
+### 7.1 Tier A: Global Dispatch Priority Queue (`PriorityQueue`)
+* **Underlying Implementation**: `asyncio.PriorityQueue` storing tuples of `(priority_int, timestamp, job_payload)`.
+* **Zero-IPC Latency**: Eliminates network message broker hops (Redis/RabbitMQ), operating purely in Python memory.
+* **Priority Tiers**:
+  * **Priority 1 (`TRIGGER`)**: Emergency scene shifts triggered by DINOv2 major/minor threshold breach.
+  * **Priority 2 (`FOLLOWUP`)**: 10-second adaptive verification cycle for ongoing hazard tracking.
+  * **Priority 3 (`PERIODIC / HEARTBEAT`)**: Background ambient baseline health checks every 35s.
 
-### 7.2 Weighted Least-Connections Router
-Rather than simplistic Round-Robin dispatching, `VLMPool` dynamically routes requests based on active in-flight request weight and shard capacity:
+### 7.2 Tier B: Per-MIG Endpoint Worker Shard Queues (`_EndpointShard`)
+* **Bounded Queues**: `asyncio.Queue(maxsize=queue_depth)` per shard enforces strict backpressure.
+* **Concurrency Cap**: `asyncio.Semaphore(max_concurrent=4)` prevents overloading the vLLM KV-cache.
+* **Weighted Load Score Formula**:
+  $$\text{Load Score}_i = \frac{\text{In-Flight Requests}_i + \text{Queue Depth}_i}{\text{Weight}_i}$$
+  * Shard 0 (12 SMs): $\text{Weight} = 3$ ($60\%$ compute capacity).
+  * Shard 1 (8 SMs): $\text{Weight} = 2$ ($40\%$ compute capacity).
 
-$$\text{Best Endpoint} = \arg\min_{i} \left( \frac{\text{ActiveRequests}_i}{\text{Weight}_i} \right)$$
+### 7.3 Deadlock Prevention & In-Flight Lock Deduplication
+* An atomic `_in_flight: set[str]` lock tracks active camera analyses.
+* If a new scene shift fires on Camera A while Camera A is already in-flight, the frame timestamp is updated in place without duplicate queue generation, preventing queue stampedes.
 
-Where Shard 0 (12 SMs) has $\text{Weight} = 3$ and Shard 1 (8 SMs) has $\text{Weight} = 2$.
+### 7.4 Cold-Boot Model Warmup & Self-Healing Circuit Breaker
+* During the 60–90s cold-start weight-loading window on boot, `MIGAwareVLMPool` holds requests and returns benign non-crashing payloads (`"verdict": "WARMUP"`).
+* Continuous background health probes (every 5s during warmup, 15s during normal operation) automatically transition shards to active routing upon receiving HTTP `200 OK`.
 
 ---
 
@@ -240,7 +272,7 @@ stateDiagram-v2
     CheckSeverity --> HighHazard: Severity == HIGH | Safety == DANGER
     
     LowResolved --> HealthyMonitoring: Incident Closed & Baseline Reset
-    HighHazard --> ScheduleFollowUp: Spawn Persistent Follow-Up
+    HighHazard --> ScheduleFollowUp: Spawn Persistent Follow-Up (P2)
     
     ScheduleFollowUp --> SleepCadence: Wait 10.0 Seconds
     SleepCadence --> VLM_Analysis: Re-evaluate Camera Feed
@@ -248,11 +280,6 @@ stateDiagram-v2
     ScheduleFollowUp --> MaxCyclesReached: Follow-Up Count > 6
     MaxCyclesReached --> HealthyMonitoring: Log Unresolved Incident
 ```
-
-When an alert is flagged as `HIGH` severity or `DANGER` safety:
-1. The scheduler generates an `alert_linked` parent event.
-2. A persistent follow-up is scheduled for $+10.0\text{ seconds}$.
-3. Follow-up frames re-evaluate the scene. If severity drops back to `LOW`, the incident is officially resolved, logging full time-to-resolution metrics.
 
 ---
 
@@ -273,33 +300,22 @@ When an alert is flagged as `HIGH` severity or `DANGER` safety:
 ```
 
 ### 9.1 Pre-Flight Health Auditor (`scripts/system_health_audit.py`)
-Executed automatically by `run.sh` before booting any processes:
-* **Port Availability**: Checks port `7000` and kills zombie listeners.
-* **Schema Integrity**: Verifies valid JSON syntax across `config/system.json`, `config/cameras.json`, and `config/prompts.json`.
-* **Hardware Ingest Validation**: Confirms GStreamer DeepStream plugins (`nvurisrcbin`, `nvvideoconvert`, `nvstreammux`) are operational.
+* Audits port `7000`, validates JSON schemas (`system.json`, `cameras.json`, `prompts.json`), tests vLLM health, and verifies DeepStream hardware decoder bindings.
 
 ### 9.2 Continuous Runtime Watchdog (`backend/services/watchdog.py`)
-Runs every 15 seconds in the background:
-* **Stream Staleness Detection**: Flags any camera that has not received a new frame for $>15.0\text{s}$ and triggers an automatic GStreamer pipeline reconnect.
-* **Zombie Process Reaper**: Cleans up defunct child processes using `os.waitpid(-1, os.WNOHANG)`.
-* **vLLM Endpoint Probing**: Tests HTTP `/health` endpoints on ports `8000` and `8001`.
+* Runs every 15 seconds: flags stale cameras ($>15.0\text{s}$), reaps defunct child processes via non-blocking `waitpid`, and audits vLLM endpoint connectivity.
 
 ### 9.3 Structured Error Tracker (`backend/core/error_tracker.py`)
-All exceptions are routed through `error_tracker.capture_exception()`, which records:
-* Exact file name, line number, and function name.
-* Camera context and component tag.
-* Downstream operational effect on the surveillance pipeline.
-* Full stack trace persisted to SQLite (`error_logs` table) and [`logs/errors.log`](file:///home/clove/RapidAlert/logs/errors.log).
+* Captures exception types, exact lines of origin, camera contexts, and downstream pipeline effects. Persists structured diagnostics to `data/analyses.db` and `logs/errors.log`.
 
 ---
 
-## 10. Frontend Architecture & WebSocket Streaming
+## 10. Frontend Architecture & Multi-Stream Viewport
 
-### 10.1 Rendering Engine (`frontend/app.js`)
-* **Zero-CPU Video Sync**: Base64 snapshot streams from 7 cameras are synchronized using browser `requestAnimationFrame` (rAF) callbacks, eliminating layout thrashing and capping browser CPU usage under $5\%$.
-* **Centralized Click Event Delegation**: Click events on `#camera-grid` are handled via single-point event delegation, preventing detached listener bugs when DOM cards are updated dynamically.
-* **Camera Theater Modal**: Enables real-time RTSP stream viewing, temporal event frame inspection ($t-3$ to $t-0$), and live prompt tuning.
-* **Hardware HUD**: Displays real-time NVIDIA Jetson AGX Thor telemetry (GPU load, CPU core metrics, EMC memory bus clock, and physical RAM allocation).
+* **4-Stream Viewport Pagination**: Displays camera cards in a high-performance 2×2 grid with top toolbar pagination pills (`Page 1: 1-4`, `Page 2: 5-7`).
+* **Active Stream Optimization**: Off-screen camera streams suspend WebSocket frame decoding, maintaining $< 4\%$ browser CPU usage across 7+ 4K camera streams.
+* **Camera Theater Modal**: Enables instant freeze-frame inspection, chronological incident strips, and dynamic prompt tuning.
+* **CORS & Multi-Host Networking**: Full cross-origin and LAN connectivity supported out of the box across Wi-Fi (`192.168.1.3:7000`) and Ethernet (`10.91.90.184:7000`).
 
 ---
 
@@ -355,28 +371,18 @@ All exceptions are routed through `error_tracker.capture_exception()`, which rec
 
 ## 12. Verification, Logging & Operations
 
-### Starting the Surveillance System
 ```bash
+# Run RapidAlert
 ./run.sh
-```
 
-### Viewing Logs
-```bash
-# General application log
+# Gracefully Stop
+./stop.sh
+
+# Run Test Suite
+python3 tests/test_structure_and_config.py
+
+# Inspect Logs
 tail -f logs/app.log
-
-# System lifecycle and graceful shutdown events
 tail -f logs/system_events.log
-
-# Structured component errors and stack traces
 tail -f logs/errors.log
-```
-
-### Manually Testing vLLM Endpoints
-```bash
-# Query Shard 0 (Port 8000, 12 SMs)
-curl -s http://localhost:8000/v1/models | jq .
-
-# Query Shard 1 (Port 8001, 8 SMs)
-curl -s http://localhost:8001/v1/models | jq .
 ```
