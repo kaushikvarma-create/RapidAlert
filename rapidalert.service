@@ -1,0 +1,29 @@
+[Unit]
+Description=RapidAlert AI Surveillance System
+After=network.target docker.service nv-oem-config.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=clove
+Group=clove
+WorkingDirectory=/home/clove/RapidAlert
+Environment=HOME=/home/clove
+Environment=PATH=/usr/local/cuda/bin:/home/clove/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/clove/.Xauthority
+Environment=PYTHONUNBUFFERED=1
+
+# Run the complete RapidAlert production launcher
+ExecStart=/home/clove/RapidAlert/run.sh
+Restart=always
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=30
+
+# Logging to systemd journal and RapidAlert log directory
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

@@ -297,11 +297,24 @@ git clone https://github.com/kaushikvarma-create/RapidAlert.git
 cd RapidAlert
 
 # 2. Start Full System (Audits system, boots vLLM containers, launches backend)
-./run.sh
+### Automatic Startup Configuration (Boot & Login)
+To configure RapidAlert to start automatically on system boot or user login:
+```bash
+# Install and enable background systemd service + desktop autostart:
+sudo ./scripts/setup_autostart.sh
+
+# Manage the background service:
+sudo systemctl status rapidalert    # Check live status
+sudo systemctl start rapidalert     # Start service
+sudo systemctl stop rapidalert      # Stop service
+sudo journalctl -u rapidalert -f    # Follow service logs
+
+# To disable autostart:
+./scripts/setup_autostart.sh --disable
 ```
 
 ### Accessing Interfaces
-* **Web Dashboard**: `http://localhost:7000`
+* **Web Dashboard**: `http://localhost:7000` (auto-opens in browser on start)
 * **Swagger API Documentation**: `http://localhost:7000/docs`
 * **vLLM Shard 0 OpenAPI**: `http://localhost:8000/docs`
 * **vLLM Shard 1 OpenAPI**: `http://localhost:8001/docs`
