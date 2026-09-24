@@ -69,10 +69,8 @@ cleanup() {
     fi
     fuser -k "${DASHBOARD_PORT}/tcp" 2>/dev/null || true
     echo -e "${BOLD}${GREEN}  ✓ Backend gracefully stopped.${NC}"
-    echo -e "${BOLD}${CYAN}  ℹ Next Steps: Run './run.sh' to resume surveillance or inspect 'logs/system_events.log'.${NC}"
-    echo ""
 }
-trap cleanup EXIT INT TERM
+trap cleanup INT TERM
 
 # ── Banner ───────────────────────────────────────────────────────────
 echo -e "${BOLD}"
@@ -267,15 +265,6 @@ else
     warn "No mig_uuid in config — backend will use default CUDA device selection"
 fi
 
-mkdir -p logs data
-
-# ── Run the dashboard backend ────────────────────────────────────────
-python3 -m uvicorn backend.main:app \
-  --host 0.0.0.0 \
-  --port "${DASHBOARD_PORT}" \
-  --log-level info &
-UVICORN_PID=$!
-
 # Auto-open dashboard in browser immediately across desktop sessions
 (
   sleep 1.2
@@ -301,22 +290,8 @@ echo -e "${BOLD}${GREEN}  ║   Access URL: ${CYAN}http://localhost:${DASHBOARD_
 echo -e "${BOLD}${GREEN}  ╚═══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
-# Monitor vLLM container readiness in background
-if [[ "$AUTO_START_VLLM" == "true" ]]; then
-    (
-        for (( i=0; i<VLLM_INSTANCES; i++ )); do
-            PORT=$(( VLLM_PORT_START + i ))
-            CNAME="rapidalert_vllm_${i}"
-            C_API_URL="http://localhost:${PORT}/v1/models"
-            while true; do
-                if curl -sf "${C_API_URL}" >/dev/null 2>&1; then
-                    echo -e "\n${GREEN}[$(date '+%H:%M:%S')] ✅ ${CNAME} (port ${PORT}) is online and ready.${NC}"
-                    break
-                fi
-                sleep 3
-            done
-        done
-    ) &
-fi
-
-wait $UVICORN_PID
+# ── Run the dashboard backend directly in foreground ─────────────────
+exec python3 -m uvicorn backend.main:app \
+  --host 0.0.0.0 \
+  --port "${DASHBOARD_PORT}" \
+  --log-level info
