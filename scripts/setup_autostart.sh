@@ -61,7 +61,7 @@ case "$MODE" in
     cat > "$DESKTOP_FILE" << EOF
 [Desktop Entry]
 Type=Application
-Exec=$TERM_CMD /home/clove/RapidAlert/run.sh
+Exec=$TERM_CMD /home/clove/RapidAlert/scripts/autostart_wrapper.sh
 Hidden=false
 NoDisplay=false
 X-GNOME-Autostart-enabled=true
@@ -103,7 +103,7 @@ EOF
     cat > "$DESKTOP_FILE" << EOF
 [Desktop Entry]
 Type=Application
-Exec=$TERM_CMD /home/clove/RapidAlert/run.sh
+Exec=$TERM_CMD /home/clove/RapidAlert/scripts/autostart_wrapper.sh
 Hidden=false
 NoDisplay=false
 X-GNOME-Autostart-enabled=true

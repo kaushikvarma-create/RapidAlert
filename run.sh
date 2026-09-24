@@ -237,6 +237,8 @@ if [[ "$AUTO_START_VLLM" == "true" ]]; then
                     ${EP_QUANTIZATION:+--quantization \"${EP_QUANTIZATION}\"} \
                     --disable-log-stats \
                     --no-enable-log-requests"
+        fi
+    done
 
     echo ""
     log "vLLM containers initialized. Starting backend & dashboard immediately..."
