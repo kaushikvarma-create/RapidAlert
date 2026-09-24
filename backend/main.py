@@ -326,6 +326,9 @@ async def websocket_endpoint(ws: WebSocket):
                 "concurrency": scheduler.concurrency,
                 "queue_depth": scheduler.queue_depth,
                 "in_flight": scheduler.in_flight_count,
+                "vlm_shards": vlm_pool.get_stats(),
+                "vlm_mode": "mig" if vlm_pool.is_mig() else "shared",
+                "is_mig": vlm_pool.is_mig(),
             },
             "prompts": {
                 "master": prompt_manager.get_master(),
@@ -721,10 +724,15 @@ def api_clear_errors():
 @app.get("/api/metrics")
 def api_get_metrics():
     m = result_store.get_metrics()
+    shards = vlm_pool.get_stats()
+    is_mig = any(s.get("is_mig") for s in shards)
     m.update({
         "concurrency": scheduler.concurrency,
         "queue_depth": scheduler.queue_depth,
         "in_flight": scheduler.in_flight_count,
+        "vlm_shards": shards,
+        "vlm_mode": "mig" if is_mig else "shared",
+        "is_mig": is_mig,
     })
     return m
 

@@ -28,6 +28,7 @@ const App = {
     this.initTheme();
     this._initAudio();
     this.bindUIEvents();
+    this._fetchVLMEndpoints();
     this._fetchInitialAlerts();
     this.connectWS();
     this.startTimestampTicker();
@@ -744,7 +745,8 @@ const App = {
 
     const sevCls = { LOW: 'green', MEDIUM: 'amber', HIGH: 'red' }[sev] || 'muted';
     const safCls = { OK: 'green', WARNING: 'amber', DANGER: 'red' }[saf] || 'muted';
-    const obsText = topResult?.observation || 'Awaiting VLM scene understanding analysis…';
+    const isWarmup = topResult?.verdict === 'WARMUP' || (topResult?.observation && topResult.observation.includes('Initializing'));
+    const obsText = isWarmup ? '⏳ VLM Model Initializing (Loading weights into GPU memory)...' : (topResult?.observation || 'Awaiting VLM scene understanding analysis…');
     const latencyText = topResult?.latency ? `${Number(topResult.latency).toFixed(2)}s` : '—';
     const e2eText = topResult?.e2e_latency != null ? `${Number(topResult.e2e_latency).toFixed(2)}s` : '--';
     const hasOverride = !!(this.prompts.cameras?.[name]);
@@ -1484,19 +1486,28 @@ const App = {
       const maxC = s.max_concurrent || 4;
       const port = s.port || (s.url ? s.url.split(':').pop() : idx);
       const queued = s.queued || 0;
-      
+      const isHealthy = Boolean(s.healthy);
+
       let badgeClass = 'badge-mono';
-      if (!s.healthy) {
-        badgeClass = 'badge-red';
+      let labelContent = '';
+      if (!isHealthy) {
+        badgeClass = 'badge-amber';
+        labelContent = `${port}: ⏳ Warming Up`;
       } else if (inflight > 0) {
         badgeClass = 'badge-amber';
+        const qText = queued > 0 ? ` +${queued}q` : '';
+        labelContent = `⚡ ${port}: [${inflight}/${maxC}${qText}]`;
       } else {
         badgeClass = 'badge-green';
+        const qText = queued > 0 ? ` +${queued}q` : '';
+        labelContent = `✓ ${port}: [${inflight}/${maxC}${qText}]`;
       }
-      
+
       const qText = queued > 0 ? ` +${queued}q` : '';
       const latText = s.avg_latency_ms ? ` (${s.avg_latency_ms}ms)` : '';
-      return `<span id="shard-${idx}-gauge" class="badge ${badgeClass}" style="padding: 1px 6px; font-size: 0.68rem; transition: background 0.2s ease;" title="${this._esc(s.url)} | In-flight: ${inflight}/${maxC}${qText}${latText} | Weight: ${s.weight ?? 1}">${port}: [${inflight}/${maxC}${qText}]</span>`;
+      const modelText = s.model ? ` | Model: ${s.model}` : '';
+      const statusTitle = isHealthy ? `Online | In-flight: ${inflight}/${maxC}${qText}${latText}${modelText}` : 'Warming Up / Loading Weights into VRAM';
+      return `<span id="shard-${idx}-gauge" class="badge ${badgeClass}" style="padding: 1px 6px; font-size: 0.68rem; transition: background 0.2s ease;" title="${this._esc(s.url)} | ${statusTitle} | Weight: ${s.weight ?? 1}">${labelContent}</span>`;
     }).join('');
   },
 

@@ -37,6 +37,7 @@ class SystemWatchdog:
         self._task: Optional[asyncio.Task] = None
         self._start_time = time.monotonic()
         self._stale_camera_warnings: dict[str, float] = {}
+        self._unhealthy_shard_warnings: dict[str, float] = {}
 
     def start(self) -> None:
         if self._running:
@@ -106,24 +107,31 @@ class SystemWatchdog:
         gc.collect()
 
         # ── 4. vLLM Shard Health Check ─────────────────────────────────────────
+        # Note: only log warning after startup grace period (90s) and at most once every 2 mins
         shards = self.vlm_pool.get_stats()
-        unhealthy_shards = [s for s in shards if not s.get("healthy", True)]
+        unhealthy_shards = [s for s in shards if not s.get("healthy", False)]
         if unhealthy_shards:
-            for s in unhealthy_shards:
-                url = s.get("url", "unknown")
-                error_tracker.capture_error(
-                    message=f"vLLM Shard {url} is reporting unhealthy",
-                    component="SystemWatchdog",
-                    effect=f"Workload automatically re-routed away from {url}",
-                    severity="WARNING",
-                )
+            if now - self._start_time > 90.0:
+                for s in unhealthy_shards:
+                    url = s.get("url", "unknown")
+                    last_warn = self._unhealthy_shard_warnings.get(url, 0.0)
+                    if now - last_warn > 120.0:
+                        self._unhealthy_shard_warnings[url] = now
+                        error_tracker.capture_error(
+                            message=f"vLLM Shard {url} is reporting unhealthy",
+                            component="SystemWatchdog",
+                            effect=f"Workload automatically re-routed away from {url}",
+                            severity="WARNING",
+                        )
+        else:
+            self._unhealthy_shard_warnings.clear()
 
     def get_summary(self) -> dict:
         uptime_sec = round(time.monotonic() - self._start_time, 1)
         active_cams = len(self.camera_manager.get_active_cameras())
         total_cams = len(self.camera_manager.get_config())
         shards = self.vlm_pool.get_stats()
-        healthy_shards = sum(1 for s in shards if s.get("healthy", True))
+        healthy_shards = sum(1 for s in shards if s.get("healthy", False))
 
         return {
             "uptime_sec": uptime_sec,

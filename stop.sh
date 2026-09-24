@@ -16,7 +16,7 @@ echo -e "${BOLD}${YELLOW}Stopping RapidAlert AI Surveillance...${NC}"
 # 1. Stop systemd service if running
 if systemctl is-active --quiet rapidalert 2>/dev/null; then
   echo -e "${CYAN}  • Stopping systemd background service...${NC}"
-  sudo systemctl stop rapidalert || true
+  sudo -n systemctl stop rapidalert 2>/dev/null || true
 fi
 
 # 2. Terminate uvicorn backend processes

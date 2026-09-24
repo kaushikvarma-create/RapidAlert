@@ -79,7 +79,7 @@ class _EndpointShard:
         self._queue: asyncio.Queue       = asyncio.Queue(maxsize=queue_depth)
         self._sem:   asyncio.Semaphore   = asyncio.Semaphore(max_concurrent)
         self._workers: list[asyncio.Task] = []
-        self.healthy = True
+        self.healthy = False  # Start as False until health probe confirms 200 OK
 
         # Per-shard telemetry counters
         self.stat_queued:    int   = 0      # total items ever enqueued
@@ -120,6 +120,16 @@ class _EndpointShard:
                 job, fut = await self._queue.get()
             except asyncio.CancelledError:
                 break
+
+            # If shard is not healthy yet (e.g. warming up), wait for it or resolve if cancelled
+            while not self.healthy:
+                if fut.cancelled():
+                    break
+                await asyncio.sleep(0.5)
+
+            if fut.cancelled():
+                self._queue.task_done()
+                continue
 
             try:
                 async with self._sem:
@@ -224,12 +234,12 @@ class _EndpointShard:
                     return result
 
             except (aiohttp.ServerDisconnectedError, aiohttp.ClientConnectionError) as exc:
-                # Stale HTTP keep-alive socket closed by server; retry immediately on fresh socket
+                self.healthy = False
                 if attempt == _RETRY_COUNT - 1:
                     error_tracker.capture_exception(
                         exc, component="VLMClient", camera=cam_name,
-                        effect=f"Connection failure on {self.url} after {_RETRY_COUNT} attempts",
-                        severity="ERROR",
+                        effect=f"Connection failure on {self.url} after {_RETRY_COUNT} attempts; routing suspended",
+                        severity="WARNING",
                     )
                 await asyncio.sleep(0.1)
 
@@ -257,7 +267,7 @@ class _EndpointShard:
             component="VLMClient",
             camera=cam_name,
             effect=f"Inference exhausted all retries for {cam_name} on {self.url}; returning fallback result",
-            severity="ERROR",
+            severity="WARNING",
         )
         return _fallback_result(cam_name, time.monotonic() - t0)
 
@@ -338,27 +348,37 @@ class MIGAwareVLMPool:
             )
             self._shards.append(shard)
 
-        # Auto-detect models from each endpoint's /v1/models
+        # Initial fast health probe
         for shard in self._shards:
             try:
                 async with self._session.get(
-                    f"{shard.url}/v1/models",
-                    timeout=aiohttp.ClientTimeout(total=5)
+                    f"{shard.url}/health",
+                    timeout=aiohttp.ClientTimeout(total=2)
                 ) as r:
-                    if r.status == 200:
-                        data   = await r.json()
-                        models = data.get("data", [])
-                        if models:
-                            actual = models[0].get("id")
-                            if actual:
-                                shard.model = actual
-                                print(f"[VLMPool] Auto-detected model '{actual}' on {shard.url}")
-            except Exception as exc:
-                error_tracker.capture_exception(
-                    exc, component="VLMClient",
-                    effect=f"Failed to auto-detect model on {shard.url}; using config value '{shard.model}'",
-                    severity="WARNING",
-                )
+                    shard.healthy = (r.status == 200)
+                    if shard.healthy:
+                        print(f"[VLMPool] ✅ Shard {shard.url} is online and ready")
+            except Exception:
+                shard.healthy = False
+
+        # Auto-detect models from online endpoints
+        for shard in self._shards:
+            if shard.healthy:
+                try:
+                    async with self._session.get(
+                        f"{shard.url}/v1/models",
+                        timeout=aiohttp.ClientTimeout(total=3)
+                    ) as r:
+                        if r.status == 200:
+                            data   = await r.json()
+                            models = data.get("data", [])
+                            if models:
+                                actual = models[0].get("id")
+                                if actual:
+                                    shard.model = actual
+                                    print(f"[VLMPool] Auto-detected model '{actual}' on {shard.url}")
+                except Exception:
+                    pass
 
         # Start per-shard worker coroutines
         for shard in self._shards:
@@ -371,12 +391,12 @@ class MIGAwareVLMPool:
 
         is_mig = any(bool(s.mig_uuid) for s in self._shards)
         pool_type = "MIG" if is_mig else "Shared"
-        print(f"[VLMPool] ✅ Started — {len(self._shards)} {pool_type} shard(s):")
+        print(f"[VLMPool] 🚀 Started — {len(self._shards)} {pool_type} shard(s) registered (warmup monitored)")
         for s in self._shards:
             print(
                 f"  → {s.url}  model={s.model}  "
                 f"weight={s.weight}  max_concurrent={s.max_concurrent}  "
-                f"queue_depth={s.queue_depth}"
+                f"queue_depth={s.queue_depth}  healthy={s.healthy}"
             )
 
     async def stop(self) -> None:
@@ -388,6 +408,10 @@ class MIGAwareVLMPool:
             await self._session.close()
 
     # ── Public API ────────────────────────────────────────────────────────
+
+    def has_healthy_shards(self) -> bool:
+        """Returns True if at least one shard endpoint is healthy and ready."""
+        return any(s.healthy for s in self._shards)
 
     @property
     def endpoints(self) -> list[dict]:
@@ -404,13 +428,8 @@ class MIGAwareVLMPool:
                     timeout=aiohttp.ClientTimeout(total=3)
                 ) as r:
                     shard.healthy = (r.status == 200)
-            except Exception as exc:
+            except Exception:
                 shard.healthy = False
-                error_tracker.capture_exception(
-                    exc, component="VLMClient",
-                    effect=f"Health check failed for {shard.url}; marked unavailable",
-                    severity="WARNING",
-                )
             results[shard.url] = shard.healthy
         return results
 
@@ -439,10 +458,41 @@ class MIGAwareVLMPool:
             "prompt": system_prompt,
             "labels": labels,
         }
+
+        # If no shards are healthy yet (e.g. initial model weight warmup)
+        if not self.has_healthy_shards():
+            # Quick check if one just booted up
+            for s in self._shards:
+                try:
+                    async with self._session.get(f"{s.url}/health", timeout=aiohttp.ClientTimeout(total=1.0)) as r:
+                        if r.status == 200:
+                            s.healthy = True
+                            print(f"[VLMPool] ✅ Shard {s.url} finished warmup — now healthy")
+                            break
+                except Exception:
+                    pass
+
+            if not self.has_healthy_shards():
+                # Clean, non-crashing warmup response without polluting error logs
+                return {
+                    "observation": "VLM Model Initializing (Warmup in progress)...",
+                    "activity": "Model Loading",
+                    "workers": "None",
+                    "machinery": "None",
+                    "safety": "OK",
+                    "severity": "LOW",
+                    "verdict": "WARMUP",
+                    "evolution": "Stable",
+                    "latency": 0.0,
+                    "model": "warmup",
+                    "e2e_latency": 0.0,
+                }
+
         fut: asyncio.Future = asyncio.get_event_loop().create_future()
 
-        # Sort shards by ascending load_score (best first)
-        ranked = sorted(self._shards, key=lambda s: s.load_score())
+        # Sort healthy shards by ascending load_score (best first)
+        healthy_shards = [s for s in self._shards if s.healthy]
+        ranked = sorted(healthy_shards if healthy_shards else self._shards, key=lambda s: s.load_score())
 
         for shard in ranked:
             if shard.enqueue_nowait(job, fut):
@@ -472,7 +522,9 @@ class MIGAwareVLMPool:
     async def _health_loop(self) -> None:
         while True:
             try:
-                await asyncio.sleep(_HEALTH_INTERVAL_SEC)
+                # Fast polling (5s) while any shard is offline, standard interval (15s) when healthy
+                interval = 5.0 if not self.has_healthy_shards() else 15.0
+                await asyncio.sleep(interval)
                 for shard in self._shards:
                     try:
                         async with self._session.get(
@@ -482,21 +534,28 @@ class MIGAwareVLMPool:
                             was_healthy = shard.healthy
                             shard.healthy = (r.status == 200)
                             if not was_healthy and shard.healthy:
-                                print(f"[VLMPool] ✅ Shard {shard.url} recovered — re-routing enabled")
-                    except Exception as exc:
+                                print(f"[VLMPool] ✅ Shard {shard.url} is ONLINE and healthy")
+                                # Auto-detect model if missing
+                                if not shard.model:
+                                    try:
+                                        async with self._session.get(f"{shard.url}/v1/models", timeout=aiohttp.ClientTimeout(total=3)) as mr:
+                                            if mr.status == 200:
+                                                mdata = await mr.json()
+                                                models = mdata.get("data", [])
+                                                if models and models[0].get("id"):
+                                                    shard.model = models[0]["id"]
+                                    except Exception:
+                                        pass
+                    except Exception:
                         if shard.healthy:
                             shard.healthy = False
-                            error_tracker.capture_exception(
-                                exc, component="VLMClient",
-                                effect=f"Shard {shard.url} went unhealthy; routing suspended until recovered",
-                                severity="ERROR",
-                            )
+                            print(f"[VLMPool] ⚠️ Shard {shard.url} unreachable — temporarily suspended")
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 error_tracker.capture_exception(
                     exc, component="VLMClient",
-                    effect="VLM health loop encountered an error; continuing",
+                    effect="VLM health loop encountered an unexpected error; continuing",
                     severity="WARNING",
                 )
 

@@ -76,6 +76,9 @@ class AlertEngine:
         clip_path: Optional[str] = None,
     ) -> Optional[dict]:
         """Called for every VLM result. Fires alert with actual scene analysis when conditions are met."""
+        if result.get("verdict") == "WARMUP":
+            return None
+
         raw_sev = (result.get("severity") or "LOW").upper()
         raw_safety = (result.get("safety") or "UNKNOWN").upper()
 
