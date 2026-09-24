@@ -313,4 +313,19 @@ python3 -m uvicorn backend.main:app \
   --log-level info &
 UVICORN_PID=$!
 
+# Auto-open dashboard in browser for immediate monitoring
+(
+  sleep 1.5
+  if command -v xdg-open &>/dev/null && [[ -n "${DISPLAY:-}" ]]; then
+    xdg-open "http://localhost:${DASHBOARD_PORT}" 2>/dev/null || true
+  fi
+) &
+
+echo ""
+echo -e "${BOLD}${GREEN}  ╔═══════════════════════════════════════════════════════════════╗${NC}"
+echo -e "${BOLD}${GREEN}  ║   RapidAlert AI Surveillance Dashboard is LIVE!              ║${NC}"
+echo -e "${BOLD}${GREEN}  ║   Access URL: ${CYAN}http://localhost:${DASHBOARD_PORT}${GREEN}                                ║${NC}"
+echo -e "${BOLD}${GREEN}  ╚═══════════════════════════════════════════════════════════════╝${NC}"
+echo ""
+
 wait $UVICORN_PID

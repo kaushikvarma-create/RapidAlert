@@ -19,7 +19,9 @@
     "normal_context_night": "Detect crowd gathering.",
     "priority": "high",
     "threshold": 0.033,
-    "heartbeat_sec": 30.0
+    "heartbeat_sec": 30.0,
+    "major_threshold": null,
+    "minor_threshold": null
   },
   {
     "name": "PARKING",
@@ -29,7 +31,9 @@
     "normal_context_night": "",
     "priority": "normal",
     "threshold": 0.035,
-    "heartbeat_sec": 45.0
+    "heartbeat_sec": 45.0,
+    "major_threshold": null,
+    "minor_threshold": null
   },
   {
     "name": "1ST_OUT",
@@ -39,7 +43,9 @@
     "normal_context_night": "",
     "priority": "normal",
     "threshold": 0.033,
-    "heartbeat_sec": 30.0
+    "heartbeat_sec": 30.0,
+    "major_threshold": null,
+    "minor_threshold": null
   },
   {
     "name": "ADMIN_CABIN",
@@ -49,7 +55,9 @@
     "normal_context_night": "3-4 office workers using electronic devices sitting in chairs",
     "priority": "normal",
     "threshold": 0.033,
-    "heartbeat_sec": 30.0
+    "heartbeat_sec": 30.0,
+    "major_threshold": null,
+    "minor_threshold": null
   },
   {
     "name": "1ST_EXIT",
@@ -59,7 +67,9 @@
     "normal_context_night": "",
     "priority": "normal",
     "threshold": 0.033,
-    "heartbeat_sec": 30.0
+    "heartbeat_sec": 30.0,
+    "major_threshold": null,
+    "minor_threshold": null
   },
   {
     "name": "RECEPTION",
@@ -69,6 +79,8 @@
     "normal_context_night": "",
     "priority": "normal",
     "threshold": 0.033,
-    "heartbeat_sec": 30.0
+    "heartbeat_sec": 30.0,
+    "major_threshold": null,
+    "minor_threshold": null
   }
 ]

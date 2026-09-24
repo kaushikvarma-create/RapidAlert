@@ -20,7 +20,7 @@
       "weight": 2,
       "max_concurrent": 4,
       "queue_depth": 12,
-      "gpu_utilization": 0.30
+      "gpu_utilization": 0.3
     }
   ],
   "auto_start_vllm": true,
