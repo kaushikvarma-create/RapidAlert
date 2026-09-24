@@ -282,14 +282,21 @@ async def _snapshot_stream_loop() -> None:
 
 
 # ══════════════════════════════════════════════════════════════════
-#  FastAPI App Definition
-# ══════════════════════════════════════════════════════════════════
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(
     title="RapidAlert",
     version="2.0.0",
     description="High-Speed Hybrid VLM Surveillance & Incident Detection Engine",
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 

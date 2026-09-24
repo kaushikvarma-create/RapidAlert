@@ -285,10 +285,17 @@ fi
   fi
 ) &
 
+LAN_IPS=$(hostname -I 2>/dev/null || echo "")
+
 echo ""
 echo -e "${BOLD}${GREEN}  ╔═══════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${BOLD}${GREEN}  ║   RapidAlert AI Surveillance Dashboard is LIVE!              ║${NC}"
-echo -e "${BOLD}${GREEN}  ║   Access URL: ${CYAN}http://localhost:${DASHBOARD_PORT}${GREEN}                                ║${NC}"
+echo -e "${BOLD}${GREEN}  ║   • Local:   ${CYAN}http://localhost:${DASHBOARD_PORT}${GREEN}                                ║${NC}"
+for ip in $LAN_IPS; do
+  if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ && "$ip" != "127.0.0.1" && "$ip" != "172.17.0.1" ]]; then
+    printf "${BOLD}${GREEN}  ║   • Network: ${CYAN}http://%-15s:${DASHBOARD_PORT}${GREEN}                    ║${NC}\n" "$ip"
+  fi
+done
 echo -e "${BOLD}${GREEN}  ╚═══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 

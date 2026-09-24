@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rapidalert"
+version = "2.0.0"
+description = "Real-Time AI Surveillance & Multi-Camera Vision Language Model Incident Detection Engine for Jetson Thor"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+authors = [
+    { name = "RapidAlert Team" }
+]
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.28.0",
+    "pydantic>=2.6.0",
+    "aiohttp>=3.9.0",
+    "torch>=2.2.0",
+    "torchvision>=0.17.0",
+    "pillow>=10.2.0",
+    "numpy>=1.26.0",
+    "opencv-python-headless>=4.9.0",
+    "pynvml>=11.5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.3.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "verify_*.py"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+exclude = [
+    ".git",
+    "__pycache__",
+    "scratch",
+    "clips",
+    "data",
+    "logs",
+]
