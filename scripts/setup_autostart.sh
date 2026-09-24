@@ -47,22 +47,35 @@ case "$MODE" in
     ;;
 
   --desktop|desktop)
-    log "Configuring GNOME/XDG Desktop Login Autostart..."
+    log "Configuring Desktop Login Autostart (Interactive Terminal)..."
     mkdir -p "$DESKTOP_DIR"
+    
+    # Detect terminal emulator
+    TERM_CMD="x-terminal-emulator -e"
+    if command -v gnome-terminal &>/dev/null; then
+      TERM_CMD="gnome-terminal --title='RapidAlert AI Surveillance' --"
+    elif command -v terminator &>/dev/null; then
+      TERM_CMD="terminator -T 'RapidAlert AI Surveillance' -x"
+    fi
+
     cat > "$DESKTOP_FILE" << EOF
 [Desktop Entry]
 Type=Application
-Exec=/home/clove/RapidAlert/run.sh
+Exec=$TERM_CMD /home/clove/RapidAlert/run.sh
 Hidden=false
 NoDisplay=false
 X-GNOME-Autostart-enabled=true
 Name=RapidAlert AI Surveillance
 Comment=Launch RapidAlert surveillance pipeline & dashboard on login
-Terminal=true
+Terminal=false
 Icon=utilities-system-monitor
 EOF
     chmod +x "$DESKTOP_FILE"
-    ok "Created desktop autostart entry: $DESKTOP_FILE"
+    ok "Created interactive terminal desktop autostart: $DESKTOP_FILE"
+    echo ""
+    echo "  • On login, a terminal window will open running ./run.sh"
+    echo "  • You can press Ctrl+C inside that window to stop it anytime."
+    echo "  • Or run './stop.sh' from any terminal."
     ;;
 
   --disable|disable)
@@ -76,41 +89,41 @@ EOF
     ;;
 
   all|*)
-    log "Setting up systemd service and desktop autostart..."
+    log "Configuring Desktop Interactive Terminal Autostart & Systemd Service..."
     
-    # 1. Systemd service
-    if [[ -f "$SERVICE_FILE" ]]; then
-      sudo cp "$SERVICE_FILE" /etc/systemd/system/rapidalert.service
-      sudo systemctl daemon-reload
-      sudo systemctl enable rapidalert.service
-      ok "Systemd service installed and enabled."
+    # 1. Desktop interactive terminal autostart (preferred for GUI login + Ctrl+C)
+    mkdir -p "$DESKTOP_DIR"
+    TERM_CMD="x-terminal-emulator -e"
+    if command -v gnome-terminal &>/dev/null; then
+      TERM_CMD="gnome-terminal --title='RapidAlert AI Surveillance' --"
+    elif command -v terminator &>/dev/null; then
+      TERM_CMD="terminator -T 'RapidAlert AI Surveillance' -x"
     fi
 
-    # 2. Desktop entry
-    mkdir -p "$DESKTOP_DIR"
     cat > "$DESKTOP_FILE" << EOF
 [Desktop Entry]
 Type=Application
-Exec=/home/clove/RapidAlert/run.sh
+Exec=$TERM_CMD /home/clove/RapidAlert/run.sh
 Hidden=false
 NoDisplay=false
 X-GNOME-Autostart-enabled=true
 Name=RapidAlert AI Surveillance
 Comment=Launch RapidAlert surveillance pipeline & dashboard on login
-Terminal=true
+Terminal=false
 Icon=utilities-system-monitor
 EOF
     chmod +x "$DESKTOP_FILE"
-    ok "Desktop autostart entry installed."
+    ok "Desktop autostart entry installed ($DESKTOP_FILE)."
+
     echo ""
-    echo -e "${BOLD}${GREEN}✅ RapidAlert is now configured to start automatically on system boot!${NC}"
+    echo -e "${BOLD}${GREEN}✅ RapidAlert is now configured to start automatically on login!${NC}"
     echo ""
-    echo "  Commands to manage the background service:"
-    echo "    • Start now:      sudo systemctl start rapidalert"
-    echo "    • Stop:           sudo systemctl stop rapidalert"
-    echo "    • Check status:   sudo systemctl status rapidalert"
-    echo "    • View logs:      sudo journalctl -u rapidalert -f"
-    echo "    • Disable:        ./scripts/setup_autostart.sh --disable"
+    echo "  How it works:"
+    echo "    1. On desktop login, a visible terminal window opens running ./run.sh."
+    echo "    2. The browser automatically opens to http://localhost:7000."
+    echo "    3. You can press Ctrl+C in that terminal at any time to stop it."
+    echo "    4. Or run './stop.sh' from any terminal to gracefully shut everything down."
+    echo "    5. If already running, run.sh automatically cleans up stale processes and reuses healthy containers."
     echo ""
     ;;
 esac
