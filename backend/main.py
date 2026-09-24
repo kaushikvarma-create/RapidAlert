@@ -239,9 +239,10 @@ async def _config_sync_loop() -> None:
             error_tracker.capture_exception(
                 e,
                 component="ConfigManager",
-                effect="Error during periodic config sync loop; continuing",
+                effect="Error during periodic config sync loop; pausing 2s",
                 severity="WARNING",
             )
+            await asyncio.sleep(2.0)
 
 
 async def _snapshot_stream_loop() -> None:
@@ -249,7 +250,7 @@ async def _snapshot_stream_loop() -> None:
     last_pushed_ts: dict[str, float] = {}
     while True:
         try:
-            if not ws_manager._clients:
+            if not ws_manager.has_clients:
                 await asyncio.sleep(0.5)
                 continue
 
@@ -274,9 +275,10 @@ async def _snapshot_stream_loop() -> None:
             error_tracker.capture_exception(
                 exc,
                 component="CameraManager",
-                effect="Error in live snapshot broadcast loop; continuing",
+                effect="Error in live snapshot broadcast loop; pausing 1s",
                 severity="WARNING",
             )
+            await asyncio.sleep(1.0)
 
 
 # ══════════════════════════════════════════════════════════════════

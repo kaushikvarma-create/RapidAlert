@@ -484,7 +484,7 @@ const App = {
     for (const cam of cams) {
       if (!this.cameras[cam.name]) {
         this.cameras[cam.name] = { config: cam, result: null, lastTs: 0, thumbB64: null };
-        this._renderCard(cam.name);
+        this._renderCamCard(cam.name);
       } else {
         this.cameras[cam.name].config = cam;
       }
@@ -701,45 +701,9 @@ const App = {
       </div>
     `;
 
-    // Click handlers: Clicking anywhere on camera card opens Live Stream Theater
+    // Ensure card attributes for event delegation
+    card.setAttribute('data-cam', name);
     card.style.cursor = 'pointer';
-    card.addEventListener('click', (e) => {
-      if (e.target.closest('.cam-event-thumb-item') || e.target.closest('button') || e.target.closest('input')) return;
-      this._openCamModal(name, null);
-    });
-
-    const videoEl = card.querySelector('.cam-card-video');
-    if (videoEl) {
-      videoEl.addEventListener('click', (e) => {
-        e.stopPropagation();
-        this._openCamModal(name, null); // Live stream mode
-      });
-    }
-
-    const headerEl = card.querySelector('.cam-card-header');
-    if (headerEl) {
-      headerEl.addEventListener('click', (e) => {
-        e.stopPropagation();
-        this._openCamModal(name, null);
-      });
-    }
-
-    const infoEl = card.querySelector('.cam-card-info');
-    if (infoEl) {
-      infoEl.addEventListener('click', (e) => {
-        e.stopPropagation();
-        this._openCamModal(name, null);
-      });
-    }
-
-    // Click handlers: Clicking any event photo thumbnail opens that specific event photo in Theater!
-    card.querySelectorAll('.cam-event-thumb-item').forEach(thumb => {
-      thumb.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const idx = parseInt(thumb.getAttribute('data-idx'), 10);
-        this._openCamModal(name, idx); // Event photo inspection mode
-      });
-    });
 
     // If modal is open for this camera, refresh its live frame/stats
     if (this.activeCamModal === name) {
@@ -1496,8 +1460,13 @@ const App = {
       console.error('Error populating cam modal:', err);
     }
 
+    backdrop.hidden = false;
     backdrop.removeAttribute('hidden');
+    backdrop.style.display = 'block';
+
+    modal.hidden = false;
     modal.removeAttribute('hidden');
+    modal.style.display = 'flex';
   },
 
   _updateModalFrameView(name) {
@@ -1664,8 +1633,18 @@ const App = {
 
   _closeModal() {
     this.activeCamModal = null;
-    document.getElementById('modal-backdrop')?.setAttribute('hidden', '');
-    document.getElementById('cam-modal')?.setAttribute('hidden', '');
+    const backdrop = document.getElementById('modal-backdrop');
+    if (backdrop) {
+      backdrop.hidden = true;
+      backdrop.setAttribute('hidden', '');
+      backdrop.style.display = 'none';
+    }
+    const modal = document.getElementById('cam-modal');
+    if (modal) {
+      modal.hidden = true;
+      modal.setAttribute('hidden', '');
+      modal.style.display = 'none';
+    }
     const img = document.getElementById('modal-frame');
     if (img && img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
     if (img) img.src = '';
@@ -2157,6 +2136,38 @@ const App = {
     document.getElementById('btn-close-errors')?.addEventListener('click', () => this._closeErrorsModal());
     document.getElementById('btn-refresh-errors')?.addEventListener('click', () => this._fetchErrors());
     document.getElementById('btn-clear-errors')?.addEventListener('click', () => this._clearErrors());
+
+    // Centralized Camera Grid Event Delegation (Robust click handling for cards, streams, and event thumbnails)
+    const cameraGrid = document.getElementById('camera-grid');
+    if (cameraGrid) {
+      cameraGrid.addEventListener('click', (e) => {
+        // 1. Check if user clicked a specific event thumbnail
+        const thumb = e.target.closest('.cam-event-thumb-item');
+        if (thumb) {
+          e.stopPropagation();
+          const camName = thumb.getAttribute('data-cam');
+          const idx = parseInt(thumb.getAttribute('data-idx'), 10);
+          if (camName) {
+            this._openCamModal(camName, isNaN(idx) ? null : idx);
+          }
+          return;
+        }
+
+        // 2. Ignore buttons / inputs / forms
+        if (e.target.closest('button') || e.target.closest('input') || e.target.closest('textarea') || e.target.closest('select')) {
+          return;
+        }
+
+        // 3. Find parent camera card and open Live Stream Theater
+        const card = e.target.closest('.cam-card');
+        if (card) {
+          const camName = card.getAttribute('data-cam') || Object.keys(this.cameras).find(c => `cam-card-${this._eid(c)}` === card.id);
+          if (camName) {
+            this._openCamModal(camName, null);
+          }
+        }
+      });
+    }
 
     // Modal close
     document.getElementById('btn-close-modal')?.addEventListener('click', () => this._closeModal());

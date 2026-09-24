@@ -782,6 +782,7 @@ code { font-family: var(--font-mono); font-size: 0.82em; color: var(--accent); b
   font-weight: 600;
   backdrop-filter: blur(2px);
   z-index: 4;
+  pointer-events: none;
 }
 
 .cam-card:hover .cam-hover-overlay {

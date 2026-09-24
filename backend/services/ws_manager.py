@@ -16,6 +16,19 @@ class WSManager:
         self._connections: list[WebSocket] = []
         self._lock = asyncio.Lock()
 
+    @property
+    def has_clients(self) -> bool:
+        return bool(self._connections)
+
+    @property
+    def client_count(self) -> int:
+        return len(self._connections)
+
+    @property
+    def _clients(self) -> list[WebSocket]:
+        """Backward compatibility alias for _connections."""
+        return self._connections
+
     async def connect(self, ws: WebSocket) -> None:
         await ws.accept()
         async with self._lock:
