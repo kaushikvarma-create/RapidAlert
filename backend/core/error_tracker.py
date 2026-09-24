@@ -380,6 +380,15 @@ class ErrorTracker:
             "by_effect": dict(by_effect),
         }
 
+    def get_errors(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Convenience alias for get_recent."""
+        return self.get_recent(limit=limit)
+
+    def count(self) -> int:
+        """Returns the number of error records currently in memory."""
+        with self._lock:
+            return len(self._records)
+
     def clear(self) -> None:
         """Clear errors from memory and SQLite."""
         with self._lock:
