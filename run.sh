@@ -192,6 +192,17 @@ if [[ "$AUTO_START_VLLM" == "true" ]]; then
             fi
         fi
 
+        # Collect MIG capability device nodes if MIG is enabled
+        CAP_FLAGS=()
+        if [[ -d /dev/nvidia-caps ]]; then
+            GI_ID=$(( i + 1 ))
+            for cap_file in /dev/nvidia-caps/nvidia-cap${GI_ID} /dev/nvidia-caps/nvidia-cap${GI_ID}*; do
+                if [[ -e "$cap_file" ]]; then
+                    CAP_FLAGS+=(--device "$cap_file")
+                fi
+            done
+        fi
+
         if [[ ${NEEDS_START} -eq 1 ]]; then
             log "Starting container ${CNAME} on port ${PORT} ..."
             docker run -d \
@@ -199,10 +210,13 @@ if [[ "$AUTO_START_VLLM" == "true" ]]; then
                 --runtime nvidia \
                 --network host \
                 --shm-size=4g \
+                -e NVIDIA_VISIBLE_DEVICES=all \
+                -e CUDA_VISIBLE_DEVICES=0 \
                 -e HF_TOKEN="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" \
                 -e HF_HOME=/data/models/huggingface \
                 -e EP_MODEL="${EP_MODEL}" \
                 -e EP_QUANTIZATION="${EP_QUANTIZATION}" \
+                "${CAP_FLAGS[@]}" \
                 -v "${HF_CACHE}:/data/models/huggingface" \
                 "${VLLM_IMAGE}" \
                 bash -c " \
