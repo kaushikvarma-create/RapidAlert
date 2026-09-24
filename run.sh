@@ -203,7 +203,6 @@ if [[ "$AUTO_START_VLLM" == "true" ]]; then
                 -e HF_HOME=/data/models/huggingface \
                 -e EP_MODEL="${EP_MODEL}" \
                 -e EP_QUANTIZATION="${EP_QUANTIZATION}" \
-                ${EP_MIG_UUID:+-e CUDA_VISIBLE_DEVICES="${EP_MIG_UUID}"} \
                 -v "${HF_CACHE}:/data/models/huggingface" \
                 "${VLLM_IMAGE}" \
                 bash -c " \
