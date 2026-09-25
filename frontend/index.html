@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/style.css?v=40" />
+  <link rel="stylesheet" href="/style.css?v=56" />
   <script>
     (function() {
       var saved = localStorage.getItem('rapidalert_theme') || localStorage.getItem('theme');
@@ -55,6 +55,11 @@
           <span id="shard-1-gauge" class="badge badge-mono">8001: [0/4]</span>
         </div>
       </div>
+      <button class="header-reports-btn" id="btn-header-reports" title="📊 Shift Reports &amp; AI Intelligence Archive (Rolling buffer: 69 max)" aria-label="Open Shift Reports Archive">
+        <span class="reports-icon">📑</span>
+        <span class="reports-label">Reports</span>
+        <span class="reports-count-pill" id="header-reports-count">0</span>
+      </button>
       <div class="ws-pill" id="ws-pill">
         <span class="ws-dot" id="ws-dot"></span>
         <span id="ws-status">Connecting</span>
@@ -216,6 +221,7 @@
       <button class="stab active" data-stab="cameras">📷 Cameras</button>
       <button class="stab" data-stab="prompts">✏ Prompts</button>
       <button class="stab" data-stab="scanner">🔍 Scan Network</button>
+      <button class="stab" data-stab="reports">📑 Reports</button>
       <button class="stab" data-stab="history">🗄 History</button>
       <button class="stab" data-stab="system">⚙ System</button>
       <button class="stab" data-stab="security">🔒 Security</button>
@@ -523,6 +529,56 @@
             </button>
           </div>
         </form>
+      </div>
+    </div>
+
+    <!-- ── Reports Tab ─────────────────────────────────────────── -->
+    <div class="stab-content" id="stab-reports">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 10px;">
+        <div>
+          <h3 style="font-size: 0.95rem; font-weight: 700; color: var(--text-1); margin: 0 0 4px 0;">Shift Intelligence &amp; PDF Reports</h3>
+          <p style="font-size: 0.76rem; color: var(--text-3); margin: 0;">Automated executive PDF reports compiled twice daily at 06:00 AM (Night Shift) &amp; 06:00 PM (Day Shift) and dispatched via email.</p>
+        </div>
+        <button type="button" class="btn-primary" id="btn-generate-report-now" style="font-size: 0.8rem; padding: 7px 14px; gap: 6px;">
+          <span>⚡ Generate &amp; Email Report Now</span>
+        </button>
+      </div>
+
+      <!-- Schedule & Recipients Info Card -->
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-bottom: 16px;">
+        <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px;">
+          <div style="font-size: 0.72rem; color: var(--text-3); text-transform: uppercase; font-weight: 700; letter-spacing: 0.5px;">⏰ Schedule Slots</div>
+          <div style="font-size: 0.95rem; font-weight: 700; color: #38bdf8; margin-top: 4px;">06:00 AM &amp; 06:00 PM IST</div>
+          <div style="font-size: 0.72rem; color: var(--text-3); margin-top: 2px;" id="reports-next-run">Next: Loading...</div>
+        </div>
+        <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px;">
+          <div style="font-size: 0.72rem; color: var(--text-3); text-transform: uppercase; font-weight: 700; letter-spacing: 0.5px;">📧 Email Dispatch</div>
+          <div style="font-size: 0.85rem; font-weight: 600; color: #34d399; margin-top: 4px;">Gmail SMTP (Active)</div>
+          <div style="font-size: 0.72rem; color: var(--text-3); margin-top: 2px;" id="reports-recipients-list">pandalavacarji@gmail.com, reportsclove@gmail.com</div>
+        </div>
+      </div>
+
+      <!-- Reports History Table -->
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+        <span style="font-size: 0.78rem; font-weight: 600; color: var(--text-2);">Generated Shift Reports History</span>
+        <button type="button" class="btn-ghost" id="btn-refresh-reports" style="font-size: 0.75rem; padding: 4px 8px;">🔄 Refresh</button>
+      </div>
+
+      <div class="cam-table-wrap" style="max-height: 380px; overflow-y: auto;">
+        <table class="cam-table" id="reports-history-table">
+          <thead>
+            <tr>
+              <th>Date / Generated</th>
+              <th>Shift Type</th>
+              <th>Analyses / High Alerts</th>
+              <th>Email Status</th>
+              <th style="text-align: right;">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="reports-table-body">
+            <tr><td colspan="5" style="text-align: center; color: var(--text-3); padding: 20px;">Loading reports...</td></tr>
+          </tbody>
+        </table>
       </div>
     </div>
   </div>
@@ -877,10 +933,63 @@
     </div>
   </div>
 
+  <!-- ═══════════════════════════════════════════════════════════ MODAL: MANUAL TEST ALERT TRIGGER -->
+  <div class="modal-backdrop" id="modal-test-trigger" style="display: none; align-items: center; justify-content: center; z-index: 10000;">
+    <div class="modal-box" style="max-width: 480px; width: 92%; padding: 0; overflow: hidden; border: 1px solid rgba(255,255,255,0.12); box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7); background: var(--surface); border-radius: var(--radius-lg, 12px);">
+      <div class="modal-header" style="background: rgba(255,255,255,0.03); padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between;">
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <div style="width: 36px; height: 36px; border-radius: 8px; background: rgba(234, 111, 62, 0.15); border: 1px solid rgba(234, 111, 62, 0.3); display: flex; align-items: center; justify-content: center; font-size: 1.2rem;">
+            ⚡
+          </div>
+          <div>
+            <h3 style="font-size: 1.05rem; font-weight: 700; color: var(--text-1); margin: 0;">Trigger Incident Alert</h3>
+            <span style="font-size: 0.75rem; color: var(--text-3);">Manual incident verification &amp; pipeline testing</span>
+          </div>
+        </div>
+        <button class="btn-icon" id="btn-close-test-trigger" title="Close" style="color: var(--text-3);">✕</button>
+      </div>
+      <div class="modal-auth-body">
+        <form id="form-test-trigger" onsubmit="return false;" style="display: flex; flex-direction: column; gap: 14px;">
+          <div>
+            <label class="field-label" for="test-trigger-cam-select">Target Camera Feed</label>
+            <select id="test-trigger-cam-select" class="input" style="cursor: pointer;">
+              <!-- Dynamic options populated from active cameras -->
+            </select>
+          </div>
+          <div class="form-grid-2">
+            <div>
+              <label class="field-label" for="test-trigger-sev-select">Alert Severity</label>
+              <select id="test-trigger-sev-select" class="input" style="cursor: pointer;">
+                <option value="HIGH">🚨 HIGH (Immediate Danger)</option>
+                <option value="MEDIUM" selected>⚠️ MEDIUM (Safety Warning)</option>
+              </select>
+            </div>
+            <div>
+              <label class="field-label" for="test-trigger-mode-select">Follow-Up Action</label>
+              <select id="test-trigger-mode-select" class="input" style="cursor: pointer;">
+                <option value="followup" selected>🔄 Schedule Follow-Up Cycle</option>
+                <option value="single">Single Alert Only</option>
+              </select>
+            </div>
+          </div>
+          <div style="padding: 10px 12px; background: rgba(255,255,255,0.02); border: 1px dashed var(--border); border-radius: 6px; font-size: 0.74rem; color: var(--text-3); line-height: 1.4;">
+            💡 Dispatches an immediate synthetic incident for the selected camera, capturing 4-frame temporal context and broadcasting live across all connected dashboards.
+          </div>
+          <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 6px;">
+            <button type="button" class="btn-ghost" id="btn-cancel-test-trigger">Cancel</button>
+            <button type="button" class="btn-primary" id="btn-submit-test-trigger" style="min-width: 150px;">
+              <span>⚡ Dispatch Alert</span>
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
   <!-- ═══════════════════════════════════════════════════════════ MODAL: ADMIN UNLOCK & SECURITY -->
   <div class="modal-backdrop" id="modal-admin-auth" style="display: none; align-items: center; justify-content: center; z-index: 10000;">
-    <div class="modal-box" style="max-width: 440px; width: 90%; padding: 0; overflow: hidden; border: 1px solid rgba(255,255,255,0.12); box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7); background: var(--surface);">
-      <div class="modal-header" style="background: rgba(255,255,255,0.03); padding: 16px 20px; border-bottom: 1px solid var(--border);">
+    <div class="modal-box" style="max-width: 480px; width: 92%; padding: 0; overflow: hidden; border: 1px solid rgba(255,255,255,0.12); box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7); background: var(--surface); border-radius: var(--radius-lg, 12px);">
+      <div class="modal-header" style="background: rgba(255,255,255,0.03); padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between;">
         <div style="display: flex; align-items: center; gap: 12px;">
           <div style="width: 36px; height: 36px; border-radius: 8px; background: rgba(59, 130, 246, 0.15); border: 1px solid rgba(59, 130, 246, 0.3); display: flex; align-items: center; justify-content: center; font-size: 1.2rem;">
             🔒
@@ -892,8 +1001,8 @@
         </div>
         <button class="btn-icon" id="btn-close-auth" title="Close" style="color: var(--text-3);">✕</button>
       </div>
-      <div class="modal-body" style="padding: 20px;">
-        <div id="auth-error-banner" style="display: none; padding: 10px 14px; background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 6px; color: #f87171; font-size: 0.8rem; margin-bottom: 16px; display: none; align-items: center; gap: 8px;">
+      <div class="modal-auth-body">
+        <div id="auth-error-banner" style="display: none; padding: 10px 14px; background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 6px; color: #f87171; font-size: 0.8rem; margin-bottom: 4px; align-items: center; gap: 8px;">
           <span>⚠️</span>
           <span id="auth-error-msg">Invalid credentials</span>
         </div>
@@ -903,9 +1012,9 @@
             <input type="text" id="auth-input-username" class="input" placeholder="admin" value="admin" autocomplete="username" required />
           </div>
           <div>
-            <label class="field-label" for="auth-input-password">Master Password</label>
+            <label class="field-label" for="auth-input-password">Master Password <span style="color: var(--text-3); font-weight: normal;">(default: admin123)</span></label>
             <div style="position: relative;">
-              <input type="password" id="auth-input-password" class="input" placeholder="Enter master password" autocomplete="current-password" required style="padding-right: 36px;" />
+              <input type="password" id="auth-input-password" class="input" placeholder="admin123 or admin" autocomplete="current-password" required style="padding-right: 36px;" />
               <button type="button" id="btn-toggle-pw-vis" style="position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; color: var(--text-3); font-size: 0.9rem;" title="Toggle Password Visibility">👁️</button>
             </div>
           </div>
@@ -914,7 +1023,7 @@
           </div>
           <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 6px;">
             <button type="button" class="btn-ghost" id="btn-cancel-auth">Cancel</button>
-            <button type="submit" class="btn-primary" id="btn-submit-auth" style="min-width: 130px;">
+            <button type="button" class="btn-primary" id="btn-submit-auth" style="min-width: 130px;">
               <span id="btn-auth-label">🔓 Unlock Settings</span>
             </button>
           </div>
@@ -1078,9 +1187,83 @@
     </div>
   </div>
 
+  <!-- ═══════════════════════════════════════════════════════════ SHIFT REPORTS EXPLORER MODAL -->
+  <div class="modal-backdrop" id="reports-modal-backdrop" hidden></div>
+  <div class="modal modal-theater modal-reports-dialog" id="modal-reports-explorer" hidden role="dialog" aria-modal="true" aria-labelledby="modal-reports-title">
+    <div class="modal-header">
+      <div class="archive-modal-title-wrap">
+        <div class="archive-modal-header-top">
+          <span class="archive-modal-icon">📑</span>
+          <h2 id="modal-reports-title">Shift Reports &amp; AI Intelligence Archive</h2>
+          <span class="badge badge-accent" id="reports-badge-rolling">Rolling Buffer: 69 Max</span>
+        </div>
+        <span class="modal-cam-ts" id="reports-buffer-banner">Loading rolling archive buffer stats...</span>
+      </div>
+      <div class="modal-header-actions">
+        <button type="button" class="btn btn-sm btn-primary" id="btn-modal-generate-report" title="Generate and email shift report immediately">
+          <span>⚡</span> Generate &amp; Email Now
+        </button>
+        <button type="button" class="btn btn-sm btn-ghost" id="btn-refresh-reports-modal" title="Refresh reports list">
+          <span>🔄</span> Refresh
+        </button>
+        <button class="btn-icon btn-close-panel" id="btn-close-reports-modal" aria-label="Close reports explorer">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="reports-modal-body">
+      <!-- Summary Stats Strip -->
+      <div class="reports-metrics-strip">
+        <div class="report-metric-box">
+          <span class="rm-val" id="rm-stored-count">0 / 69</span>
+          <span class="rm-lbl">Rolling Buffer</span>
+        </div>
+        <div class="report-metric-box">
+          <span class="rm-val" id="rm-disk-usage">0.0 MB</span>
+          <span class="rm-lbl">Storage Footprint</span>
+        </div>
+        <div class="report-metric-box">
+          <span class="rm-val" id="rm-coverage-days">34.5 Days</span>
+          <span class="rm-lbl">Retention Horizon</span>
+        </div>
+        <div class="report-metric-box">
+          <span class="rm-val" id="rm-schedule-hours">06:00 &amp; 18:00</span>
+          <span class="rm-lbl">Auto Shifts (IST)</span>
+        </div>
+        <div class="report-metric-box">
+          <span class="rm-val" id="rm-next-run">—</span>
+          <span class="rm-lbl">Next Automatic Run</span>
+        </div>
+      </div>
+
+      <!-- Filter & Recipients Bar -->
+      <div class="reports-filter-bar">
+        <div class="reports-filter-left">
+          <button class="filter-chip active" data-report-filter="all" id="rf-all">All Shifts</button>
+          <button class="filter-chip chip-day" data-report-filter="DAY" id="rf-day">☀️ Day Shifts (06:00 – 18:00)</button>
+          <button class="filter-chip chip-night" data-report-filter="NIGHT" id="rf-night">🌙 Night Shifts (18:00 – 06:00)</button>
+        </div>
+        <div class="reports-filter-right">
+          <span class="reports-recipients-note" id="reports-modal-recipients">Recipients: pandalavacarji@gmail.com, reportsclove@gmail.com</span>
+        </div>
+      </div>
+
+      <!-- Reports Cards Scroll Grid -->
+      <div class="reports-list-scroll" id="reports-cards-container">
+        <div class="reports-loading-state">
+          <div class="spinner"></div>
+          <span>Fetching stored executive shift reports...</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- ═══════════════════════════════════════════════════════════ TOAST -->
   <div class="toast-container" id="toast-container"></div>
 
-  <script src="/app.js?v=43"></script>
+  <script src="/app.js?v=56"></script>
 </body>
 </html>

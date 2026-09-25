@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>{{ settings.title }}</title>
+    <style>
+        *, *::before, *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        @page {
+            size: A4 portrait;
+            margin: 12mm 10mm 12mm 10mm;
+            @bottom-right {
+                content: "Page " counter(page) " of " counter(pages);
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                font-size: 8px;
+                color: #94a3b8;
+            }
+            @bottom-left {
+                content: "RapidAlert AI Surveillance • Clove HQ";
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                font-size: 8px;
+                color: #94a3b8;
+            }
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            font-size: 9.5px;
+            color: #334155;
+            background: #ffffff;
+            line-height: 1.4;
+            width: 100%;
+        }
+        .header-box {
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+            border-radius: 6px;
+            padding: 14px 18px;
+            color: #ffffff;
+            margin-bottom: 14px;
+            page-break-inside: avoid;
+            break-inside: avoid;
+        }
+        .brand-tag {
+            font-size: 8.5px;
+            font-weight: 700;
+            color: #38bdf8;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            margin-bottom: 2px;
+        }
+        h1 {
+            color: #ffffff;
+            margin: 0 0 6px 0;
+            font-size: 16px;
+            font-weight: 800;
+            letter-spacing: -0.2px;
+        }
+        .meta-pills {
+            display: flex;
+            gap: 6px;
+            font-size: 9px;
+        }
+        .pill {
+            background: rgba(255,255,255,0.12);
+            padding: 3px 7px;
+            border-radius: 4px;
+            color: #f8fafc;
+        }
+        .pill-blue {
+            background: rgba(56, 189, 248, 0.2);
+            color: #38bdf8;
+            font-weight: 600;
+        }
+        .pill-shift {
+            background: rgba(16, 185, 129, 0.2);
+            color: #34d399;
+            font-weight: 600;
+        }
+
+        h2 {
+            color: #0f172a;
+            font-size: 11px;
+            font-weight: 700;
+            margin: 14px 0 6px 0;
+            padding-bottom: 3px;
+            border-bottom: 1.5px solid #e2e8f0;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+            page-break-after: avoid;
+            break-after: avoid;
+        }
+
+        /* Executive KPIs Grid */
+        .kpi-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 5px;
+            margin-bottom: 12px;
+            page-break-inside: avoid;
+            break-inside: avoid;
+        }
+        .kpi-card {
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 5px;
+            padding: 7px 8px;
+            text-align: center;
+        }
+        .kpi-val {
+            font-size: 14px;
+            font-weight: 800;
+            color: #0f172a;
+            line-height: 1.1;
+        }
+        .kpi-lbl {
+            font-size: 7px;
+            font-weight: 700;
+            color: #64748b;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+            margin-top: 2px;
+        }
+
+        /* General Tables */
+        table.data-table {
+            width: 100%;
+            max-width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 14px;
+            table-layout: fixed;
+            font-size: 8.5px;
+        }
+        table.data-table thead {
+            display: table-header-group;
+        }
+        table.data-table tr {
+            page-break-inside: avoid;
+            break-inside: avoid;
+        }
+        table.data-table th, table.data-table td {
+            border: 1px solid #e2e8f0;
+            padding: 5px 6px;
+            text-align: left;
+            vertical-align: middle;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            word-break: break-word;
+        }
+        table.data-table th {
+            background-color: #0f172a;
+            color: #ffffff;
+            font-weight: 700;
+            font-size: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
+        }
+        table.data-table tr:nth-child(even) {
+            background-color: #f8fafc;
+        }
+        .badge-high {
+            background: #fee2e2;
+            color: #dc2626;
+            font-weight: 700;
+            padding: 2px 5px;
+            border-radius: 3px;
+            display: inline-block;
+            font-size: 7.5px;
+            text-align: center;
+        }
+        .badge-med {
+            background: #fef3c7;
+            color: #d97706;
+            font-weight: 700;
+            padding: 2px 5px;
+            border-radius: 3px;
+            display: inline-block;
+            font-size: 7.5px;
+            text-align: center;
+        }
+        .badge-low {
+            background: #f1f5f9;
+            color: #475569;
+            font-weight: 600;
+            padding: 2px 5px;
+            border-radius: 3px;
+            display: inline-block;
+            font-size: 7.5px;
+            text-align: center;
+        }
+        .badge-ok {
+            background: #dcfce7;
+            color: #16a34a;
+            font-weight: 700;
+            padding: 2px 5px;
+            border-radius: 3px;
+            display: inline-block;
+            font-size: 7.5px;
+            text-align: center;
+        }
+
+        .evidence-thumb {
+            width: 100%;
+            max-width: 110px;
+            height: 62px;
+            object-fit: cover;
+            border-radius: 3px;
+            border: 1px solid #cbd5e1;
+            display: block;
+            margin: 0 auto;
+            background: #000;
+        }
+
+        .routine-list {
+            padding-left: 0;
+            list-style: none;
+            margin: 0 0 14px 0;
+        }
+        .routine-item {
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 5px;
+            padding: 6px 9px;
+            margin-bottom: 4px;
+            font-size: 8.5px;
+            line-height: 1.35;
+            page-break-inside: avoid;
+            break-inside: avoid;
+        }
+        .routine-cam {
+            font-weight: 700;
+            color: #0f172a;
+            margin-right: 5px;
+        }
+
+        .no-records {
+            text-align: center;
+            color: #94a3b8;
+            padding: 10px;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <div class="header-box">
+        <div class="brand-tag">CLOVE HQ • RAPIDALERT AI SURVEILLANCE</div>
+        <h1>{{ settings.title }}</h1>
+        <div class="meta-pills">
+            <span class="pill">📅 {{ date_str }}</span>
+            <span class="pill pill-blue">⏱ {{ time_window }}</span>
+            <span class="pill pill-shift">🌓 {{ shift_name }} SHIFT</span>
+        </div>
+    </div>
+
+    <!-- Executive KPI Grid -->
+    <table class="kpi-table">
+        <tr>
+            <td class="kpi-card" style="width: 20%;">
+                <div class="kpi-val">{{ stats.total_analyses }}</div>
+                <div class="kpi-lbl">Total Analyses</div>
+            </td>
+            <td class="kpi-card" style="width: 20%;">
+                <div class="kpi-val" style="color: {% if stats.high_count > 0 %}#dc2626{% else %}#16a34a{% endif %};">{{ stats.high_count }}</div>
+                <div class="kpi-lbl">High Severity</div>
+            </td>
+            <td class="kpi-card" style="width: 20%;">
+                <div class="kpi-val" style="color: {% if stats.med_count > 0 %}#d97706{% else %}#0f172a{% endif %};">{{ stats.med_count }}</div>
+                <div class="kpi-lbl">Medium Alerts</div>
+            </td>
+            <td class="kpi-card" style="width: 20%;">
+                <div class="kpi-val">{{ stats.peak_workers }}</div>
+                <div class="kpi-lbl">Peak Persons</div>
+            </td>
+            <td class="kpi-card" style="width: 20%;">
+                <div class="kpi-val" style="color: #16a34a;">{{ stats.active_cameras_count }} / {{ stats.total_cameras_count }}</div>
+                <div class="kpi-lbl">Active Feeds</div>
+            </td>
+        </tr>
+    </table>
+
+    <h2>1. General Camera Zone Status &amp; Operational Metrics</h2>
+    <table class="data-table" id="gen-info">
+        <thead>
+            <tr>
+                <th style="width: 17%;">Camera</th>
+                <th style="width: 25%;">Zone Description</th>
+                <th style="width: 7%; text-align: center;">In</th>
+                <th style="width: 7%; text-align: center;">Out</th>
+                <th style="width: 11%; text-align: center;">Peak Persons</th>
+                <th style="width: 17%; text-align: center;">Vehicles</th>
+                <th style="width: 16%; text-align: center;">Activity Rate</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in general_info %}
+            <tr>
+                <td><b>{{ row[0] }}</b></td>
+                <td>{{ row[1] }}</td>
+                <td style="text-align: center;">{{ row[2] }}</td>
+                <td style="text-align: center;">{{ row[3] }}</td>
+                <td style="text-align: center;"><b>{{ row[4] }}</b></td>
+                <td style="text-align: center; font-size: 8px;">{{ row[5]|replace("\n", "<br>")|safe }}</td>
+                <td style="text-align: center;"><span class="badge-ok">{{ row[6] }}</span></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <h2>2. Priority Incident Timeline &amp; Visual Evidence (High &amp; Medium)</h2>
+    <table class="data-table" id="logs-table">
+        <thead>
+            <tr>
+                <th style="width: 10%;">Time</th>
+                <th style="width: 13%;">Camera</th>
+                <th style="width: 13%;">Severity / Type</th>
+                <th style="width: 42%;">VLM Observation &amp; Scene Details</th>
+                <th style="width: 22%; text-align: center;">Evidence Snapshot</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for ev in all_events %}
+            <tr>
+                <td><b>{{ ev.ts }}</b></td>
+                <td>{{ ev.cam }}</td>
+                <td>
+                    {% if ev.sev == "HIGH" %}<span class="badge-high">🚨 HIGH<br>{{ ev.type }}</span>
+                    {% elif ev.sev == "MEDIUM" %}<span class="badge-med">⚠️ MEDIUM<br>{{ ev.type }}</span>
+                    {% else %}<span class="badge-low">{{ ev.sev }}<br>{{ ev.type }}</span>{% endif %}
+                </td>
+                <td style="font-size: 8.5px; line-height: 1.3;">{{ ev.obs }}</td>
+                <td style="text-align: center;">
+                    {% if ev.img_path %}
+                    <img class="evidence-thumb" src="file://{{ ev.img_path }}" alt="Evidence">
+                    {% else %}
+                    <span style="color: #94a3b8; font-size: 8px;">No Evidence Captured</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+            {% if not all_events %}
+            <tr><td colspan="5" class="no-records">✔ No high or medium severity anomalies detected during this shift period. All zones normal.</td></tr>
+            {% endif %}
+        </tbody>
+    </table>
+
+    <h2>3. Executive Zone Routine Activity Summaries</h2>
+    <ul class="routine-list">
+        {% for cam, desc in routines.items() %}
+        <li class="routine-item">
+            <span class="routine-cam">📷 {{ cam }}:</span> {{ desc }}
+        </li>
+        {% endfor %}
+    </ul>
+
+</body>
+</html>

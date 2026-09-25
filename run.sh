@@ -62,6 +62,7 @@ declare -a LOG_PIDS=()
 
 cleanup() {
     local exit_code=$?
+    trap - EXIT INT TERM HUP
     echo ""
     warn "Shutting down RapidAlert (Exit code: ${exit_code})..."
     for pid in "${LOG_PIDS[@]:-}"; do
@@ -77,10 +78,15 @@ cleanup() {
             kill -9 "${UVICORN_PID}" 2>/dev/null || true
         fi
     fi
+    pkill -15 -f "uvicorn.*backend.main" 2>/dev/null || true
+    pkill -15 -f "backend.main" 2>/dev/null || true
     fuser -k "${DASHBOARD_PORT}/tcp" 2>/dev/null || true
-    echo -e "${BOLD}${GREEN}  ✓ Backend gracefully stopped.${NC}"
+    # Restore terminal state (prevents frozen/noecho terminal on exit)
+    stty sane 2>/dev/null || true
+    stty echo icanon 2>/dev/null || true
+    echo -e "${BOLD}${GREEN}  ✓ Backend gracefully stopped and terminal restored.${NC}"
 }
-trap cleanup INT TERM
+trap cleanup EXIT INT TERM HUP
 
 # ── Banner ───────────────────────────────────────────────────────────
 echo -e "${BOLD}"
@@ -291,10 +297,15 @@ done
 echo -e "${BOLD}${GREEN}  ╚═══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
-# ── Run the dashboard backend directly in foreground ─────────────────
-exec python3 -m uvicorn backend.main:app \
+# ── Run the dashboard backend in foreground with TTY protection ───────────
+python3 -m uvicorn backend.main:app \
   --host 0.0.0.0 \
   --port "${DASHBOARD_PORT}" \
   --timeout-graceful-shutdown 1 \
   --reload \
-  --log-level info
+  --log-level info &
+UVICORN_PID=$!
+
+wait "${UVICORN_PID}" 2>/dev/null || true
+cleanup
+

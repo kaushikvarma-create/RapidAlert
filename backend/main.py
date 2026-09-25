@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
@@ -22,7 +23,8 @@ import warnings
 warnings.filterwarnings("ignore", message=".*resource_tracker.*", category=UserWarning)
 os.environ.setdefault("PYTHONWARNINGS", "ignore:resource_tracker:UserWarning")
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Request, Depends
+from pydantic import BaseModel
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Request, Depends, Body
 from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -83,10 +85,12 @@ from backend.services.scheduler import DeadlineScheduler
 from backend.services.ws_manager import WSManager
 from backend.services.storage import StorageManager
 from backend.services.auth_service import AuthService
+from backend.services.reporting_service import ReportingService
 from backend.services.rtsp_scanner import RTSPScanner
 from backend.services.metrics_monitor import metrics_loop
 from backend.services.scene_trigger import SceneTriggerEngine
 from backend.services.watchdog import SystemWatchdog
+from backend.services.watchdog_emailer import WatchdogEmailer
 from backend.core.shutdown_logger import log_system_event
 
 
@@ -104,6 +108,14 @@ alert_engine = AlertEngine()
 ws_manager = WSManager()
 storage = StorageManager(DATABASE_PATH)
 auth_service = AuthService(DATABASE_PATH)
+reporting_service = ReportingService(DATABASE_PATH, SYSTEM_CONFIG_PATH, vlm_pool, frame_store)
+watchdog_emailer = WatchdogEmailer(
+    db_path=DATABASE_PATH,
+    config_path=SYSTEM_CONFIG_PATH,
+    camera_manager=camera_manager,
+    frame_store=frame_store,
+    vlm_pool=vlm_pool,
+)
 prompt_manager = PromptManager(
     PROMPTS_CONFIG_PATH,
     cameras_config_provider=camera_manager.get_config,
@@ -150,6 +162,7 @@ scheduler = DeadlineScheduler(
 )
 alert_engine.set_broadcaster(ws_manager.broadcast)
 error_tracker.set_broadcaster(ws_manager.broadcast)
+error_tracker.set_watchdog_emailer(watchdog_emailer)
 
 scene_trigger = SceneTriggerEngine(
     frame_store=frame_store,
@@ -171,6 +184,7 @@ watchdog = SystemWatchdog(
     frame_store=frame_store,
     vlm_pool=vlm_pool,
     ws_manager=ws_manager,
+    watchdog_emailer=watchdog_emailer,
     interval_sec=15.0,
     broadcast_fn=ws_manager.broadcast,
 )
@@ -190,11 +204,14 @@ async def lifespan(app: FastAPI):
     _is_shutting_down = False
     # ── Startup ─────────────────────────────────────────────────
     t_start = time.monotonic()
+    # Audit prior crash / unexpected power outage state
+    watchdog_emailer.check_and_alert_prior_crash()
     camera_manager.sync()
     await vlm_pool.start()
     await scheduler.start()
     scene_trigger.start()
     watchdog.start()
+    reporting_service.start()
     _bg_tasks.append(asyncio.create_task(prompt_manager.watch_loop()))
     _bg_tasks.append(asyncio.create_task(_config_sync_loop()))
     _bg_tasks.append(asyncio.create_task(metrics_loop(ws_manager.broadcast)))
@@ -205,10 +222,12 @@ async def lifespan(app: FastAPI):
     yield
     # ── Shutdown ────────────────────────────────────────────────
     _is_shutting_down = True
+    watchdog_emailer.mark_clean_shutdown(reason="Application Shutdown Triggered (Ctrl+C / SIGINT / SIGTERM)")
     await ws_manager.close_all()
     uptime = time.monotonic() - t_start
     summary = watchdog.get_summary()
     watchdog.stop()
+    reporting_service.stop()
     for task in _bg_tasks:
         task.cancel()
     scene_trigger.stop()
@@ -838,10 +857,14 @@ async def api_clear_alerts():
 
 
 @app.post("/api/alerts/test", dependencies=[Depends(require_admin)])
-async def api_trigger_test_alert(cam: Optional[str] = None):
-    """Trigger an immediate test alert to verify notification feed and inspector."""
+async def api_trigger_test_alert(cam: Optional[str] = None, severity: str = "HIGH", followup: bool = True):
+    """Trigger an immediate test alert for a specific camera to verify notification feed and inspector."""
     active = camera_manager.get_active_cameras()
     cam_name = cam if (cam and cam in active) else (active[0] if active else "TEST_CAM")
+    target_sev = (severity or "HIGH").upper()
+    if target_sev not in ("HIGH", "MEDIUM", "LOW"):
+        target_sev = "HIGH"
+
     snap = frame_store.get_snapshot_b64(
         cam_name, max_w=HIGH_RES_FRAME_WIDTH, quality=HIGH_RES_JPEG_QUALITY
     )
@@ -852,12 +875,12 @@ async def api_trigger_test_alert(cam: Optional[str] = None):
     alert = await alert_engine.process(
         cam_name=cam_name,
         result={
-            "severity": "HIGH",
-            "safety": "WARNING",
-            "activity": "MOTION_TEST",
+            "severity": target_sev,
+            "safety": "WARNING" if target_sev == "HIGH" else "CAUTION",
+            "activity": "MANUAL_TEST",
             "workers": "2",
             "machinery": "None",
-            "observation": f"Test Incident: Detected active movement and safety inspection trigger on {cam_name}. Verified alert delivery pipeline.",
+            "observation": f"Manual Test Incident: Detected active movement and safety inspection trigger on {cam_name}. Verified alert delivery pipeline.",
             "latency": 1.15,
             "e2e_latency": 1.35,
         },
@@ -869,7 +892,7 @@ async def api_trigger_test_alert(cam: Optional[str] = None):
         e2e_latency=1.35,
         latency=1.15,
     )
-    if alert:
+    if alert and followup:
         asyncio.create_task(
             scheduler._schedule_followup(
                 cam_name=cam_name,
@@ -878,7 +901,7 @@ async def api_trigger_test_alert(cam: Optional[str] = None):
                 drift_score=0.0482,
                 delay_sec=scheduler.followup_interval_sec,
                 prev_observation=alert.get("observation", ""),
-                prev_severity=alert.get("severity", "HIGH"),
+                prev_severity=alert.get("severity", target_sev),
                 cycle=1,
             )
         )
@@ -1059,6 +1082,145 @@ async def probe_vlm_endpoints():
         "health": {r["url"]: r["healthy"] for r in probe_results},
         "probe": probe_results,
     }
+
+
+# ══════════════════════════════════════════════════════════════
+#  REST — Automated Shift Reporting & PDF Intelligence
+# ══════════════════════════════════════════════════════════════
+
+class GenerateReportBody(BaseModel):
+    shift_type: str = "AUTO"  # "AUTO", "DAY", "NIGHT", or "CUSTOM"
+    send_email: bool = True
+    start_ts: Optional[float] = None
+    end_ts: Optional[float] = None
+
+
+@app.get("/api/reports")
+def api_get_reports(limit: int = 50):
+    """List generated shift reports."""
+    return reporting_service.get_reports_list(limit=limit)
+
+
+@app.get("/api/reports/{report_id}/pdf")
+def api_get_report_pdf(report_id: int):
+    """Download/view shift report PDF."""
+    from fastapi.responses import FileResponse
+    conn = reporting_service._conn()
+    row = conn.execute("SELECT id, pdf_path FROM reports WHERE id = ?", (report_id,)).fetchone()
+    if not row or not row["pdf_path"]:
+        raise HTTPException(status_code=404, detail="Report record not found")
+    
+    pdf_p = Path(row["pdf_path"])
+    if not pdf_p.exists():
+        raise HTTPException(status_code=404, detail="Report PDF file not found on disk")
+    
+    return FileResponse(
+        str(pdf_p),
+        media_type="application/pdf",
+        filename=pdf_p.name,
+        headers={"Content-Disposition": f'inline; filename="{pdf_p.name}"'}
+    )
+
+
+@app.post("/api/reports/generate")
+async def api_generate_report(body: GenerateReportBody = Body(...)):
+    """Trigger on-demand shift report generation and email dispatch."""
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            None,
+            reporting_service.generate_shift_report,
+            body.shift_type,
+            body.start_ts,
+            body.end_ts,
+            body.send_email,
+        )
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Report generation failed: {exc}")
+
+
+@app.get("/api/reports/stats")
+def api_get_reporting_stats():
+    """Returns reporting schedule status, buffer capacity, recipients, and next scheduled runs."""
+    now = datetime.now()
+    today_6am = now.replace(hour=6, minute=0, second=0, microsecond=0)
+    today_6pm = now.replace(hour=18, minute=0, second=0, microsecond=0)
+    tomorrow_6am = (now + timedelta(days=1)).replace(hour=6, minute=0, second=0, microsecond=0)
+    
+    if now < today_6am:
+        next_run = today_6am
+        next_shift = "NIGHT"
+    elif now < today_6pm:
+        next_run = today_6pm
+        next_shift = "DAY"
+    else:
+        next_run = tomorrow_6am
+        next_shift = "NIGHT"
+
+    sys_cfg = config_manager.get()
+    buf_stats = reporting_service.get_buffer_stats()
+
+    return {
+        "enabled": getattr(sys_cfg, "reporting_enabled", True),
+        "schedule_hours": [6, 18],
+        "next_scheduled_run": next_run.strftime("%b %d, %Y %H:%M:%S IST"),
+        "next_shift": next_shift,
+        "recipients": getattr(sys_cfg, "report_email_recipients", ["pandalavacarji@gmail.com", "reportsclove@gmail.com"]),
+        "sender_email": getattr(sys_cfg, "report_sender_email", "reportsclove@gmail.com"),
+        "stored_count": buf_stats.get("stored_count", 0),
+        "max_buffer": buf_stats.get("max_buffer", 69),
+        "buffer_coverage_days": buf_stats.get("buffer_coverage_days", 34.5),
+        "disk_usage_mb": buf_stats.get("disk_usage_mb", 0.0),
+        "average_pdf_kb": buf_stats.get("average_pdf_kb", 0.0),
+    }
+
+
+# ══════════════════════════════════════════════════════════════
+#  Watchdog Email & Diagnostics Endpoints
+# ══════════════════════════════════════════════════════════════
+
+@app.get("/api/watchdog/status")
+def api_get_watchdog_status():
+    """Returns real-time health watchdog telemetry and 24h health snapshot."""
+    summary = watchdog.get_summary()
+    daily_snapshot = watchdog_emailer.compile_daily_health_summary()
+    sys_cfg = config_manager.get()
+    return {
+        "watchdog": summary,
+        "daily_snapshot": daily_snapshot,
+        "watchdog_alerts_enabled": getattr(sys_cfg, "watchdog_alerts_enabled", True),
+        "daily_digest_enabled": getattr(sys_cfg, "daily_digest_enabled", True),
+        "daily_digest_hour": getattr(sys_cfg, "daily_digest_hour", 8),
+        "recipients": watchdog_emailer._get_recipients(),
+    }
+
+
+@app.post("/api/watchdog/test-alert", dependencies=[Depends(require_admin)])
+def api_test_watchdog_alert():
+    """Triggers an immediate test critical incident email to verified recipients."""
+    success = watchdog_emailer.send_critical_alert(
+        event_type="TEST_INCIDENT",
+        title="Manual Watchdog Alert Diagnostic Test",
+        message="This is a test critical watchdog notification initiated by the administrator to verify end-to-end alerting dispatch.",
+        details={
+            "Initiator": "Admin Dashboard",
+            "Hardware Node": "NVIDIA Thor",
+            "Pipeline Status": "Operational",
+        },
+        severity="CRITICAL",
+        remediation="No action needed. Alerting pipeline is verified functional.",
+        cooldown_sec=0.0,
+    )
+    return {"status": "ok", "dispatched": success, "message": "Test watchdog alert queued for transmission."}
+
+
+@app.post("/api/watchdog/send-daily-digest", dependencies=[Depends(require_admin)])
+def api_send_daily_digest():
+    """Forces immediate compilation and email transmission of the 24-Hour System Health & Diagnostics Digest."""
+    success = watchdog_emailer.send_daily_health_digest()
+    return {"status": "ok", "dispatched": success, "message": "24-Hour System Health Digest compilation and email queued."}
+
 
 
 # ══════════════════════════════════════════════════════════════

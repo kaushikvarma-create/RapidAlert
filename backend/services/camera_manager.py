@@ -49,30 +49,41 @@ class CameraThread(threading.Thread):
         self.connected_mode = "OFFLINE"
 
     def run(self) -> None:
-        hw_failed_once = False
+        nvdec_consecutive_failures = 0
+        MAX_NVDEC_RETRIES = 3
+
         while not self.stop_event.is_set():
             cap = None
             is_hw = False
 
-            if self.use_nvidia and not hw_failed_once:
-                try:
-                    cap = NvidiaStreamCapture(self.url, width=DEFAULT_FRAME_WIDTH, height=DEFAULT_FRAME_HEIGHT)
-                    if cap.isOpened():
-                        is_hw = True
-                        print(f"[CamMgr] ⚡ {self.cam_name} using NVIDIA Hardware Decoder (NVDEC)")
-                    else:
-                        cap.release()
+            # Prefer Hardware NVDEC if available
+            if self.use_nvidia and nvdec_consecutive_failures < MAX_NVDEC_RETRIES:
+                for nvdec_attempt in range(1, MAX_NVDEC_RETRIES + 1):
+                    if self.stop_event.is_set():
+                        break
+                    try:
+                        cap = NvidiaStreamCapture(self.url, width=DEFAULT_FRAME_WIDTH, height=DEFAULT_FRAME_HEIGHT)
+                        if cap.isOpened():
+                            is_hw = True
+                            print(f"[CamMgr] ⚡ {self.cam_name} using NVIDIA Hardware Decoder (NVDEC)")
+                            break
+                        else:
+                            cap.release()
+                            cap = None
+                    except Exception as e:
+                        error_tracker.capture_exception(
+                            e,
+                            component="CameraManager",
+                            camera=self.cam_name,
+                            effect=f"NVIDIA NVDEC hardware decode attempt {nvdec_attempt}/{MAX_NVDEC_RETRIES} failed for {self.cam_name}",
+                            severity="WARNING",
+                        )
                         cap = None
-                except Exception as e:
-                    error_tracker.capture_exception(
-                        e,
-                        component="CameraManager",
-                        camera=self.cam_name,
-                        effect=f"NVIDIA NVDEC hardware decode initialization failed for {self.cam_name}; falling back to CPU OpenCV decoder",
-                        severity="WARNING",
-                    )
-                    cap = None
-                    hw_failed_once = True
+                    time.sleep(0.3 * nvdec_attempt)
+
+                if cap is None or not is_hw:
+                    nvdec_consecutive_failures += 1
+                    print(f"[CamMgr] ⚠️ {self.cam_name} NVDEC hardware decode unavailable after {MAX_NVDEC_RETRIES} attempts; falling back to CPU OpenCV decoder")
 
             if cap is None:
                 is_hw = False
@@ -81,6 +92,8 @@ class CameraThread(threading.Thread):
 
             got_frame = False
             failed_attempts = 0
+            # Allow warm-up period: RTSP handshakes & keyframe acquisition take 1-4 seconds
+            WARMUP_MAX_ATTEMPTS = 30 if is_hw else 15
 
             while not self.stop_event.is_set():
                 if is_hw:
@@ -95,14 +108,25 @@ class CameraThread(threading.Thread):
                         got_frame = True
                         self.connected = True
                         self.connected_mode = "NVDEC" if is_hw else "CPU-OpenCV"
+                        if is_hw:
+                            nvdec_consecutive_failures = 0
                         print(f"[CamMgr] ✅ {self.cam_name} connected ({self.connected_mode})")
                 else:
                     failed_attempts += 1
-                    if is_hw and not got_frame and failed_attempts >= 2:
-                        print(f"[CamMgr] ⚠️ {self.cam_name} NVDEC bufferpool/read error; switching to CPU OpenCV fallback")
-                        hw_failed_once = True
-                        break
-                    if got_frame:
+                    # During initial handshake / warm-up, wait up to WARMUP_MAX_ATTEMPTS
+                    if not got_frame:
+                        if failed_attempts >= WARMUP_MAX_ATTEMPTS:
+                            if is_hw:
+                                nvdec_consecutive_failures += 1
+                                print(f"[CamMgr] ⚠️ {self.cam_name} NVDEC keyframe acquisition timeout ({failed_attempts} attempts); retrying connection")
+                            else:
+                                print(f"[CamMgr] ⚠️ {self.cam_name} CPU RTSP stream timeout ({failed_attempts} attempts)")
+                            break
+                        time.sleep(0.12)
+                        continue
+
+                    # If stream was already active and drops for more than 5 seconds (~10 attempts)
+                    if got_frame and failed_attempts >= 10:
                         self.connected = False
                         self.connected_mode = "DISCONNECTED"
                         error_tracker.capture_error(
@@ -117,6 +141,10 @@ class CameraThread(threading.Thread):
 
             if cap:
                 cap.release()
+
+            # If running on CPU, periodically allow retry of NVDEC on next cycle
+            if not is_hw:
+                nvdec_consecutive_failures = 0
 
             # Retry backoff
             if not self.stop_event.is_set():
@@ -260,4 +288,4 @@ class CameraManager:
         with self._lock:
             self._threads[name] = t
             self._stop_events[name] = ev
-        time.sleep(0.05)
+        time.sleep(0.18)

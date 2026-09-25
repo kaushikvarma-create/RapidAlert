@@ -80,12 +80,17 @@ class ErrorTracker:
         self._records: collections.deque[ErrorRecord] = collections.deque(maxlen=maxlen)
         self._lock = threading.Lock()
         self._broadcast_fn: Optional[Callable] = None
+        self._watchdog_emailer = None
         self._seq = 0
         self._init_db()
 
     def set_broadcaster(self, fn: Callable) -> None:
         """Inject WebSocket broadcast function."""
         self._broadcast_fn = fn
+
+    def set_watchdog_emailer(self, emailer: Any) -> None:
+        """Inject WatchdogEmailer for automated severe incident alerting."""
+        self._watchdog_emailer = emailer
 
     def _init_db(self) -> None:
         """Initialize errors table in SQLite database."""
@@ -222,6 +227,27 @@ class ErrorTracker:
             except Exception:
                 pass
 
+        # 5. Automated Critical Watchdog Email Alert
+        if record.severity in ("CRITICAL", "FATAL") and self._watchdog_emailer:
+            try:
+                self._watchdog_emailer.send_critical_alert(
+                    event_type="FATAL_EXCEPTION",
+                    title=f"Critical Exception in {component}",
+                    message=f"A severe unhandled exception was captured in {component}: {record.message}",
+                    details={
+                        "Component": component,
+                        "Function": func_name,
+                        "File Location": record.file,
+                        "Downstream Effect": record.effect,
+                        "Camera Context": camera or "N/A",
+                    },
+                    severity=record.severity,
+                    stack_trace=record.stack_trace,
+                    remediation=f"Investigate {record.file} in {func_name}(). Check application logs for full cascade.",
+                )
+            except Exception:
+                pass
+
         return record
 
     def capture_error(
@@ -297,6 +323,27 @@ class ErrorTracker:
                         "type": "system_error",
                         "data": record.to_dict(),
                     }))
+            except Exception:
+                pass
+
+        # Automated Critical Watchdog Email Alert
+        if record.severity in ("CRITICAL", "FATAL") and self._watchdog_emailer:
+            try:
+                self._watchdog_emailer.send_critical_alert(
+                    event_type="CRITICAL_FAULT",
+                    title=f"Critical Fault in {component}",
+                    message=f"A severe fault was recorded in {component}: {record.message}",
+                    details={
+                        "Component": component,
+                        "Function": func_name,
+                        "File Location": record.file,
+                        "Downstream Effect": record.effect,
+                        "Camera Context": camera or "N/A",
+                    },
+                    severity=record.severity,
+                    stack_trace=record.stack_trace,
+                    remediation=f"Inspect subsystem {component}. Check active processes and hardware status.",
+                )
             except Exception:
                 pass
 

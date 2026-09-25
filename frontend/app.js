@@ -35,6 +35,8 @@ const App = {
     this.bindUIEvents();
     this._fetchVLMEndpoints();
     this._fetchInitialAlerts();
+    this._fetchReportingStats();
+    this._fetchReports();
     this.connectWS();
     this.startTimestampTicker();
   },
@@ -2317,13 +2319,23 @@ const App = {
         console.warn('Auth status check failed:', e);
       }
     }
-    this._openAuthModal();
+    this._openAuthModal(null, () => {
+      this._showSettingsPanel();
+    });
   },
 
   _showSettingsPanel() {
     this._updateAuthBadge(true);
-    document.getElementById('settings-backdrop').removeAttribute('hidden');
-    document.getElementById('settings-panel').removeAttribute('hidden');
+    const backdrop = document.getElementById('settings-backdrop');
+    const panel = document.getElementById('settings-panel');
+    if (backdrop) {
+      backdrop.removeAttribute('hidden');
+      backdrop.style.display = 'block';
+    }
+    if (panel) {
+      panel.removeAttribute('hidden');
+      panel.style.display = 'flex';
+    }
     // Sync cam table
     this._syncCamTable(Object.values(this.cameras).map(c => c.config));
     // Sync master prompt
@@ -2352,7 +2364,8 @@ const App = {
     }
   },
 
-  async _openAuthModal(errMsg = null) {
+  async _openAuthModal(errMsg = null, onSuccess = null) {
+    this._authSuccessCallback = onSuccess;
     const modal = document.getElementById('modal-admin-auth');
     if (!modal) return;
     modal.style.display = 'flex';
@@ -2385,7 +2398,7 @@ const App = {
         } else {
           if (title) title.textContent = 'Admin Unlock';
           if (sub) sub.textContent = 'Encrypted configuration control';
-          if (btnLabel) btnLabel.textContent = '🔓 Unlock Settings';
+          if (btnLabel) btnLabel.textContent = '🔓 Unlock';
         }
       }
     } catch (e) {}
@@ -2394,6 +2407,7 @@ const App = {
   },
 
   _closeAuthModal() {
+    this._authSuccessCallback = null;
     const modal = document.getElementById('modal-admin-auth');
     if (modal) modal.style.display = 'none';
   },
@@ -2431,9 +2445,21 @@ const App = {
         this.isAuthConfigured = true;
         sessionStorage.setItem('rapidalert_admin_token', data.token);
         sessionStorage.setItem('rapidalert_admin_user', this.adminUser);
-        this._closeAuthModal();
-        this._showToast('🔓 Settings unlocked with encrypted session.', 'ok');
-        this._showSettingsPanel();
+
+        // Capture callback before closing modal
+        const successCb = this._authSuccessCallback;
+        this._authSuccessCallback = null;
+
+        const modal = document.getElementById('modal-admin-auth');
+        if (modal) modal.style.display = 'none';
+
+        this._showToast('🔓 Administrator credentials verified.', 'ok');
+        
+        if (typeof successCb === 'function') {
+          successCb();
+        } else {
+          this._showSettingsPanel();
+        }
       } else {
         if (errMsgEl) errMsgEl.textContent = data.detail || 'Invalid username or password.';
         if (errBanner) errBanner.style.display = 'flex';
@@ -2509,8 +2535,111 @@ const App = {
   },
 
   _closeSettings() {
-    document.getElementById('settings-backdrop').setAttribute('hidden', '');
-    document.getElementById('settings-panel').setAttribute('hidden', '');
+    const backdrop = document.getElementById('settings-backdrop');
+    const panel = document.getElementById('settings-panel');
+    if (backdrop) {
+      backdrop.setAttribute('hidden', '');
+      backdrop.style.display = 'none';
+    }
+    if (panel) {
+      panel.setAttribute('hidden', '');
+      panel.style.display = 'none';
+    }
+
+    // Auto-lock admin session every time Settings is closed
+    if (this.adminToken) {
+      fetch('/api/auth/logout', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${this.adminToken}` }
+      }).catch(() => {});
+    }
+    this.adminToken = null;
+    sessionStorage.removeItem('rapidalert_admin_token');
+    sessionStorage.removeItem('rapidalert_admin_user');
+    this._updateAuthBadge(false);
+  },
+
+  // ════════════════════════════════════════════════════════════
+  //  Manual Test Incident Trigger Dialog
+  // ════════════════════════════════════════════════════════════
+  _openTestTriggerModal() {
+    if (!this.adminToken) {
+      this._openAuthModal('Administrator credentials required to trigger synthetic incident alert.', () => {
+        this._openTestTriggerModal();
+      });
+      return;
+    }
+
+    const select = document.getElementById('test-trigger-cam-select');
+    if (select) {
+      const camNames = Object.keys(this.cameras || {});
+      if (camNames.length > 0) {
+        select.innerHTML = camNames.map(name => {
+          const cam = this.cameras[name];
+          const isEnabled = cam?.config?.enabled !== false;
+          return `<option value="${this._esc(name)}">${this._esc(name)} ${isEnabled ? '(Active)' : '(Offline)'}</option>`;
+        }).join('');
+      } else {
+        select.innerHTML = '<option value="">No cameras configured</option>';
+      }
+    }
+
+    const modal = document.getElementById('modal-test-trigger');
+    if (modal) modal.style.display = 'flex';
+  },
+
+  _closeTestTriggerModal() {
+    const modal = document.getElementById('modal-test-trigger');
+    if (modal) modal.style.display = 'none';
+
+    // Auto-lock session after closing test trigger popup
+    if (this.adminToken) {
+      fetch('/api/auth/logout', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${this.adminToken}` }
+      }).catch(() => {});
+    }
+    this.adminToken = null;
+    sessionStorage.removeItem('rapidalert_admin_token');
+    sessionStorage.removeItem('rapidalert_admin_user');
+    this._updateAuthBadge(false);
+  },
+
+  async _submitTestTrigger() {
+    const camSelect = document.getElementById('test-trigger-cam-select');
+    const sevSelect = document.getElementById('test-trigger-sev-select');
+    const modeSelect = document.getElementById('test-trigger-mode-select');
+
+    const cam = camSelect?.value;
+    const severity = sevSelect?.value || 'HIGH';
+    const followup = modeSelect?.value === 'followup';
+
+    if (!cam) {
+      this._showToast('Please select a camera feed first.', 'err');
+      return;
+    }
+
+    const btn = document.getElementById('btn-submit-test-trigger');
+    if (btn) btn.disabled = true;
+
+    try {
+      const url = `/api/alerts/test?cam=${encodeURIComponent(cam)}&severity=${encodeURIComponent(severity)}&followup=${followup}`;
+      const res = await this._authFetch(url, { method: 'POST' });
+      if (res.ok) {
+        const body = await res.json();
+        this._showToast(`⚡ Dispatched test incident for ${cam} (${severity})!`, 'ok');
+        if (body && body.alert) {
+          this.onAlert({ alert: body.alert });
+        }
+        this._closeTestTriggerModal();
+      } else {
+        this._showToast('Failed to trigger test alert (Admin authentication required)', 'err');
+      }
+    } catch (e) {
+      this._showToast(`Error: ${e.message}`, 'err');
+    } finally {
+      if (btn) btn.disabled = false;
+    }
   },
 
   _syncCamTable(cams) {
@@ -2817,58 +2946,355 @@ const App = {
     if (!list) return;
 
     wrap.style.display = '';
-    count.textContent  = `${found.length} camera${found.length !== 1 ? 's' : ''} found`;
+    
+    // Count total channels across all discovered devices
+    let totalChannels = 0;
+    for (const dev of found) {
+      if (dev.channels && dev.channels.length > 0) {
+        totalChannels += dev.channels.length;
+      } else if (dev.rtsp_urls) {
+        totalChannels += dev.rtsp_urls.length;
+      }
+    }
+
+    count.textContent = `${totalChannels} camera channel${totalChannels !== 1 ? 's' : ''} found across ${found.length} device${found.length !== 1 ? 's' : ''}`;
     list.innerHTML = '';
 
-    if (found.length === 0) {
-      list.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-3);font-size:0.8rem;">No cameras found. Try a manual subnet or check your network.</div>';
+    if (found.length === 0 || totalChannels === 0) {
+      list.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-3);font-size:0.85rem;">No verified RTSP cameras found. Please check your subnet / IP range or enter credentials.</div>';
       return;
     }
 
-    for (const cam of found) {
-      const methCls = cam.method === 'onvif' ? 'scan-method-onvif' : 'scan-method-tcp';
-      // Show first 3 URL guesses; rest toggled
-      const urls = cam.rtsp_urls || [];
-      const shown = urls.slice(0, 3);
-      const urlsHtml = shown.map(u => `
-        <div class="scan-url-row">
-          <span class="scan-url-text" title="${this._esc(u)}">${this._esc(u)}</span>
-          <button class="btn-use-url" data-url="${this._esc(u)}" data-ip="${this._esc(cam.ip)}">+ Use</button>
-        </div>
-      `).join('');
+    for (const dev of found) {
+      const vendor = dev.vendor || 'IP Camera';
+      const model = dev.model || '';
+      const ip = dev.ip;
+      const port = dev.port || 554;
+      const channels = dev.channels || (dev.rtsp_urls || []).map((u, i) => ({
+        channel: i + 1,
+        name: `CAM_${ip.replace(/\./g, '_')}_CH${i + 1}`,
+        rtsp_url: u,
+        codec: 'H.264',
+        verified: true,
+      }));
 
       const item = document.createElement('div');
       item.className = 'scan-item';
+      item.style.padding = '14px';
+      item.style.borderBottom = '1px solid var(--border)';
+      item.style.display = 'flex';
+      item.style.flexDirection = 'column';
+      item.style.gap = '10px';
+
+      const channelsHtml = channels.map(ch => {
+        const chName = ch.name || `Channel ${ch.channel}`;
+        const chUrl = ch.rtsp_url;
+        const codec = ch.codec || 'H.264';
+        return `
+          <div class="scan-url-row" style="display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 10px; background: var(--bg-card-hover, rgba(255,255,255,0.03)); border-radius: var(--radius-sm, 6px); border: 1px solid var(--border);">
+            <div style="display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;">
+              <span class="badge" style="font-size: 0.65rem; font-family: var(--font-mono); padding: 2px 6px; background: var(--accent-dim, rgba(0,200,255,0.15)); color: var(--accent, #00c8ff); font-weight: 700;">CH ${ch.channel}</span>
+              <span style="font-weight: 600; font-size: 0.8rem; color: var(--text, #fff); white-space: nowrap;">${this._esc(chName)}</span>
+              <span class="badge" style="font-size: 0.62rem; padding: 1px 5px; background: rgba(255,255,255,0.08); color: var(--text-2, #aaa);">${this._esc(codec)}</span>
+              <span class="scan-url-text" title="${this._esc(chUrl)}" style="font-size: 0.68rem; color: var(--text-3, #777); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;">${this._esc(chUrl)}</span>
+            </div>
+            <button class="btn-use-url" data-url="${this._esc(chUrl)}" data-name="${this._esc(chName)}" data-ip="${this._esc(ip)}" style="padding: 4px 10px; font-size: 0.72rem; font-weight: 600; background: var(--accent, #00c8ff); color: #000; border: none; border-radius: 4px; cursor: pointer; flex-shrink: 0;">+ Use Camera</button>
+          </div>
+        `;
+      }).join('');
+
       item.innerHTML = `
-        <div class="scan-item-header">
-          <span class="scan-ip">${this._esc(cam.ip)}</span>
-          <span class="scan-method ${methCls}">${cam.method}</span>
-          <span style="font-size:0.68rem;color:var(--text-3);">port ${cam.port}</span>
+        <div class="scan-item-header" style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span style="font-size: 1rem;">📹</span>
+            <div>
+              <span style="font-weight: 700; font-size: 0.9rem; color: var(--text, #fff);">${this._esc(vendor)}</span>
+              ${model ? `<span style="font-size: 0.72rem; color: var(--text-3, #888); margin-left: 6px;">(${this._esc(model)})</span>` : ''}
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span class="scan-ip" style="font-weight: 700; font-family: var(--font-mono); color: var(--cyan, #00e5ff); font-size: 0.82rem;">${this._esc(ip)}:${port}</span>
+            <span class="badge badge-green" style="font-size: 0.65rem; padding: 2px 6px;">${channels.length} Live Channel${channels.length !== 1 ? 's' : ''}</span>
+          </div>
         </div>
-        <div class="scan-urls">${urlsHtml}</div>
+        <div class="scan-urls" style="display: flex; flex-direction: column; gap: 6px;">${channelsHtml}</div>
       `;
       list.appendChild(item);
     }
 
-    // Click handler for "Use" buttons
+    // Click handler for "Use Camera" buttons
     list.querySelectorAll('.btn-use-url').forEach(btn => {
       btn.addEventListener('click', () => {
         const url = btn.dataset.url;
-        const ip  = btn.dataset.ip;
+        const name = btn.dataset.name || `CAM_${btn.dataset.ip.replace(/\./g, '_')}`;
+        
         // Auto-fill camera add form and switch to cameras tab
         const nameEl = document.getElementById('new-cam-name');
         const urlEl  = document.getElementById('new-cam-url');
-        if (nameEl) nameEl.value = `CAM_${ip.replace(/\./g, '_')}`;
+        if (nameEl) nameEl.value = name.replace(/\s+/g, '_').toUpperCase();
         if (urlEl)  urlEl.value  = url;
+        
         // Switch to cameras tab
         document.querySelectorAll('.stab').forEach(b => b.classList.remove('active'));
         document.querySelectorAll('.stab-content').forEach(c => c.classList.remove('active'));
         const camTab = document.querySelector('.stab[data-stab="cameras"]');
         if (camTab) camTab.classList.add('active');
         document.getElementById('stab-cameras')?.classList.add('active');
-        this._toast(`URL copied → Cameras tab. Adjust name and click Add.`);
+        this._toast(`Selected camera "${name}" → Cameras tab ready to add!`);
       });
     });
+  },
+
+  // ════════════════════════════════════════════════════════════
+  //  Shift Reporting & Automated PDF Delivery
+  // ════════════════════════════════════════════════════════════
+  _cachedReports: [],
+  _reportFilter: 'all',
+
+  _openReportsModal() {
+    const backdrop = document.getElementById('reports-modal-backdrop');
+    const modal = document.getElementById('modal-reports-explorer');
+    if (backdrop) backdrop.hidden = false;
+    if (modal) modal.hidden = false;
+    this._fetchReports();
+    this._fetchReportingStats();
+  },
+
+  _closeReportsModal() {
+    const backdrop = document.getElementById('reports-modal-backdrop');
+    const modal = document.getElementById('modal-reports-explorer');
+    if (backdrop) backdrop.hidden = true;
+    if (modal) modal.hidden = true;
+  },
+
+  async _fetchReports() {
+    try {
+      const res = await fetch('/api/reports?limit=100');
+      if (!res.ok) return;
+      const reports = await res.json();
+      this._cachedReports = reports || [];
+
+      // Update Header badge count
+      const headerCountEl = document.getElementById('header-reports-count');
+      if (headerCountEl) {
+        headerCountEl.textContent = this._cachedReports.length;
+      }
+
+      // Render into settings tab table if present
+      const tbody = document.getElementById('reports-table-body');
+      if (tbody) {
+        if (!this._cachedReports.length) {
+          tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-3); padding: 24px;">No shift reports generated yet. Click "Generate & Email Report Now" or wait for 06:00 AM / 06:00 PM scheduled slots.</td></tr>';
+        } else {
+          tbody.innerHTML = this._cachedReports.map(r => {
+            const stats = r.summary?.stats || {};
+            const isEmailSent = r.email_status === 'SENT';
+            const emailBadge = isEmailSent
+              ? `<span class="badge badge-green badge-sm">✅ Dispatched</span>`
+              : (r.email_status === 'FAILED' ? `<span class="badge badge-red badge-sm" title="${this._esc(r.error_message || '')}">❌ Failed</span>` : `<span class="badge badge-muted badge-sm">${r.email_status}</span>`);
+            
+            const isNight = (r.shift_type || '').toUpperCase().includes('NIGHT');
+            const shiftBadge = isNight
+              ? `<span class="badge badge-muted badge-sm">🌙 NIGHT (${r.time_frame || '18:00 - 06:00'})</span>`
+              : `<span class="badge badge-green badge-sm">☀️ DAY (${r.time_frame || '06:00 - 18:00'})</span>`;
+
+            return `
+              <tr>
+                <td>
+                  <div style="font-weight: 600; color: var(--text-1);">${r.generated_at_str}</div>
+                  <div style="font-size: 0.72rem; color: var(--text-3); font-family: var(--font-mono);">${this._esc(r.pdf_name)} (${r.file_size_kb || 0} KB)</div>
+                </td>
+                <td>${shiftBadge}</td>
+                <td>
+                  <span style="font-weight: 600;">${stats.total_analyses || 0}</span> analyses
+                  ${stats.high_count > 0 ? `<span style="color: #f87171; font-weight: 700; margin-left: 6px;">(${stats.high_count} HIGH)</span>` : '<span style="color: #34d399; margin-left: 6px;">(0 High)</span>'}
+                </td>
+                <td>
+                  ${emailBadge}
+                  <div style="font-size: 0.7rem; color: var(--text-3); margin-top: 2px;">${this._esc(r.email_recipients || '')}</div>
+                </td>
+                <td style="text-align: right;">
+                  <a href="/api/reports/${r.id}/pdf" target="_blank" class="btn-ghost" style="padding: 4px 8px; font-size: 0.75rem; text-decoration: none; display: inline-flex; align-items: center; gap: 4px;">
+                    📄 View PDF
+                  </a>
+                </td>
+              </tr>
+            `;
+          }).join('');
+        }
+      }
+
+      // Render Modal Cards
+      this._renderReportsCards();
+
+    } catch (e) {
+      console.warn('Failed to fetch reports:', e);
+    }
+  },
+
+  _renderReportsCards() {
+    const container = document.getElementById('reports-cards-container');
+    if (!container) return;
+
+    let filtered = this._cachedReports || [];
+    if (this._reportFilter === 'DAY') {
+      filtered = filtered.filter(r => (r.shift_type || '').toUpperCase().includes('DAY'));
+    } else if (this._reportFilter === 'NIGHT') {
+      filtered = filtered.filter(r => (r.shift_type || '').toUpperCase().includes('NIGHT'));
+    }
+
+    if (!filtered.length) {
+      container.innerHTML = `
+        <div class="reports-empty-state">
+          <div style="font-size: 2.2rem; line-height: 1;">📂</div>
+          <div style="font-weight: 600; color: var(--text-secondary);">No shift reports found matching this filter</div>
+          <small style="color: var(--text-tertiary);">Automatic executive reports generate at 06:00 AM and 06:00 PM IST (Rolling buffer: 69 max).</small>
+        </div>
+      `;
+      return;
+    }
+
+    container.innerHTML = filtered.map(r => {
+      const isNight = (r.shift_type || '').toUpperCase().includes('NIGHT');
+      const cardClass = isNight ? 'report-card shift-night' : 'report-card shift-day';
+      const shiftIcon = isNight ? '🌙' : '☀️';
+      const shiftLabel = isNight ? 'NIGHT SHIFT' : 'DAY SHIFT';
+      const badgeClass = isNight ? 'report-badge-shift night' : 'report-badge-shift day';
+
+      const stats = r.summary?.stats || {};
+      const routines = r.summary?.zone_routines || {};
+      const parking = r.summary?.parking_counts || '2W: 0, 4W: 0, HV: 0';
+
+      // Pick a representative routine summary quote
+      const routineCams = Object.keys(routines);
+      const firstRoutine = routineCams.length > 0 ? `${routineCams[0]}: ${routines[routineCams[0]]}` : 'Standard continuous surveillance executed across all camera zones.';
+
+      const isSent = r.email_status === 'SENT';
+      const emailBadge = isSent
+        ? `<span class="badge badge-green badge-sm">✅ Dispatched</span>`
+        : (r.email_status === 'FAILED' ? `<span class="badge badge-red badge-sm" title="${this._esc(r.error_message || '')}">❌ Delivery Failed</span>` : `<span class="badge badge-muted badge-sm">${r.email_status}</span>`);
+
+      return `
+        <div class="${cardClass}">
+          <div class="report-card-left">
+            <div class="report-card-title">${r.title || 'Site Shift Report'}</div>
+            <div class="report-shift-pills">
+              <span class="${badgeClass}">${shiftIcon} ${shiftLabel}</span>
+              <span class="report-timeframe-badge">⏱️ ${r.time_frame || (isNight ? '18:00 – 06:00 IST' : '06:00 – 18:00 IST')}</span>
+            </div>
+            <div class="report-gen-time">Generated: <strong>${r.generated_at_str}</strong></div>
+          </div>
+
+          <div class="report-card-middle">
+            <div class="report-kpi-chips">
+              <span class="report-kpi-chip">📊 Analyses: <strong>${stats.total_analyses || 0}</strong></span>
+              <span class="report-kpi-chip ${stats.high_count > 0 ? 'kpi-high' : 'kpi-ok'}">🚨 High Severity: <strong>${stats.high_count || 0}</strong></span>
+              <span class="report-kpi-chip">⚠️ Medium: <strong>${stats.medium_count || 0}</strong></span>
+              <span class="report-kpi-chip">🅿️ Parking: <strong>${this._esc(parking.replace(/\\n/g, ' · '))}</strong></span>
+            </div>
+            <div class="report-routine-snippet" title="${this._esc(firstRoutine)}">
+              🔍 <strong>AI Shift Routine:</strong> ${this._esc(firstRoutine)}
+            </div>
+          </div>
+
+          <div class="report-card-right">
+            <div class="report-status-wrap">
+              ${emailBadge}
+              <span class="report-file-size">${r.file_size_kb || 0} KB</span>
+            </div>
+            <div class="report-card-actions">
+              <a href="/api/reports/${r.id}/pdf" target="_blank" class="btn btn-sm btn-ghost" title="Open compiled PDF in new browser tab">
+                👁️ View PDF
+              </a>
+              <a href="/api/reports/${r.id}/pdf" download="${r.pdf_name}" class="btn btn-sm btn-primary" title="Download PDF document locally">
+                📥 Download
+              </a>
+            </div>
+          </div>
+        </div>
+      `;
+    }).join('');
+  },
+
+  async _fetchReportingStats() {
+    try {
+      const res = await fetch('/api/reports/stats');
+      if (res.ok) {
+        const d = await res.json();
+        
+        // Header badge
+        const headerCountEl = document.getElementById('header-reports-count');
+        if (headerCountEl) headerCountEl.textContent = d.stored_count || 0;
+
+        // Settings tab elements
+        const nextEl = document.getElementById('reports-next-run');
+        const recipEl = document.getElementById('reports-recipients-list');
+        if (nextEl) nextEl.textContent = `Next Run: ${d.next_scheduled_run} (${d.next_shift} Shift)`;
+        if (recipEl) recipEl.textContent = (d.recipients || []).join(', ') || 'None';
+
+        // Modal buffer banner & KPI strip
+        const bannerEl = document.getElementById('reports-buffer-banner');
+        if (bannerEl) {
+          bannerEl.textContent = `Rolling Buffer: ${d.stored_count} / ${d.max_buffer} Reports (${d.disk_usage_mb} MB on disk · ~${d.buffer_coverage_days} days retention)`;
+        }
+
+        const rmStored = document.getElementById('rm-stored-count');
+        if (rmStored) rmStored.textContent = `${d.stored_count} / ${d.max_buffer}`;
+
+        const rmDisk = document.getElementById('rm-disk-usage');
+        if (rmDisk) rmDisk.textContent = `${d.disk_usage_mb} MB`;
+
+        const rmCoverage = document.getElementById('rm-coverage-days');
+        if (rmCoverage) rmCoverage.textContent = `${d.buffer_coverage_days} Days`;
+
+        const rmSchedule = document.getElementById('rm-schedule-hours');
+        if (rmSchedule) rmSchedule.textContent = (d.schedule_hours || [6, 18]).map(h => `${String(h).padStart(2, '0')}:00`).join(' & ') + ' IST';
+
+        const rmNext = document.getElementById('rm-next-run');
+        if (rmNext) rmNext.textContent = `${d.next_scheduled_run} (${d.next_shift})`;
+
+        const modalRecip = document.getElementById('reports-modal-recipients');
+        if (modalRecip) modalRecip.textContent = `Recipients: ${(d.recipients || []).join(', ') || 'None'}`;
+      }
+    } catch (e) {}
+  },
+
+  async _generateReportNow() {
+    const btns = [
+      document.getElementById('btn-generate-report-now'),
+      document.getElementById('btn-modal-generate-report')
+    ].filter(Boolean);
+
+    btns.forEach(b => {
+      b.dataset.origText = b.innerHTML;
+      b.innerHTML = '<span>⏳ Compiling & Emailing...</span>';
+      b.disabled = true;
+    });
+
+    this._showToast('📑 Compiling executive shift report & dispatching email...', 'info');
+
+    try {
+      const res = await fetch('/api/reports/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ shift_type: 'AUTO', send_email: true })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        this._showToast(`✅ Shift report generated (${data.pdf_name}) & email ${data.email_status}!`, 'ok');
+        this._fetchReports();
+        this._fetchReportingStats();
+      } else {
+        this._showToast(`Report generation failed: ${data.detail || 'Unknown error'}`, 'danger');
+      }
+    } catch (e) {
+      this._showToast('Network error generating report', 'danger');
+    } finally {
+      btns.forEach(b => {
+        if (b.dataset.origText) b.innerHTML = b.dataset.origText;
+        b.disabled = false;
+      });
+    }
   },
 
   // ════════════════════════════════════════════════════════════
@@ -3083,6 +3509,10 @@ const App = {
         btn.classList.add('active');
         document.getElementById(`stab-${btn.dataset.stab}`)?.classList.add('active');
         if (btn.dataset.stab === 'system') this._fetchVLMEndpoints();
+        if (btn.dataset.stab === 'reports') {
+          this._fetchReports();
+          this._fetchReportingStats();
+        }
         if (btn.dataset.stab === 'history') {
           this._loadHistory();
           this._loadStorageStats();
@@ -3329,23 +3759,15 @@ const App = {
       this._showToast('Cleared alerts feed', 'ok');
     });
 
-    // Trigger Test Alert
-    document.getElementById('btn-test-alert')?.addEventListener('click', async () => {
-      try {
-        const res = await this._authFetch('/api/alerts/test', { method: 'POST' });
-        if (res.ok) {
-          const body = await res.json();
-          this._showToast('⚡ Triggered test incident alert!', 'ok');
-          if (body && body.alert) {
-            this.onAlert({ alert: body.alert });
-          }
-        } else {
-          this._showToast('Failed to trigger test alert (Admin authentication required)', 'err');
-        }
-      } catch (e) {
-        this._showToast(`Error: ${e.message}`, 'err');
-      }
+    // Trigger Test Alert Dialog
+    document.getElementById('btn-test-alert')?.addEventListener('click', () => this._openTestTriggerModal());
+    document.getElementById('btn-close-test-trigger')?.addEventListener('click', () => this._closeTestTriggerModal());
+    document.getElementById('btn-cancel-test-trigger')?.addEventListener('click', () => this._closeTestTriggerModal());
+    document.getElementById('modal-test-trigger')?.addEventListener('click', e => {
+      if (e.target.id === 'modal-test-trigger') this._closeTestTriggerModal();
     });
+    document.getElementById('form-test-trigger')?.addEventListener('submit', (e) => { e.preventDefault(); this._submitTestTrigger(); });
+    document.getElementById('btn-submit-test-trigger')?.addEventListener('click', (e) => { e.preventDefault(); this._submitTestTrigger(); });
 
     // VLM health check button
     document.getElementById('btn-check-vlm')?.addEventListener('click', () => this._fetchVLMEndpoints());
@@ -3357,16 +3779,42 @@ const App = {
     document.getElementById('modal-admin-auth')?.addEventListener('click', e => {
       if (e.target.id === 'modal-admin-auth') this._closeAuthModal();
     });
-    document.getElementById('form-admin-auth')?.addEventListener('submit', () => this._submitAuth());
-    document.getElementById('btn-submit-auth')?.addEventListener('click', () => this._submitAuth());
+    document.getElementById('form-admin-auth')?.addEventListener('submit', (e) => { e.preventDefault(); this._submitAuth(); });
+    document.getElementById('btn-submit-auth')?.addEventListener('click', (e) => { e.preventDefault(); this._submitAuth(); });
     document.getElementById('btn-toggle-pw-vis')?.addEventListener('click', () => {
       const pwInput = document.getElementById('auth-input-password');
       if (pwInput) {
         pwInput.type = pwInput.type === 'password' ? 'text' : 'password';
       }
     });
-    document.getElementById('form-change-password')?.addEventListener('submit', () => this._submitPasswordChange());
-    document.getElementById('btn-submit-pw-change')?.addEventListener('click', () => this._submitPasswordChange());
+    document.getElementById('form-change-password')?.addEventListener('submit', (e) => { e.preventDefault(); this._submitPasswordChange(); });
+    document.getElementById('btn-submit-pw-change')?.addEventListener('click', (e) => { e.preventDefault(); this._submitPasswordChange(); });
+
+    // Reports events
+    document.getElementById('btn-header-reports')?.addEventListener('click', () => this._openReportsModal());
+    document.getElementById('btn-close-reports-modal')?.addEventListener('click', () => this._closeReportsModal());
+    document.getElementById('reports-modal-backdrop')?.addEventListener('click', () => this._closeReportsModal());
+    document.getElementById('btn-modal-generate-report')?.addEventListener('click', () => this._generateReportNow());
+    document.getElementById('btn-refresh-reports-modal')?.addEventListener('click', () => {
+      this._fetchReports();
+      this._fetchReportingStats();
+    });
+    document.getElementById('btn-generate-report-now')?.addEventListener('click', () => this._generateReportNow());
+    document.getElementById('btn-refresh-reports')?.addEventListener('click', () => {
+      this._fetchReports();
+      this._fetchReportingStats();
+    });
+
+    // Shift report filter chips
+    ['all', 'DAY', 'NIGHT'].forEach(f => {
+      const btn = document.querySelector(`[data-report-filter="${f}"]`);
+      btn?.addEventListener('click', () => {
+        document.querySelectorAll('[data-report-filter]').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        this._reportFilter = f;
+        this._renderReportsCards();
+      });
+    });
 
     // Alert modal close
     document.getElementById('btn-close-alert-modal')?.addEventListener('click', () => this.closeAlertModal());
@@ -3438,7 +3886,9 @@ const App = {
         this.closeAlertModal();
         this._closeModal();
         this._closeSettings();
+        this._closeTestTriggerModal();
         this._closeArchiveModal();
+        this._closeReportsModal();
         this._closeErrorsModal();
         this._closeVlmInspector();
         this._closeAuthModal();

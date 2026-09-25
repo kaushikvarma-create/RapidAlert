@@ -5,7 +5,9 @@ directly on NVDEC, bypassing CPU decoding overhead.
 """
 from __future__ import annotations
 
+import os
 import time
+import subprocess
 from typing import Optional, Tuple
 import numpy as np
 import cv2
@@ -17,12 +19,28 @@ _GST_INITIALIZED = False
 _NVIDIA_AVAILABLE: Optional[bool] = None
 
 
+def _ensure_mig_device_configured() -> None:
+    """If MIG is enabled on Thor/Hopper, ensure CUDA_VISIBLE_DEVICES is set to a valid MIG UUID."""
+    if not os.environ.get("CUDA_VISIBLE_DEVICES"):
+        try:
+            out = subprocess.check_output(["nvidia-smi", "-L"], text=True, timeout=2)
+            for line in out.strip().splitlines():
+                if "MIG" in line and "UUID: MIG-" in line:
+                    mig_uuid = line.split("UUID: ")[1].strip().rstrip(")")
+                    os.environ["CUDA_VISIBLE_DEVICES"] = mig_uuid
+                    print(f"[NvidiaIngest] 🎯 Auto-configured CUDA_VISIBLE_DEVICES={mig_uuid} for MIG NVDEC decoding")
+                    break
+        except Exception:
+            pass
+
+
 def is_nvidia_available() -> bool:
     """Check if GStreamer and nvurisrcbin / nvvideoconvert plugins are present."""
     global _NVIDIA_AVAILABLE, _GST_INITIALIZED
     if _NVIDIA_AVAILABLE is not None:
         return _NVIDIA_AVAILABLE
     try:
+        _ensure_mig_device_configured()
         import gi
         gi.require_version("Gst", "1.0")
         gi.require_version("GstApp", "1.0")
@@ -76,16 +94,17 @@ class NvidiaStreamCapture:
         self._start_pipeline()
 
     def _start_pipeline(self) -> None:
+        _ensure_mig_device_configured()
         import gi
         gi.require_version("Gst", "1.0")
         gi.require_version("GstApp", "1.0")
         from gi.repository import Gst
 
         pipeline_str = (
-            f'nvurisrcbin uri="{self.uri}" ! '
+            f'nvurisrcbin uri="{self.uri}" rtsp-reconnect-interval=5 latency=200 drop-frame-interval=0 ! '
             f'nvvideoconvert ! '
             f'video/x-raw, width={self.width}, height={self.height}, format=RGBA ! '
-            f'appsink name=sink emit-signals=true max-buffers=1 drop=true'
+            f'appsink name=sink emit-signals=true max-buffers=2 drop=true sync=false'
         )
 
         try:
