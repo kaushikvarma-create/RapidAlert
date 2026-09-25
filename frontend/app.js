@@ -19,7 +19,7 @@ const App = {
   modalViewMode: 'live', // 'live' | 'event'
   selectedEventIdx: null,
   camCurrentPage: 1,
-  camsPerPage: 4,
+  camsPerPage: parseInt(localStorage.getItem('rapidalert_layout_cams') || '4', 10) === 6 ? 6 : 4,
   activeFollowups: {},
   adminToken: sessionStorage.getItem('rapidalert_admin_token') || null,
   adminUser: sessionStorage.getItem('rapidalert_admin_user') || 'admin',
@@ -30,6 +30,7 @@ const App = {
   // ════════════════════════════════════════════════════════════
   init() {
     this.initTheme();
+    this._updateLayoutUi();
     this._initAudio();
     this.bindUIEvents();
     this._fetchVLMEndpoints();
@@ -695,8 +696,34 @@ const App = {
     this.setCamPage(target);
   },
 
+  setLayout(cams) {
+    const num = parseInt(cams, 10) === 6 ? 6 : 4;
+    this.camsPerPage = num;
+    try {
+      localStorage.setItem('rapidalert_layout_cams', String(num));
+    } catch (e) {}
+    this._updateLayoutUi();
+    this.camCurrentPage = 1;
+    this._renderCameraGrid();
+  },
+
+  _updateLayoutUi() {
+    const grid = document.getElementById('camera-grid');
+    if (grid) {
+      grid.classList.remove('layout-4', 'layout-6');
+      grid.classList.add(`layout-${this.camsPerPage}`);
+    }
+    const btn4 = document.getElementById('btn-layout-4');
+    const btn6 = document.getElementById('btn-layout-6');
+    if (btn4 && btn6) {
+      btn4.classList.toggle('active', this.camsPerPage === 4);
+      btn6.classList.toggle('active', this.camsPerPage === 6);
+    }
+  },
+
   setCamPage(page) {
     this.camCurrentPage = page;
+    this._updateLayoutUi();
     this._renderCameraGrid();
   },
 
@@ -2889,6 +2916,14 @@ const App = {
       });
     });
 
+    // Grid layout switcher (2x2 vs 3x2)
+    document.querySelectorAll('.btn-layout-toggle').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const cams = parseInt(btn.dataset.cams, 10);
+        this.setLayout(cams);
+      });
+    });
+
     // Camera pagination navigation (multicam_behavior_test style)
     document.getElementById('btn-cam-prev-page')?.addEventListener('click', () => {
       this.changePage(-1);
@@ -3370,6 +3405,7 @@ const App = {
 // Global helper exports for inline handlers / external invocation (multicam_behavior_test style)
 window.changePage = (delta) => App.changePage(delta);
 window.setCamPage = (page) => App.setCamPage(page);
+window.setLayout = (cams) => App.setLayout(cams);
 window.jumpToCamera = (cam) => App.jumpToCamera(cam);
 
 document.addEventListener('DOMContentLoaded', () => App.init());

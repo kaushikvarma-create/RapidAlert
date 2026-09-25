@@ -5,6 +5,18 @@ import time
 
 BASE_URL = "http://localhost:7000"
 
+def get_auth_headers():
+    login_req = urllib.request.Request(
+        f"{BASE_URL}/api/auth/login",
+        data=json.dumps({"username": "admin", "password": "admin123"}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+    with urllib.request.urlopen(login_req) as resp:
+        res = json.loads(resp.read().decode())
+        token = res.get("token")
+        return {"Content-Type": "application/json", "Authorization": f"Bearer {token}"} if token else {"Content-Type": "application/json"}
+
 def test_api_config():
     print("--- 1. Testing GET /api/config ---")
     req = urllib.request.Request(f"{BASE_URL}/api/config")
@@ -19,6 +31,7 @@ def test_api_config():
         assert "persistent_followup" in sys_cfg, "Missing persistent_followup in system config"
 
     print("\n--- 2. Testing POST /api/config (dynamic update) ---")
+    headers = get_auth_headers()
     update_payload = {
         "followup_interval_sec": 8.0,
         "persistent_followup": True
@@ -26,7 +39,7 @@ def test_api_config():
     req = urllib.request.Request(
         f"{BASE_URL}/api/config",
         data=json.dumps(update_payload).encode(),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST"
     )
     with urllib.request.urlopen(req) as resp:
@@ -51,7 +64,7 @@ def test_api_config():
     req2 = urllib.request.Request(
         f"{BASE_URL}/api/config",
         data=json.dumps(update_payload2).encode(),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST"
     )
     with urllib.request.urlopen(req2) as resp:
@@ -82,7 +95,8 @@ def test_frontend_serving():
 
 def test_trigger_alert():
     print("\n--- 4. Testing POST /api/alerts/test ---")
-    req = urllib.request.Request(f"{BASE_URL}/api/alerts/test", data=b"{}", headers={"Content-Type": "application/json"}, method="POST")
+    headers = get_auth_headers()
+    req = urllib.request.Request(f"{BASE_URL}/api/alerts/test", data=b"{}", headers=headers, method="POST")
     with urllib.request.urlopen(req) as resp:
         assert resp.status == 200
         res = json.loads(resp.read().decode())

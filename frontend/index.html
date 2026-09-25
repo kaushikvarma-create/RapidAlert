@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/style.css?v=33" />
+  <link rel="stylesheet" href="/style.css?v=36" />
   <script>
     (function() {
       var saved = localStorage.getItem('rapidalert_theme') || localStorage.getItem('theme');
@@ -93,7 +93,19 @@
           </div>
         </div>
         <div class="matrix-toolbar-right">
-          <!-- Camera Grid 4-Stream Top Pagination Controls (multicam_behavior_test style) -->
+          <!-- Dynamic Grid Layout Toggle (4 or 6 streams) -->
+          <div class="grid-layout-selector" id="grid-layout-selector">
+            <button class="btn-layout-toggle active" data-cams="4" id="btn-layout-4" title="2×2 Grid (4 streams per page)">
+              <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor"><rect x="1" y="1" width="6" height="6" rx="1"/><rect x="9" y="1" width="6" height="6" rx="1"/><rect x="1" y="9" width="6" height="6" rx="1"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>
+              <span>2×2</span>
+            </button>
+            <button class="btn-layout-toggle" data-cams="6" id="btn-layout-6" title="3×2 Grid (6 streams per page)">
+              <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor"><rect x="1" y="1" width="4" height="6" rx="1"/><rect x="6" y="1" width="4" height="6" rx="1"/><rect x="11" y="1" width="4" height="6" rx="1"/><rect x="1" y="9" width="4" height="6" rx="1"/><rect x="6" y="9" width="4" height="6" rx="1"/><rect x="11" y="9" width="4" height="6" rx="1"/></svg>
+              <span>3×2</span>
+            </button>
+          </div>
+
+          <!-- Camera Grid Dynamic Pagination Controls -->
           <div class="cam-pagination-bar" id="cam-pagination-bar">
             <button class="btn-page-nav" id="btn-cam-prev-page" title="Previous Page" aria-label="Previous Page">
               <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
@@ -910,6 +922,6 @@
   <!-- ═══════════════════════════════════════════════════════════ TOAST -->
   <div class="toast-container" id="toast-container"></div>
 
-  <script src="/app.js?v=35"></script>
+  <script src="/app.js?v=36"></script>
 </body>
 </html>

@@ -514,12 +514,65 @@ code { font-family: var(--font-mono); font-size: 0.82em; color: var(--accent); b
   color: var(--text-3);
 }
 
-/* Fixed 4-Stream Camera Grid */
+/* Dynamic Camera Grid (2x2 / 3x2) */
 .camera-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   padding: 10px 16px 14px;
+  transition: all 0.2s ease;
+}
+
+.camera-grid.layout-4 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.camera-grid.layout-6 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding: 8px 12px 10px;
+}
+
+/* Compact Widget Sizing for 6-Stream Grid */
+.camera-grid.layout-6 .cam-card {
+  border-radius: 8px;
+}
+
+.camera-grid.layout-6 .cam-card-header {
+  padding: 5px 8px;
+  gap: 6px;
+}
+
+.camera-grid.layout-6 .cam-card-name {
+  font-size: 0.78rem;
+}
+
+.camera-grid.layout-6 .cam-status-pill {
+  padding: 1px 6px;
+  font-size: 0.64rem;
+}
+
+.camera-grid.layout-6 .cam-card-meta {
+  padding: 4px 8px;
+  font-size: 0.68rem;
+  gap: 6px;
+}
+
+.camera-grid.layout-6 .cam-event-strip {
+  padding: 3px 6px;
+  gap: 4px;
+}
+
+.camera-grid.layout-6 .cam-event-thumb-item {
+  width: 40px;
+  height: 24px;
+}
+
+@media (max-width: 1200px) {
+  .camera-grid.layout-6 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 1100px) {
@@ -529,13 +582,51 @@ code { font-family: var(--font-mono); font-size: 0.82em; color: var(--accent); b
 }
 
 @media (max-width: 640px) {
-  .camera-grid {
+  .camera-grid, .camera-grid.layout-6, .camera-grid.layout-4 {
     grid-template-columns: 1fr;
     padding: 8px;
   }
 }
 
-/* Camera Grid 4-Stream Top Pagination Bar (multicam_behavior_test style) */
+/* Grid Layout Selector (2x2 vs 3x2) */
+.grid-layout-selector {
+  display: inline-flex;
+  align-items: center;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  padding: 2px;
+  border-radius: 20px;
+  gap: 2px;
+}
+
+.btn-layout-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 14px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-2);
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-layout-toggle:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+
+.btn-layout-toggle.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+  box-shadow: 0 0 10px rgba(59, 130, 246, 0.35);
+}
+
+/* Camera Grid Pagination Bar */
 .cam-pagination-bar {
   display: inline-flex;
   align-items: center;
