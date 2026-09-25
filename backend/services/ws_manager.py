@@ -44,22 +44,20 @@ class WSManager:
     async def broadcast(self, data: Any) -> None:
         if not self._connections:
             return
-        dead: list[WebSocket] = []
         async with self._lock:
             targets = list(self._connections)
-        for ws in targets:
+        if not targets:
+            return
+
+        async def _send(ws: WebSocket):
             try:
                 await ws.send_json(data)
-            except Exception as exc:
-                dead.append(ws)
-                # Don't recurse if data was an error broadcast itself
-                if not (isinstance(data, dict) and data.get("type") == "system_error"):
-                    error_tracker.capture_exception(
-                        exc,
-                        component="WebSocketManager",
-                        effect="WebSocket client connection dropped during broadcast; client pruned",
-                        severity="WARNING",
-                    )
+                return None
+            except Exception:
+                return ws
+
+        results = await asyncio.gather(*[_send(ws) for ws in targets], return_exceptions=True)
+        dead = [ws for ws in results if isinstance(ws, WebSocket)]
         if dead:
             async with self._lock:
                 for ws in dead:

@@ -43,10 +43,10 @@ class FrameStore:
         try:
             h, w = frame.shape[:2]
             if w > 640:
-                small = cv2.resize(frame, (640, int(h * 640 / w)), interpolation=cv2.INTER_AREA)
+                small = cv2.resize(frame, (640, int(h * 640 / w)), interpolation=cv2.INTER_LINEAR)
             else:
                 small = frame
-            ok, buf = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            ok, buf = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 65, cv2.IMWRITE_JPEG_OPTIMIZE, 0])
             if ok:
                 raw_bytes = buf.tobytes()
                 b64_str = base64.b64encode(buf).decode()
@@ -68,6 +68,14 @@ class FrameStore:
                 return None
             frame, ts = q[-1]
             return frame.copy(), ts
+
+    def get_latest_cached_entry(self, cam_name: str) -> Optional[Tuple[float, str]]:
+        """Returns (ts, b64_str) directly from cache with zero NumPy copy overhead."""
+        with self._lock:
+            entry = self._latest_jpeg.get(cam_name)
+            if entry is not None:
+                return entry[0], entry[2]
+        return None
 
     def get_cached_snapshot_b64(self, cam_name: str) -> Optional[str]:
         """Returns pre-encoded base64 string with zero CPU overhead."""

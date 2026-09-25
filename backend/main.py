@@ -293,12 +293,11 @@ async def _snapshot_stream_loop() -> None:
             await asyncio.sleep(0.083)  # 12 FPS fluid real-time streaming with zero UI lag
             active = camera_manager.get_active_cameras()
             for cam in active:
-                latest = frame_store.get_latest(cam)
-                if latest is not None:
-                    _, ts = latest
+                entry = frame_store.get_latest_cached_entry(cam)
+                if entry is not None:
+                    ts, snap = entry
                     if ts > last_pushed_ts.get(cam, 0.0):
                         last_pushed_ts[cam] = ts
-                        snap = frame_store.get_cached_snapshot_b64(cam)
                         if snap:
                             await ws_manager.broadcast({
                                 "type": "camera_frame",

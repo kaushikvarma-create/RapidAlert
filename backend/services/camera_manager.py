@@ -14,7 +14,7 @@ from typing import Dict, Optional
 
 import cv2
 
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|framedrop;1|max_delay;0|timeout;2000000"
 
 from backend.services.frame_store import FrameStore
 from backend.services.nvidia_ingest import NvidiaStreamCapture, is_nvidia_available
