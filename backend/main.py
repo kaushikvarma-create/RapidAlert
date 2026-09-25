@@ -290,7 +290,7 @@ async def _snapshot_stream_loop() -> None:
                 await asyncio.sleep(0.5)
                 continue
 
-            await asyncio.sleep(0.2)  # 5 FPS balanced refresh (silky smooth, zero UI lag)
+            await asyncio.sleep(0.12)  # ~8.3 FPS smooth fluid refresh with zero UI lag
             active = camera_manager.get_active_cameras()
             for cam in active:
                 latest = frame_store.get_latest(cam)
