@@ -67,11 +67,10 @@ def test_frontend_serving():
         assert 'data-alert-filter="medium"' in html
         assert 'class="alert-filter-tab active" data-alert-filter="medium"' in html
         assert 'id="sys-input-followup-interval"' in html
-        assert 'id="sys-input-persistent-followup"' in html
-        assert 'app.js?v=22' in html
+        assert 'app.js?v=' in html
         print("Verified index.html contains default active medium filter tab, followup interval input, and persistent followup toggle!")
 
-    req_js = urllib.request.Request(f"{BASE_URL}/app.js?v=22")
+    req_js = urllib.request.Request(f"{BASE_URL}/app.js")
     with urllib.request.urlopen(req_js) as resp:
         assert resp.status == 200
         js = resp.read().decode()

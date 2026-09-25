@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/style.css?v=30" />
+  <link rel="stylesheet" href="/style.css?v=33" />
   <script>
     (function() {
       var saved = localStorage.getItem('rapidalert_theme') || localStorage.getItem('theme');
@@ -47,11 +47,12 @@
       </div>
     </div>
 
-      <div class="vlm-shards-pill" id="vlm-shards-pill" style="display: inline-flex; gap: 6px; align-items: center; background: var(--bg-card); border: 1px solid var(--border); padding: 3px 10px; border-radius: 20px; font-size: 0.72rem; font-family: var(--font-mono);">
-        <span id="vlm-mode-label" style="color: var(--text-muted); font-size: 0.7rem; font-weight: 600;">MIG:</span>
-        <div id="vlm-shards-list" style="display: inline-flex; gap: 5px; align-items: center;">
-          <span id="shard-0-gauge" class="badge badge-mono" style="padding: 1px 6px; font-size: 0.68rem;">8000: [0/4]</span>
-          <span id="shard-1-gauge" class="badge badge-mono" style="padding: 1px 6px; font-size: 0.68rem;">8001: [0/4]</span>
+      <div class="vlm-shards-pill" id="vlm-shards-pill" title="⚡ Click to inspect vLLM Container &amp; MIG Shards Telemetry" role="button" tabindex="0">
+        <span class="vlm-pill-dot" id="vlm-pill-dot"></span>
+        <span id="vlm-mode-label" class="vlm-mode-tag">MIG</span>
+        <div id="vlm-shards-list" class="vlm-shards-chips">
+          <span id="shard-0-gauge" class="badge badge-mono">8000: [0/4]</span>
+          <span id="shard-1-gauge" class="badge badge-mono">8001: [0/4]</span>
         </div>
       </div>
       <div class="ws-pill" id="ws-pill">
@@ -106,6 +107,19 @@
               <span>Next</span>
               <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
             </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Active Incident Observation & Follow-Up Flashing Banner -->
+      <div class="followup-observation-banner" id="followup-observation-banner" style="display: none;">
+        <div class="followup-banner-inner">
+          <div class="followup-banner-badge">
+            <span class="followup-flashing-dot"></span>
+            <span class="followup-banner-label">INCIDENT OBSERVATION &amp; FOLLOW-UP ACTIVE</span>
+          </div>
+          <div class="followup-chips-list" id="followup-chips-list">
+            <!-- Dynamically populated flashing chips with camera name & page number -->
           </div>
         </div>
       </div>
@@ -692,6 +706,69 @@
     </div>
   </div>
 
+  <!-- ═══════════════════════════════════════════════════════════ MODAL: VLM CONTAINER & MIG INSPECTOR -->
+  <div class="modal-backdrop" id="modal-vlm-inspector" style="display: none;">
+    <div class="modal-box modal-lg" style="max-width: 980px;">
+      <div class="modal-header">
+        <div class="modal-header-left">
+          <span class="modal-title">⚡ vLLM Container &amp; MIG Shards Telemetry</span>
+          <span class="modal-sub">Real-time compute partitioning, container uptime, concurrency slots, and KV-cache telemetry.</span>
+        </div>
+        <div style="display: flex; gap: 8px; align-items: center;">
+          <button class="btn btn-sm btn-ghost" id="btn-vlm-probe-now" title="Send live HTTP ping and latency probe to all shards">🔄 Live Probe</button>
+          <button class="btn-icon" id="btn-close-vlm-inspector" title="Close">✕</button>
+        </div>
+      </div>
+      <div class="modal-body" style="max-height: 75vh; overflow-y: auto;">
+        <!-- Summary Banner -->
+        <div class="vlm-summary-banner" id="vlm-summary-banner">
+          <div class="vlm-sum-item">
+            <span class="vlm-sum-label">Compute Mode</span>
+            <span class="vlm-sum-val" id="vlm-sum-mode">MIG Partitioned</span>
+          </div>
+          <div class="vlm-sum-item">
+            <span class="vlm-sum-label">Total Inferences</span>
+            <span class="vlm-sum-val" id="vlm-sum-completed">0</span>
+          </div>
+          <div class="vlm-sum-item">
+            <span class="vlm-sum-label">Pipeline Failures</span>
+            <span class="vlm-sum-val" id="vlm-sum-errors" style="color: #ef4444;">0</span>
+          </div>
+          <div class="vlm-sum-item">
+            <span class="vlm-sum-label">Vision Model</span>
+            <span class="vlm-sum-val" id="vlm-sum-model" style="font-family: var(--font-mono); font-size: 0.78rem;">OpenGVLab/InternVL2_5-1B</span>
+          </div>
+        </div>
+
+        <!-- Shard Container Cards Grid -->
+        <div class="vlm-shards-grid" id="vlm-shards-cards">
+          <!-- Dynamically populated -->
+        </div>
+
+        <!-- Docker Container Lifecycle Table -->
+        <div class="vlm-docker-section" style="margin-top: 20px;">
+          <div class="vlm-sec-title">🐳 Docker Container Runtime Telemetry</div>
+          <div class="vlm-table-wrap">
+            <table class="vlm-docker-table">
+              <thead>
+                <tr>
+                  <th>Container Name</th>
+                  <th>Docker Status</th>
+                  <th>Endpoint Port</th>
+                  <th>Compute Partition</th>
+                  <th>Model / Image</th>
+                </tr>
+              </thead>
+              <tbody id="vlm-docker-tbody">
+                <!-- Dynamically populated -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- ═══════════════════════════════════════════════════════════ MODAL: SYSTEM ERRORS & DIAGNOSTICS -->
   <div class="modal-backdrop" id="modal-errors" style="display: none;">
     <div class="modal-box modal-lg" style="max-width: 920px;">
@@ -727,6 +804,6 @@
   <!-- ═══════════════════════════════════════════════════════════ TOAST -->
   <div class="toast-container" id="toast-container"></div>
 
-  <script src="/app.js?v=30"></script>
+  <script src="/app.js?v=33"></script>
 </body>
 </html>

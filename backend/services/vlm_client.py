@@ -66,6 +66,9 @@ class _EndpointShard:
         session: aiohttp.ClientSession,
         mig_uuid: str = "",
         mig_profile: str = "",
+        sm_count: int = 0,
+        gpu_utilization: float = 0.0,
+        container_name: str = "",
     ):
         self.url            = url
         self.model          = model
@@ -74,12 +77,16 @@ class _EndpointShard:
         self.queue_depth    = max(1, queue_depth)
         self.mig_uuid       = mig_uuid
         self.mig_profile    = mig_profile
+        self.sm_count       = sm_count or (12 if ":8000" in url else 8)
+        self.gpu_utilization = gpu_utilization or (0.33 if ":8000" in url else 0.33)
+        self.container_name = container_name or f"rapidalert_vllm_{0 if ':8000' in url else 1}"
         self._session       = session
 
         self._queue: asyncio.Queue       = asyncio.Queue(maxsize=queue_depth)
         self._sem:   asyncio.Semaphore   = asyncio.Semaphore(max_concurrent)
         self._workers: list[asyncio.Task] = []
         self.healthy = False  # Start as False until health probe confirms 200 OK
+        self._active_jobs: list[dict] = []
 
         # Per-shard telemetry counters
         self.stat_queued:    int   = 0      # total items ever enqueued
@@ -131,9 +138,12 @@ class _EndpointShard:
                 self._queue.task_done()
                 continue
 
+            cam_name = job.get("cam", "Unknown")
             try:
                 async with self._sem:
                     self.stat_inflight += 1
+                    job_record = {"worker_id": worker_id, "cam": cam_name, "t_start": time.monotonic()}
+                    self._active_jobs.append(job_record)
                     try:
                         result = await self._infer(job)
                         if not fut.done():
@@ -146,10 +156,12 @@ class _EndpointShard:
                         error_tracker.capture_exception(
                             exc,
                             component="VLMClient",
-                            camera=job.get("cam"),
+                            camera=cam_name,
                             effect=f"Worker {worker_id} on {self.url} unhandled exception; future resolved with exception",
                             severity="ERROR",
                         )
+                    finally:
+                        self._active_jobs = [j for j in self._active_jobs if j.get("worker_id") != worker_id]
             except asyncio.CancelledError:
                 if not fut.done():
                     fut.cancel()
@@ -277,22 +289,27 @@ class _EndpointShard:
         lats = list(self._latencies)
         port = self.url.split(":")[-1] if ":" in self.url else self.url
         return {
-            "url":          self.url,
-            "port":         port,
-            "model":        self.model,
-            "weight":       self.weight,
-            "max_concurrent": self.max_concurrent,
-            "healthy":      self.healthy,
-            "queued":       self._queue.qsize(),
-            "inflight":     self.stat_inflight,
-            "in_flight":    self.stat_inflight,
-            "completed":    self.stat_completed,
-            "errors":       self.stat_errors,
-            "mig_uuid":     self.mig_uuid,
-            "is_mig":       bool(self.mig_uuid),
-            "avg_latency_ms": round(sum(lats) / len(lats) * 1000, 1) if lats else None,
-            "p95_latency_ms": round(sorted(lats)[int(len(lats) * 0.95)] * 1000, 1) if len(lats) >= 5 else None,
-            "load_score":   round(self.load_score(), 3),
+            "url":              self.url,
+            "port":             port,
+            "container_name":   self.container_name,
+            "model":            self.model,
+            "weight":           self.weight,
+            "sm_count":         self.sm_count,
+            "gpu_utilization":  self.gpu_utilization,
+            "max_concurrent":   self.max_concurrent,
+            "healthy":          self.healthy,
+            "queued":           self._queue.qsize(),
+            "inflight":         self.stat_inflight,
+            "in_flight":        self.stat_inflight,
+            "completed":        self.stat_completed,
+            "errors":           self.stat_errors,
+            "mig_uuid":         self.mig_uuid,
+            "mig_profile":      self.mig_profile,
+            "is_mig":           bool(self.mig_uuid),
+            "active_jobs":      [{"cam": j.get("cam", ""), "elapsed_s": round(time.monotonic() - j.get("t_start", time.monotonic()), 1)} for j in self._active_jobs],
+            "avg_latency_ms":   round(sum(lats) / len(lats) * 1000, 1) if lats else None,
+            "p95_latency_ms":   round(sorted(lats)[int(len(lats) * 0.95)] * 1000, 1) if len(lats) >= 5 else None,
+            "load_score":       round(self.load_score(), 3) if self.healthy else 999.0,
         }
 
 
@@ -344,6 +361,9 @@ class MIGAwareVLMPool:
                 queue_depth    = cfg.get("queue_depth", 8),
                 mig_uuid       = cfg.get("mig_uuid", ""),
                 mig_profile    = cfg.get("mig_profile", ""),
+                sm_count       = cfg.get("sm_count", 0),
+                gpu_utilization = cfg.get("gpu_utilization", 0.0),
+                container_name = cfg.get("container_name", ""),
                 session        = self._session,
             )
             self._shards.append(shard)
@@ -422,15 +442,42 @@ class MIGAwareVLMPool:
         """Manual health check (all shards); updates healthy flags."""
         results = {}
         for shard in self._shards:
+            target_url = shard.url.replace("localhost", "127.0.0.1")
             try:
                 async with self._session.get(
-                    f"{shard.url}/health",
+                    f"{target_url}/health",
                     timeout=aiohttp.ClientTimeout(total=3)
                 ) as r:
                     shard.healthy = (r.status == 200)
             except Exception:
                 shard.healthy = False
             results[shard.url] = shard.healthy
+        return results
+
+    async def probe(self) -> list[dict]:
+        """Manual ping, health check and latency probe across all shards."""
+        results = []
+        for shard in self._shards:
+            target_url = shard.url.replace("localhost", "127.0.0.1").rstrip("/")
+            t0 = time.monotonic()
+            healthy = False
+            try:
+                async with self._session.get(
+                    f"{target_url}/health",
+                    timeout=aiohttp.ClientTimeout(total=2.5)
+                ) as r:
+                    healthy = (r.status == 200)
+            except Exception:
+                healthy = False
+            ping_ms = round((time.monotonic() - t0) * 1000, 1)
+            shard.healthy = healthy
+            results.append({
+                "url": shard.url,
+                "port": shard.url.split(":")[-1],
+                "healthy": healthy,
+                "ping_ms": ping_ms,
+                "model": shard.model,
+            })
         return results
 
     def get_stats(self) -> list[dict]:

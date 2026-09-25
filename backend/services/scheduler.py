@@ -434,11 +434,29 @@ class DeadlineScheduler:
                     f"[Scheduler] ✅ Scene resolved on {cam_name}: severity dropped to {current_sev} "
                     f"({current_safety}). Persistent follow-up concluded."
                 )
+                if self.broadcast_fn:
+                    await self.broadcast_fn({
+                        "type": "followup_status",
+                        "cam": cam_name,
+                        "active": False,
+                        "cycle": cycle,
+                        "resolved": True,
+                        "severity": current_sev,
+                    })
             elif cycle >= self.followup_max_cycles:
                 print(
                     f"[Scheduler] 🛑 Persistent follow-up reached max cycles ({self.followup_max_cycles}) "
                     f"for {cam_name}."
                 )
+                if self.broadcast_fn:
+                    await self.broadcast_fn({
+                        "type": "followup_status",
+                        "cam": cam_name,
+                        "active": False,
+                        "cycle": cycle,
+                        "resolved": False,
+                        "severity": current_sev,
+                    })
 
         # Broadcast single Cosmos 8B result, thumbnails, drift score and incident flag to dashboard
         if self.broadcast_fn:
@@ -473,6 +491,17 @@ class DeadlineScheduler:
             delay_sec = self.followup_interval_sec
         try:
             print(f"[Scheduler] ⏳ Scheduled follow-up #{cycle} for {cam_name} (Parent: {parent_id}) in {delay_sec:.1f}s...")
+            if self.broadcast_fn:
+                await self.broadcast_fn({
+                    "type": "followup_status",
+                    "cam": cam_name,
+                    "active": True,
+                    "cycle": cycle,
+                    "incident_id": incident_id,
+                    "parent_id": parent_id,
+                    "severity": prev_severity or "HIGH",
+                    "delay_sec": delay_sec,
+                })
             await asyncio.sleep(delay_sec)
             if not self._running or self._queue is None:
                 return

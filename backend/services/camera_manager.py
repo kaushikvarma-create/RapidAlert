@@ -14,7 +14,7 @@ from typing import Dict, Optional
 
 import cv2
 
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;50000|reorder_queue_size;0|probesize;32768"
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
 
 from backend.services.frame_store import FrameStore
 from backend.services.nvidia_ingest import NvidiaStreamCapture, is_nvidia_available
@@ -37,7 +37,7 @@ class CameraThread(threading.Thread):
         url: str,
         frame_store: FrameStore,
         stop_event: threading.Event,
-        use_nvidia: bool = True,
+        use_nvidia: bool = False,
     ):
         super().__init__(name=f"cam-{cam_name}", daemon=True)
         self.cam_name = cam_name
@@ -260,3 +260,4 @@ class CameraManager:
         with self._lock:
             self._threads[name] = t
             self._stop_events[name] = ev
+        time.sleep(0.05)

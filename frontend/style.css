@@ -518,20 +518,20 @@ code { font-family: var(--font-mono); font-size: 0.82em; color: var(--accent); b
 .camera-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
-  padding: 16px 20px 16px;
+  gap: 12px;
+  padding: 10px 16px 14px;
 }
 
 @media (max-width: 1100px) {
   .camera-grid {
-    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
   }
 }
 
 @media (max-width: 640px) {
   .camera-grid {
     grid-template-columns: 1fr;
-    padding: 12px;
+    padding: 8px;
   }
 }
 
@@ -2761,5 +2761,499 @@ select.input option {
   margin-top: 4px;
   display: none;
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   VLM Container & MIG Shards Telemetry Inspector
+   ═══════════════════════════════════════════════════════════════ */
+
+.vlm-shards-pill {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 0.72rem;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.vlm-shards-pill:hover {
+  background: var(--bg-card-hover, rgba(255, 255, 255, 0.06));
+  border-color: var(--accent);
+  box-shadow: 0 0 12px rgba(99, 102, 241, 0.25);
+  transform: translateY(-1px);
+}
+
+.vlm-pill-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #10b981;
+  display: inline-block;
+  box-shadow: 0 0 6px #10b981;
+  animation: vlmPulse 2s infinite ease-in-out;
+}
+
+.vlm-pill-dot.dot-warming {
+  background: #f59e0b;
+  box-shadow: 0 0 6px #f59e0b;
+}
+
+.vlm-pill-dot.dot-offline {
+  background: #ef4444;
+  box-shadow: 0 0 6px #ef4444;
+}
+
+@keyframes vlmPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.85); }
+}
+
+.vlm-mode-tag {
+  color: var(--text-muted, #94a3b8);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.vlm-shards-chips {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+}
+
+/* Modal Summary Banner */
+.vlm-summary-banner {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.vlm-sum-item {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.vlm-sum-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted, #94a3b8);
+  font-weight: 600;
+}
+
+.vlm-sum-val {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--text);
+  font-family: var(--font-mono);
+}
+
+/* Shards Grid */
+.vlm-shards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.vlm-shard-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  position: relative;
+  transition: border-color 0.2s ease;
+}
+
+.vlm-shard-card.shard-healthy {
+  border-left: 4px solid #10b981;
+}
+
+.vlm-shard-card.shard-warning {
+  border-left: 4px solid #f59e0b;
+}
+
+.vlm-shard-card.shard-error {
+  border-left: 4px solid #ef4444;
+}
+
+.vlm-shard-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 10px;
+}
+
+.vlm-shard-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.vlm-shard-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--text);
+  font-family: var(--font-mono);
+}
+
+.vlm-shard-url {
+  font-size: 0.72rem;
+  color: var(--text-muted, #94a3b8);
+  font-family: var(--font-mono);
+}
+
+/* Concurrency Slots Visualizer */
+.vlm-slots-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.vlm-slots-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.72rem;
+  color: var(--text-muted, #94a3b8);
+  font-weight: 600;
+}
+
+.vlm-slots-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 6px;
+}
+
+.vlm-slot-box {
+  background: var(--bg-input, rgba(0, 0, 0, 0.2));
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.7rem;
+  font-family: var(--font-mono);
+}
+
+.vlm-slot-box.slot-busy {
+  background: rgba(99, 102, 241, 0.15);
+  border-color: rgba(99, 102, 241, 0.4);
+  color: var(--text);
+}
+
+.vlm-slot-box.slot-busy .vlm-slot-dot {
+  background: #6366f1;
+  box-shadow: 0 0 6px #6366f1;
+  animation: vlmPulse 1.2s infinite ease-in-out;
+}
+
+.vlm-slot-box.slot-idle {
+  color: var(--text-muted, #64748b);
+}
+
+.vlm-slot-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted, #64748b);
+  flex-shrink: 0;
+}
+
+/* Load Meter Bar */
+.vlm-meter-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.vlm-meter-header {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.7rem;
+  color: var(--text-muted, #94a3b8);
+}
+
+.vlm-meter-bar {
+  height: 6px;
+  background: var(--bg-input, rgba(0, 0, 0, 0.2));
+  border-radius: 3px;
+  overflow: hidden;
+  position: relative;
+}
+
+.vlm-meter-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #10b981, #6366f1);
+  transition: width 0.3s ease;
+}
+
+.vlm-meter-fill.meter-warn {
+  background: linear-gradient(90deg, #f59e0b, #ef4444);
+}
+
+/* Metrics Mini Grid */
+.vlm-metrics-mini {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  background: var(--bg-input, rgba(0, 0, 0, 0.15));
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+.vlm-m-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.vlm-m-label {
+  font-size: 0.65rem;
+  color: var(--text-muted, #94a3b8);
+  text-transform: uppercase;
+}
+
+.vlm-m-val {
+  font-size: 0.82rem;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+
+/* Docker Table */
+.vlm-docker-section {
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+
+.vlm-sec-title {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 10px;
+}
+
+.vlm-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.vlm-docker-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.74rem;
+  font-family: var(--font-mono);
+  text-align: left;
+}
+
+.vlm-docker-table th {
+  background: var(--bg-card);
+  color: var(--text-muted, #94a3b8);
+  padding: 8px 12px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+}
+
+.vlm-docker-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+}
+
+.vlm-docker-table tr:last-child td {
+  border-bottom: none;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Active Incident Observation & Follow-Up Flashing Banner
+   ═══════════════════════════════════════════════════════════════ */
+
+.followup-observation-banner {
+  margin: 6px 16px 8px 16px;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.45);
+  border-radius: 8px;
+  padding: 8px 12px;
+  box-shadow: 0 0 16px rgba(239, 68, 68, 0.2);
+  backdrop-filter: blur(8px);
+  animation: followupBannerGlow 2.5s infinite ease-in-out;
+}
+
+@keyframes followupBannerGlow {
+  0%, 100% {
+    box-shadow: 0 0 14px rgba(239, 68, 68, 0.2);
+    border-color: rgba(239, 68, 68, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 24px rgba(245, 158, 11, 0.4);
+    border-color: rgba(245, 158, 11, 0.7);
+  }
+}
+
+.followup-banner-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.followup-banner-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(239, 68, 68, 0.22);
+  border: 1px solid rgba(239, 68, 68, 0.6);
+  border-radius: 6px;
+  padding: 3px 8px;
+  flex-shrink: 0;
+}
+
+.followup-flashing-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ef4444;
+  box-shadow: 0 0 8px #ef4444;
+  animation: followupPulseDot 0.9s infinite alternate ease-in-out;
+}
+
+@keyframes followupPulseDot {
+  0% { transform: scale(0.85); opacity: 0.6; }
+  100% { transform: scale(1.3); opacity: 1; filter: brightness(1.3); }
+}
+
+.followup-banner-label {
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  color: #ef4444;
+  text-transform: uppercase;
+}
+
+.followup-chips-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+}
+
+.followup-flashing-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(239, 68, 68, 0.18);
+  border: 1px solid rgba(239, 68, 68, 0.6);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 0.72rem;
+  font-family: var(--font-mono);
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+  animation: followupChipHazard 1.4s infinite alternate ease-in-out;
+}
+
+@keyframes followupChipHazard {
+  0% {
+    background: rgba(239, 68, 68, 0.18);
+    border-color: rgba(239, 68, 68, 0.6);
+    box-shadow: 0 0 8px rgba(239, 68, 68, 0.3);
+  }
+  100% {
+    background: rgba(245, 158, 11, 0.28);
+    border-color: rgba(245, 158, 11, 0.85);
+    box-shadow: 0 0 16px rgba(245, 158, 11, 0.5);
+  }
+}
+
+.followup-flashing-chip:hover {
+  background: #ef4444 !important;
+  color: #fff !important;
+  border-color: #ef4444 !important;
+  box-shadow: 0 0 20px rgba(239, 68, 68, 0.8) !important;
+  transform: translateY(-1px) scale(1.02);
+}
+
+.followup-chip-cam {
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.followup-chip-page {
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: #fef08a;
+}
+
+.followup-chip-cycle {
+  font-size: 0.65rem;
+  color: var(--text-2);
+}
+
+.followup-chip-jump {
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: var(--accent);
+  margin-left: 2px;
+}
+
+.followup-flashing-chip:hover .followup-chip-page,
+.followup-flashing-chip:hover .followup-chip-cycle,
+.followup-flashing-chip:hover .followup-chip-jump {
+  color: #fff !important;
+  border-color: rgba(255, 255, 255, 0.5);
+}
+
+/* Focused Camera Card Flash Animation (when jumped to) */
+@keyframes camCardTargetPulse {
+  0% {
+    outline: 4px solid #ef4444;
+    box-shadow: 0 0 25px rgba(239, 68, 68, 0.8), 0 0 40px rgba(239, 68, 68, 0.4);
+    transform: scale(1.015);
+  }
+  50% {
+    outline: 4px solid #f59e0b;
+    box-shadow: 0 0 35px rgba(245, 158, 11, 0.9), 0 0 50px rgba(245, 158, 11, 0.5);
+    transform: scale(1.025);
+  }
+  100% {
+    outline: 4px solid #ef4444;
+    box-shadow: 0 0 25px rgba(239, 68, 68, 0.8), 0 0 40px rgba(239, 68, 68, 0.4);
+    transform: scale(1.015);
+  }
+}
+
+.cam-card.cam-card-targeted {
+  animation: camCardTargetPulse 0.9s 4 ease-in-out !important;
+  z-index: 10;
+}
+
+
 
 

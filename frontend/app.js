@@ -20,6 +20,7 @@ const App = {
   selectedEventIdx: null,
   camCurrentPage: 1,
   camsPerPage: 4,
+  activeFollowups: {},
 
   // ════════════════════════════════════════════════════════════
   //  Bootstrap
@@ -160,6 +161,7 @@ const App = {
       case 'prompts': return this.onPrompts(msg);
       case 'config_updated': return this.onConfigUpdated(msg);
       case 'system_error': return this.onSystemError(msg);
+      case 'followup_status': return this.onFollowupStatus(msg);
       case 'ping':    break; // keep-alive, no-op
     }
   },
@@ -371,6 +373,7 @@ const App = {
       const cardImg = document.getElementById(`cam-card-img-${this._eid(cam)}`);
       if (cardImg) {
         cardImg.src = `data:image/jpeg;base64,${thumbnail_b64}`;
+        cardImg.style.opacity = '1';
       }
       if (this.activeCamModal === cam && this.modalViewMode === 'live') {
         const modalImg = document.getElementById('modal-frame');
@@ -378,6 +381,7 @@ const App = {
         if (modalImg) {
           if (!modalImg.src || modalImg.src === '' || modalImg.src.includes('data:image')) {
             modalImg.src = `data:image/jpeg;base64,${thumbnail_b64}`;
+            modalImg.style.opacity = '1';
           }
           if (loading) loading.style.display = 'none';
         }
@@ -391,8 +395,25 @@ const App = {
     this._setText('metric-ram', `${msg.ram}%`);
   },
 
+  onFollowupStatus(msg) {
+    const { cam, active, cycle, severity, resolved } = msg;
+    if (!cam) return;
+    if (!this.activeFollowups) this.activeFollowups = {};
+    if (active) {
+      this.activeFollowups[cam] = {
+        active: true,
+        cycle: cycle || 1,
+        severity: severity || 'HIGH',
+        ts: Date.now()
+      };
+    } else if (resolved || active === false) {
+      delete this.activeFollowups[cam];
+    }
+    this._renderFollowupObservationBanner();
+  },
+
   onResultConcurrent(msg) {
-    const { cam, results, thumbnails_b64, drift, is_incident } = msg;
+    const { cam, results, thumbnails_b64, drift, is_incident, is_followup } = msg;
 
     if (!this.cameras[cam]) {
       this.cameras[cam] = { config: { name: cam }, results: [], lastTs: 0, thumbB64: null, eventPhotos: [] };
@@ -406,6 +427,37 @@ const App = {
     // Store event-based photos captured for AI analysis
     if (thumbnails_b64 && thumbnails_b64.length > 0) {
       this.cameras[cam].eventPhotos = thumbnails_b64;
+    }
+
+    // Update active follow-up observation tracker
+    if (!this.activeFollowups) this.activeFollowups = {};
+    if (is_followup) {
+      const topRes = (results && results[0]) || {};
+      const sev = (topRes.severity || 'LOW').toUpperCase();
+      const saf = (topRes.safety || 'OK').toUpperCase();
+      if ((sev === 'LOW' || sev === 'NORMAL') && saf === 'OK') {
+        delete this.activeFollowups[cam];
+      } else {
+        this.activeFollowups[cam] = {
+          active: true,
+          cycle: msg.cycle || 1,
+          severity: sev,
+          ts: Date.now()
+        };
+      }
+      this._renderFollowupObservationBanner();
+    } else if (is_incident) {
+      const topRes = (results && results[0]) || {};
+      const sev = (topRes.severity || 'HIGH').toUpperCase();
+      if (sev === 'HIGH' || sev === 'EXTREME' || topRes.safety === 'DANGER') {
+        this.activeFollowups[cam] = {
+          active: true,
+          cycle: 1,
+          severity: sev,
+          ts: Date.now()
+        };
+        this._renderFollowupObservationBanner();
+      }
     }
 
     this._renderCamCard(cam);
@@ -439,6 +491,18 @@ const App = {
         this.activeAlert.followup_id = alert.id;
         this._renderPairBanner(this.activeAlert);
       }
+    }
+
+    // If alert indicates severe incident or active follow-up, track observation
+    if (alert.cam && (alert.is_incident || alert.is_followup || alert.severity === 'HIGH' || alert.severity === 'EXTREME' || alert.safety === 'DANGER')) {
+      if (!this.activeFollowups) this.activeFollowups = {};
+      this.activeFollowups[alert.cam] = {
+        active: true,
+        cycle: alert.cycle || 1,
+        severity: alert.severity || 'HIGH',
+        ts: Date.now()
+      };
+      this._renderFollowupObservationBanner();
     }
 
     this.alerts.unshift(alert);
@@ -557,6 +621,9 @@ const App = {
 
     // 5. Update Pagination Bar
     this._renderPagination(totalCams, totalPages, startIndex, endIndex);
+
+    // 6. Refresh Active Follow-Up Observation Banner
+    this._renderFollowupObservationBanner();
   },
 
   _renderPagination(totalCams, totalPages, startIndex, endIndex) {
@@ -630,6 +697,64 @@ const App = {
     const endIndex = startIndex + this.camsPerPage;
     const pageSlice = eligibleCams.slice(startIndex, endIndex);
     return pageSlice.includes(name);
+  },
+
+  _getCamPage(name) {
+    const eligibleCams = Object.keys(this.cameras).filter(n => this._shouldShowCamCard(n));
+    const idx = eligibleCams.indexOf(name);
+    if (idx === -1) return 1;
+    return Math.floor(idx / this.camsPerPage) + 1;
+  },
+
+  jumpToCamera(cam) {
+    if (!cam) return;
+    const targetPage = this._getCamPage(cam);
+    if (this.camCurrentPage !== targetPage) {
+      this.setCamPage(targetPage);
+    }
+    setTimeout(() => {
+      const eid = this._eid(cam);
+      const card = document.getElementById(`cam-card-${eid}`);
+      if (card) {
+        card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        card.classList.remove('cam-card-targeted');
+        void card.offsetWidth; // trigger reflow
+        card.classList.add('cam-card-targeted');
+        setTimeout(() => card.classList.remove('cam-card-targeted'), 4500);
+      }
+    }, 120);
+  },
+
+  _renderFollowupObservationBanner() {
+    const banner = document.getElementById('followup-observation-banner');
+    const container = document.getElementById('followup-chips-list');
+    if (!banner || !container) return;
+
+    if (!this.activeFollowups) this.activeFollowups = {};
+    const now = Date.now();
+    const activeCams = Object.entries(this.activeFollowups)
+      .filter(([cam, fu]) => fu && fu.active && (now - fu.ts < 180000))
+      .map(([cam, fu]) => ({ cam, ...fu }));
+
+    if (activeCams.length === 0) {
+      banner.style.display = 'none';
+      container.innerHTML = '';
+      return;
+    }
+
+    banner.style.display = 'block';
+    container.innerHTML = activeCams.map(item => {
+      const page = this._getCamPage(item.cam);
+      const cycleText = item.cycle ? `Cycle #${item.cycle} Observation` : 'Follow-up Active';
+      return `
+        <div class="followup-flashing-chip" data-cam="${this._esc(item.cam)}" title="Click to navigate directly to ${this._esc(item.cam)} on Page ${page}">
+          <span class="followup-chip-cam">🚨 ${this._esc(item.cam)}</span>
+          <span class="followup-chip-page">PAGE ${page}</span>
+          <span class="followup-chip-cycle">${cycleText}</span>
+          <span class="followup-chip-jump">⚡ Focus Stream</span>
+        </div>
+      `;
+    }).join('');
   },
 
   _shouldShowCamCard(name) {
@@ -1474,41 +1599,264 @@ const App = {
 
     const modeLabel = document.getElementById('vlm-mode-label');
     if (modeLabel) {
-      modeLabel.textContent = isMig ? 'MIG:' : 'SHARED:';
+      modeLabel.textContent = isMig ? 'MIG' : 'SHARED';
       modeLabel.title = isMig ? 'Multi-Instance GPU Partitioning Active' : 'Shared GPU Shards (Non-MIG)';
     }
 
+    const pillDot = document.getElementById('vlm-pill-dot');
+    if (pillDot) {
+      const allHealthy = shards.every(s => s.healthy);
+      const anyHealthy = shards.some(s => s.healthy);
+      pillDot.className = 'vlm-pill-dot ' + (allHealthy ? '' : (anyHealthy ? 'dot-warming' : 'dot-offline'));
+    }
+
     const container = document.getElementById('vlm-shards-list');
-    if (!container) return;
+    if (container) {
+      container.innerHTML = shards.map((s, idx) => {
+        const inflight = (s.inflight !== undefined) ? s.inflight : (s.in_flight !== undefined ? s.in_flight : 0);
+        const maxC = s.max_concurrent || 4;
+        const port = s.port || (s.url ? s.url.split(':').pop() : idx);
+        const queued = s.queued || 0;
+        const isHealthy = Boolean(s.healthy);
 
-    container.innerHTML = shards.map((s, idx) => {
-      const inflight = (s.inflight !== undefined) ? s.inflight : (s.in_flight !== undefined ? s.in_flight : 0);
-      const maxC = s.max_concurrent || 4;
-      const port = s.port || (s.url ? s.url.split(':').pop() : idx);
-      const queued = s.queued || 0;
-      const isHealthy = Boolean(s.healthy);
+        let badgeClass = 'badge-mono';
+        let labelContent = '';
+        if (!isHealthy) {
+          badgeClass = 'badge-amber';
+          labelContent = `${port}: ⏳ Warming`;
+        } else if (inflight > 0) {
+          badgeClass = 'badge-amber';
+          const qText = queued > 0 ? ` +${queued}q` : '';
+          labelContent = `⚡ ${port}: [${inflight}/${maxC}${qText}]`;
+        } else {
+          badgeClass = 'badge-green';
+          const qText = queued > 0 ? ` +${queued}q` : '';
+          labelContent = `✓ ${port}: [${inflight}/${maxC}${qText}]`;
+        }
 
-      let badgeClass = 'badge-mono';
-      let labelContent = '';
-      if (!isHealthy) {
-        badgeClass = 'badge-amber';
-        labelContent = `${port}: ⏳ Warming Up`;
-      } else if (inflight > 0) {
-        badgeClass = 'badge-amber';
         const qText = queued > 0 ? ` +${queued}q` : '';
-        labelContent = `⚡ ${port}: [${inflight}/${maxC}${qText}]`;
+        const latText = s.avg_latency_ms ? ` (${s.avg_latency_ms}ms)` : '';
+        const modelText = s.model ? ` | Model: ${s.model}` : '';
+        const statusTitle = isHealthy ? `Online | In-flight: ${inflight}/${maxC}${qText}${latText}${modelText}` : 'Warming Up / Loading Weights into VRAM';
+        return `<span id="shard-${idx}-gauge" class="badge ${badgeClass}" style="padding: 1px 6px; font-size: 0.68rem; transition: background 0.2s ease;" title="${this._esc(s.url)} | ${statusTitle} | Weight: ${s.weight ?? 1}">${labelContent}</span>`;
+      }).join('');
+    }
+
+    // Also live-refresh inspector if currently open
+    const modal = document.getElementById('modal-vlm-inspector');
+    if (modal && modal.style.display !== 'none' && data.shards) {
+      this._renderVlmInspector(data);
+    }
+  },
+
+  _openVlmInspector() {
+    const modal = document.getElementById('modal-vlm-inspector');
+    if (!modal) return;
+    modal.style.display = 'flex';
+    this._fetchVlmContainers();
+    if (this._vlmPollTimer) clearInterval(this._vlmPollTimer);
+    this._vlmPollTimer = setInterval(() => {
+      if (modal.style.display !== 'none') {
+        this._fetchVlmContainers();
       } else {
-        badgeClass = 'badge-green';
-        const qText = queued > 0 ? ` +${queued}q` : '';
-        labelContent = `✓ ${port}: [${inflight}/${maxC}${qText}]`;
+        clearInterval(this._vlmPollTimer);
+        this._vlmPollTimer = null;
       }
+    }, 2000);
+  },
 
-      const qText = queued > 0 ? ` +${queued}q` : '';
-      const latText = s.avg_latency_ms ? ` (${s.avg_latency_ms}ms)` : '';
-      const modelText = s.model ? ` | Model: ${s.model}` : '';
-      const statusTitle = isHealthy ? `Online | In-flight: ${inflight}/${maxC}${qText}${latText}${modelText}` : 'Warming Up / Loading Weights into VRAM';
-      return `<span id="shard-${idx}-gauge" class="badge ${badgeClass}" style="padding: 1px 6px; font-size: 0.68rem; transition: background 0.2s ease;" title="${this._esc(s.url)} | ${statusTitle} | Weight: ${s.weight ?? 1}">${labelContent}</span>`;
-    }).join('');
+  _closeVlmInspector() {
+    const modal = document.getElementById('modal-vlm-inspector');
+    if (modal) modal.style.display = 'none';
+    if (this._vlmPollTimer) {
+      clearInterval(this._vlmPollTimer);
+      this._vlmPollTimer = null;
+    }
+  },
+
+  async _fetchVlmContainers() {
+    try {
+      const res = await fetch('/api/vlm/containers');
+      if (res.ok) {
+        const data = await res.json();
+        this._renderVlmInspector(data);
+      }
+    } catch (e) {
+      console.warn('Error fetching VLM container telemetry:', e);
+    }
+  },
+
+  async _probeVlmShards() {
+    const btn = document.getElementById('btn-vlm-probe-now');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '⏳ Probing...';
+    }
+    try {
+      const res = await fetch('/api/vlm/probe', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        this._showToast('⚡ Live vLLM shard latency probe complete', 'ok');
+        this._fetchVlmContainers();
+      } else {
+        this._showToast('Failed to probe vLLM shards', 'err');
+      }
+    } catch (e) {
+      this._showToast(`Probe error: ${e.message}`, 'err');
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = '🔄 Live Probe';
+      }
+    }
+  },
+
+  _renderVlmInspector(data) {
+    if (!data) return;
+    const shards = data.shards || [];
+    const isMig = Boolean(data.is_mig);
+
+    // Summary banner
+    const elMode = document.getElementById('vlm-sum-mode');
+    const elCompleted = document.getElementById('vlm-sum-completed');
+    const elErrors = document.getElementById('vlm-sum-errors');
+    const elModel = document.getElementById('vlm-sum-model');
+
+    if (elMode) elMode.textContent = isMig ? 'MIG Partitioned (A100)' : 'Shared GPU Shards';
+    if (elCompleted) elCompleted.textContent = (data.total_inferences ?? shards.reduce((acc, s) => acc + (s.completed || 0), 0)).toLocaleString();
+    if (elErrors) elErrors.textContent = (data.total_errors ?? shards.reduce((acc, s) => acc + (s.errors || 0), 0)).toLocaleString();
+    if (elModel && shards.length > 0) elModel.textContent = shards[0].model || 'vrfai/Cosmos-Reason2-8B-NVFP4';
+
+    // Render shard cards
+    const cardsWrap = document.getElementById('vlm-shards-cards');
+    if (cardsWrap) {
+      cardsWrap.innerHTML = shards.map((s, idx) => {
+        const isHealthy = Boolean(s.healthy);
+        const inflight = s.in_flight ?? s.inflight ?? 0;
+        const maxC = s.max_concurrent || 4;
+        const queued = s.queued || 0;
+        const port = s.port || (s.url ? s.url.split(':').pop() : idx);
+        const cName = s.container_name || `rapidalert_vllm_${port === '8000' ? 0 : 1}`;
+        const dInfo = s.container || {};
+        const dStatus = dInfo.status || (isHealthy ? 'Up (Running)' : 'Warming Up / Offline');
+        const smCount = s.sm_count ? `${s.sm_count} SMs` : (s.mig_profile ? `${s.mig_profile}` : 'Shared');
+        const gpuMem = s.gpu_utilization ? `${Math.round(s.gpu_utilization * 100)}% VRAM` : '—';
+        const loadScore = s.load_score !== undefined ? s.load_score.toFixed(2) : ((inflight * 2) + queued).toFixed(2);
+        const loadPercent = Math.min(100, Math.max(8, Math.round(((inflight + (queued * 0.5)) / maxC) * 100)));
+
+        const activeJobs = s.active_jobs || [];
+
+        // Concurrency slots HTML
+        const slotsHtml = Array.from({ length: maxC }).map((_, slotIdx) => {
+          const job = activeJobs[slotIdx];
+          if (job) {
+            return `
+              <div class="vlm-slot-box slot-busy" title="Active inference for ${this._esc(job.cam)} (${job.elapsed_s}s elapsed)">
+                <span class="vlm-slot-dot"></span>
+                <span>⚡ ${this._esc(job.cam)}</span>
+              </div>
+            `;
+          } else if (slotIdx < inflight) {
+            return `
+              <div class="vlm-slot-box slot-busy" title="Inference active in slot #${slotIdx + 1}">
+                <span class="vlm-slot-dot"></span>
+                <span>⚡ Slot #${slotIdx + 1}</span>
+              </div>
+            `;
+          } else {
+            return `
+              <div class="vlm-slot-box slot-idle" title="Slot #${slotIdx + 1} is idle and ready for requests">
+                <span class="vlm-slot-dot"></span>
+                <span>⚪ Idle</span>
+              </div>
+            `;
+          }
+        }).join('');
+
+        const cardCls = isHealthy ? 'shard-healthy' : 'shard-warning';
+        const statusBadge = isHealthy
+          ? `<span class="badge badge-green">🟢 Online</span>`
+          : `<span class="badge badge-amber">⏳ Warming Up</span>`;
+
+        return `
+          <div class="vlm-shard-card ${cardCls}">
+            <div class="vlm-shard-header">
+              <div class="vlm-shard-title-wrap">
+                <span class="vlm-shard-title">Shard ${idx}: Port ${port}</span>
+                ${statusBadge}
+              </div>
+              <span class="vlm-shard-url">${this._esc(s.url)}</span>
+            </div>
+
+            <!-- Concurrency Slots -->
+            <div class="vlm-slots-section">
+              <div class="vlm-slots-header">
+                <span>Concurrency Execution Slots (${inflight}/${maxC} Active)</span>
+                <span>${queued > 0 ? `+${queued} Queued` : 'Queue Empty'}</span>
+              </div>
+              <div class="vlm-slots-list">
+                ${slotsHtml}
+              </div>
+            </div>
+
+            <!-- Dynamic Load Meter -->
+            <div class="vlm-meter-wrap">
+              <div class="vlm-meter-header">
+                <span>Weighted Load Score: <strong>${loadScore}</strong></span>
+                <span>Weight: ${s.weight ?? 1}x</span>
+              </div>
+              <div class="vlm-meter-bar">
+                <div class="vlm-meter-fill ${loadPercent > 80 ? 'meter-warn' : ''}" style="width: ${loadPercent}%;"></div>
+              </div>
+            </div>
+
+            <!-- Telemetry Metrics Grid -->
+            <div class="vlm-metrics-mini">
+              <div class="vlm-m-item">
+                <span class="vlm-m-label">Hardware Partition</span>
+                <span class="vlm-m-val">${smCount} (${gpuMem})</span>
+              </div>
+              <div class="vlm-m-item">
+                <span class="vlm-m-label">Avg / P95 Latency</span>
+                <span class="vlm-m-val">${s.avg_latency_ms ? s.avg_latency_ms + 'ms' : '—'} / ${s.p95_latency_ms ? s.p95_latency_ms + 'ms' : '—'}</span>
+              </div>
+              <div class="vlm-m-item">
+                <span class="vlm-m-label">Completed / Errs</span>
+                <span class="vlm-m-val" style="color: ${s.errors > 0 ? '#ef4444' : 'var(--text)'};">${(s.completed || 0).toLocaleString()} / ${(s.errors || 0).toLocaleString()}</span>
+              </div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    // Render Docker table
+    const dockerTbody = document.getElementById('vlm-docker-tbody');
+    if (dockerTbody) {
+      dockerTbody.innerHTML = shards.map((s, idx) => {
+        const port = s.port || (s.url ? s.url.split(':').pop() : idx);
+        const cName = s.container_name || `rapidalert_vllm_${port === '8000' ? 0 : 1}`;
+        const dInfo = s.container || {};
+        const dStatus = dInfo.status || (s.healthy ? 'Up (Running)' : 'Warming up');
+        const isUp = dStatus.toLowerCase().startsWith('up');
+        const smInfo = s.sm_count ? `${s.sm_count} SMs (MIG ${s.mig_profile || 'slice'})` : 'Shared Full GPU';
+        const modelImg = dInfo.image || 'vllm/vllm-openai:latest';
+
+        return `
+          <tr>
+            <td style="font-weight: 600;">🐳 ${this._esc(cName)}</td>
+            <td>
+              <span class="badge ${isUp ? 'badge-green' : 'badge-amber'}" style="font-size: 0.68rem;">
+                ${this._esc(dStatus)}
+              </span>
+            </td>
+            <td>${port} (HTTP)</td>
+            <td>${smInfo}</td>
+            <td style="color: var(--text-muted); font-size: 0.7rem;">${this._esc(modelImg)}</td>
+          </tr>
+        `;
+      }).join('');
+    }
   },
 
   // ════════════════════════════════════════════════════════════
@@ -2243,6 +2591,22 @@ const App = {
     document.getElementById('btn-refresh-errors')?.addEventListener('click', () => this._fetchErrors());
     document.getElementById('btn-clear-errors')?.addEventListener('click', () => this._clearErrors());
 
+    // VLM Container & Shards Inspector open/close
+    document.getElementById('vlm-shards-pill')?.addEventListener('click', () => this._openVlmInspector());
+    document.getElementById('btn-close-vlm-inspector')?.addEventListener('click', () => this._closeVlmInspector());
+    document.getElementById('modal-vlm-inspector')?.addEventListener('click', (e) => {
+      if (e.target.id === 'modal-vlm-inspector') this._closeVlmInspector();
+    });
+    document.getElementById('btn-vlm-probe-now')?.addEventListener('click', () => this._probeVlmShards());
+
+    // Follow-up Observation Banner chip click delegation
+    document.getElementById('followup-chips-list')?.addEventListener('click', (e) => {
+      const chip = e.target.closest('.followup-flashing-chip');
+      if (chip && chip.dataset.cam) {
+        this.jumpToCamera(chip.dataset.cam);
+      }
+    });
+
     // Centralized Camera Grid Event Delegation (Robust click handling for cards, streams, and event thumbnails)
     const cameraGrid = document.getElementById('camera-grid');
     if (cameraGrid) {
@@ -2274,6 +2638,16 @@ const App = {
         }
       });
     }
+
+    // Alert filter tabs (All, High, Med+, Trigger)
+    document.querySelectorAll('.alert-filter-tab').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.alert-filter-tab').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        this.activeAlertFilter = btn.dataset.alertFilter || 'all';
+        this._renderAllAlerts();
+      });
+    });
 
     // Camera filter chips
     document.querySelectorAll('.matrix-filters .filter-chip').forEach(btn => {
@@ -2596,6 +2970,7 @@ const App = {
         this._closeModal();
         this._closeSettings();
         this._closeErrorsModal();
+        this._closeVlmInspector();
       }
     });
   },
@@ -2747,5 +3122,6 @@ const App = {
 // Global helper exports for inline handlers / external invocation (multicam_behavior_test style)
 window.changePage = (delta) => App.changePage(delta);
 window.setCamPage = (page) => App.setCamPage(page);
+window.jumpToCamera = (cam) => App.jumpToCamera(cam);
 
 document.addEventListener('DOMContentLoaded', () => App.init());

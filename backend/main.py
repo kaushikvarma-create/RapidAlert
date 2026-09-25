@@ -14,6 +14,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
 
+import cv2
+import numpy as np
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
 from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -492,13 +495,29 @@ async def api_update_system_config(body: SystemConfigBody):
 #  REST — Frames & MJPEG Stream
 # ══════════════════════════════════════════════════════════════════
 
+def _get_placeholder_jpeg(name: str, width: int = 640, height: int = 360) -> bytes:
+    img = np.zeros((height, width, 3), dtype=np.uint8)
+    img[:] = (18, 18, 24)
+    cv2.putText(img, f"Connecting to {name}...", (30, height // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (120, 140, 160), 2, cv2.LINE_AA)
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 70])
+    return buf.tobytes() if ok else b""
+
+
 @app.get("/api/cameras/{name}/frame")
-def api_get_frame(name: str, width: int = 640, quality: int = 80):
-    b64 = frame_store.get_snapshot_b64(name, max_w=width, quality=quality)
-    if b64 is None:
-        raise HTTPException(status_code=404, detail="No frame available")
+async def api_get_frame(name: str, width: int = 640, quality: int = 80):
+    for _ in range(12):
+        b64 = frame_store.get_snapshot_b64(name, max_w=width, quality=quality)
+        if b64 is not None:
+            return Response(
+                content=base64.b64decode(b64),
+                media_type="image/jpeg",
+                headers={"Cache-Control": "no-cache"},
+            )
+        await asyncio.sleep(0.1)
+
+    ph_bytes = _get_placeholder_jpeg(name, width=width)
     return Response(
-        content=base64.b64decode(b64),
+        content=ph_bytes,
         media_type="image/jpeg",
         headers={"Cache-Control": "no-cache"},
     )
@@ -787,7 +806,7 @@ async def api_scan(body: ScanBody):
 
 
 # ══════════════════════════════════════════════════════════════
-#  VLM Pool telemetry
+#  VLM Pool telemetry & Container Inspector
 # ══════════════════════════════════════════════════════════════
 
 @app.get("/api/vlm/stats")
@@ -795,7 +814,7 @@ async def get_vlm_stats():
     """
     Per-MIG/shared-shard live telemetry:
     queued items, in-flight requests, completed count, error count,
-    avg/p95 latency, health flag, weight, and load_score.
+    avg/p95 latency, health flag, weight, active jobs, and load_score.
     """
     shards = vlm_pool.get_stats()
     is_mig = any(s.get("is_mig") for s in shards)
@@ -806,11 +825,64 @@ async def get_vlm_stats():
     }
 
 
+@app.get("/api/vlm/containers")
+async def get_vlm_containers():
+    """Detailed live telemetry for VLM docker containers and MIG shards."""
+    shards_stats = vlm_pool.get_stats()
+    is_mig = vlm_pool.is_mig()
+    
+    # Fast non-blocking Docker inspection
+    docker_status = {}
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "ps", "-a", "--filter", "name=rapidalert_vllm", "--format", "{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
+        for line in stdout.decode().strip().split("\n"):
+            if not line:
+                continue
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                name = parts[0].strip()
+                docker_status[name] = {
+                    "name": name,
+                    "status": parts[1].strip(),
+                    "image": parts[2].strip() if len(parts) > 2 else "",
+                    "ports": parts[3].strip() if len(parts) > 3 else "",
+                    "running": parts[1].strip().lower().startswith("up"),
+                }
+    except Exception:
+        pass
+
+    enriched = []
+    for s in shards_stats:
+        cname = s.get("container_name") or f"rapidalert_vllm_{s.get('port', '')[-1]}"
+        dinfo = docker_status.get(cname) or docker_status.get(f"rapidalert_vllm_{0 if s.get('port')=='8000' else 1}") or {}
+        enriched.append({
+            **s,
+            "container": dinfo,
+        })
+
+    return {
+        "mode": "mig" if is_mig else "shared",
+        "is_mig": is_mig,
+        "shards": enriched,
+        "total_inferences": sum(s.get("completed", 0) for s in shards_stats),
+        "total_errors": sum(s.get("errors", 0) for s in shards_stats),
+    }
+
+
+@app.post("/api/vlm/probe")
 @app.get("/api/vlm/health")
-async def get_vlm_health():
-    """Trigger a manual health probe on all vLLM endpoints."""
-    results = await vlm_pool.health_check()
-    return {"health": results}
+async def probe_vlm_endpoints():
+    """Trigger manual ping, health check and latency probe on all vLLM shards."""
+    probe_results = await vlm_pool.probe()
+    return {
+        "health": {r["url"]: r["healthy"] for r in probe_results},
+        "probe": probe_results,
+    }
 
 
 # ══════════════════════════════════════════════════════════════

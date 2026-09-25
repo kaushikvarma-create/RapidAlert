@@ -45,6 +45,14 @@ for arg in "$@"; do
   [[ "$arg" == "--no-vllm" ]] && AUTO_START_VLLM="false"
 done
 
+# If systemd background service is running, stop it to prevent conflicting port 7000 restart loop
+if systemctl is-active --quiet rapidalert 2>/dev/null; then
+  echo -e "\033[1;33m[Notice]\033[0m RapidAlert systemd background service is active."
+  echo -e "         Stopping background service to run in interactive terminal mode..."
+  sudo -n systemctl stop rapidalert 2>/dev/null || systemctl stop rapidalert 2>/dev/null || true
+  sleep 0.5
+fi
+
 # Docker config for Jetson Thor
 VLLM_IMAGE="ghcr.io/nvidia-ai-iot/vllm:latest-jetson-thor"
 HF_CACHE="$HOME/huggingface"
