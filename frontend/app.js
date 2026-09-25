@@ -21,6 +21,9 @@ const App = {
   camCurrentPage: 1,
   camsPerPage: 4,
   activeFollowups: {},
+  adminToken: sessionStorage.getItem('rapidalert_admin_token') || null,
+  adminUser: sessionStorage.getItem('rapidalert_admin_user') || 'admin',
+  isAuthConfigured: true,
 
   // ════════════════════════════════════════════════════════════
   //  Bootstrap
@@ -2107,7 +2110,54 @@ const App = {
   // ════════════════════════════════════════════════════════════
   //  Settings Panel
   // ════════════════════════════════════════════════════════════
-  _openSettings() {
+  // ════════════════════════════════════════════════════════════
+  //  Authenticated API Helper
+  // ════════════════════════════════════════════════════════════
+  async _authFetch(url, options = {}) {
+    const opts = { ...options };
+    opts.headers = { ...(opts.headers || {}) };
+    if (this.adminToken) {
+      opts.headers['Authorization'] = `Bearer ${this.adminToken}`;
+      opts.headers['X-Admin-Token'] = this.adminToken;
+    }
+    const res = await fetch(url, opts);
+    if (res.status === 401) {
+      this.adminToken = null;
+      sessionStorage.removeItem('rapidalert_admin_token');
+      sessionStorage.removeItem('rapidalert_admin_user');
+      this._updateAuthBadge(false);
+      this._closeSettings();
+      this._openAuthModal('Administrator credentials required to perform this action.');
+    }
+    return res;
+  },
+
+  // ════════════════════════════════════════════════════════════
+  //  Settings Panel & Security Lifecycle
+  // ════════════════════════════════════════════════════════════
+  async _openSettings() {
+    if (this.adminToken) {
+      try {
+        const res = await fetch('/api/auth/status', {
+          headers: { 'Authorization': `Bearer ${this.adminToken}` }
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.authenticated) {
+            this.adminUser = data.username || this.adminUser;
+            this._showSettingsPanel();
+            return;
+          }
+        }
+      } catch (e) {
+        console.warn('Auth status check failed:', e);
+      }
+    }
+    this._openAuthModal();
+  },
+
+  _showSettingsPanel() {
+    this._updateAuthBadge(true);
     document.getElementById('settings-backdrop').removeAttribute('hidden');
     document.getElementById('settings-panel').removeAttribute('hidden');
     // Sync cam table
@@ -2120,6 +2170,178 @@ const App = {
     if (followupTA) followupTA.value = this.prompts.followup || '';
     // Sync VLM info
     this._fetchVLMEndpoints();
+  },
+
+  _updateAuthBadge(isAuth) {
+    const badge = document.getElementById('settings-auth-badge');
+    const lockBtn = document.getElementById('btn-lock-settings');
+    const sessInfo = document.getElementById('security-session-info');
+    if (badge) {
+      badge.textContent = isAuth ? `🔒 ${this.adminUser || 'Admin'}` : '🔒 Locked';
+      badge.className = isAuth ? 'badge badge-green badge-sm' : 'badge badge-muted badge-sm';
+    }
+    if (lockBtn) {
+      lockBtn.style.display = isAuth ? 'inline-flex' : 'none';
+    }
+    if (sessInfo) {
+      sessInfo.textContent = isAuth ? `Logged in as ${this.adminUser || 'admin'} (PBKDF2-HMAC-SHA256)` : 'Session locked';
+    }
+  },
+
+  async _openAuthModal(errMsg = null) {
+    const modal = document.getElementById('modal-admin-auth');
+    if (!modal) return;
+    modal.style.display = 'flex';
+    const errBanner = document.getElementById('auth-error-banner');
+    const errMsgEl = document.getElementById('auth-error-msg');
+    const pwInput = document.getElementById('auth-input-password');
+    const userInput = document.getElementById('auth-input-username');
+    if (pwInput) pwInput.value = '';
+    if (userInput && !userInput.value) userInput.value = 'admin';
+
+    if (errMsg && errBanner && errMsgEl) {
+      errMsgEl.textContent = errMsg;
+      errBanner.style.display = 'flex';
+    } else if (errBanner) {
+      errBanner.style.display = 'none';
+    }
+
+    try {
+      const res = await fetch('/api/auth/status');
+      if (res.ok) {
+        const data = await res.json();
+        this.isAuthConfigured = data.configured !== false;
+        const title = document.getElementById('auth-modal-title');
+        const sub = document.getElementById('auth-modal-sub');
+        const btnLabel = document.getElementById('btn-auth-label');
+        if (!this.isAuthConfigured) {
+          if (title) title.textContent = 'Setup Master Admin';
+          if (sub) sub.textContent = 'Create your initial administrator credentials';
+          if (btnLabel) btnLabel.textContent = 'Create Master Password';
+        } else {
+          if (title) title.textContent = 'Admin Unlock';
+          if (sub) sub.textContent = 'Encrypted configuration control';
+          if (btnLabel) btnLabel.textContent = '🔓 Unlock Settings';
+        }
+      }
+    } catch (e) {}
+
+    setTimeout(() => { if (pwInput) pwInput.focus(); }, 50);
+  },
+
+  _closeAuthModal() {
+    const modal = document.getElementById('modal-admin-auth');
+    if (modal) modal.style.display = 'none';
+  },
+
+  async _submitAuth() {
+    const userInput = document.getElementById('auth-input-username');
+    const pwInput = document.getElementById('auth-input-password');
+    const errBanner = document.getElementById('auth-error-banner');
+    const errMsgEl = document.getElementById('auth-error-msg');
+    const btnLabel = document.getElementById('btn-auth-label');
+
+    const username = (userInput?.value || 'admin').trim();
+    const password = pwInput?.value || '';
+
+    if (!password) {
+      if (errMsgEl) errMsgEl.textContent = 'Please enter password.';
+      if (errBanner) errBanner.style.display = 'flex';
+      return;
+    }
+
+    const endpoint = this.isAuthConfigured ? '/api/auth/login' : '/api/auth/setup';
+    const originalText = btnLabel ? btnLabel.textContent : 'Unlock';
+    if (btnLabel) btnLabel.textContent = 'Verifying...';
+
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password })
+      });
+      const data = await res.json();
+      if (res.ok && data.token) {
+        this.adminToken = data.token;
+        this.adminUser = data.username || username;
+        this.isAuthConfigured = true;
+        sessionStorage.setItem('rapidalert_admin_token', data.token);
+        sessionStorage.setItem('rapidalert_admin_user', this.adminUser);
+        this._closeAuthModal();
+        this._showToast('🔓 Settings unlocked with encrypted session.', 'ok');
+        this._showSettingsPanel();
+      } else {
+        if (errMsgEl) errMsgEl.textContent = data.detail || 'Invalid username or password.';
+        if (errBanner) errBanner.style.display = 'flex';
+        if (pwInput) {
+          pwInput.value = '';
+          pwInput.focus();
+        }
+      }
+    } catch (e) {
+      if (errMsgEl) errMsgEl.textContent = 'Network or server error during authentication.';
+      if (errBanner) errBanner.style.display = 'flex';
+    } finally {
+      if (btnLabel) btnLabel.textContent = originalText;
+    }
+  },
+
+  async _lockSettings() {
+    if (this.adminToken) {
+      fetch('/api/auth/logout', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${this.adminToken}` }
+      }).catch(() => {});
+    }
+    this.adminToken = null;
+    sessionStorage.removeItem('rapidalert_admin_token');
+    sessionStorage.removeItem('rapidalert_admin_user');
+    this._updateAuthBadge(false);
+    this._closeSettings();
+    this._showToast('🔒 Settings locked. Admin session terminated.', 'ok');
+  },
+
+  async _submitPasswordChange() {
+    const oldPw = document.getElementById('input-old-pw')?.value || '';
+    const newPw = document.getElementById('input-new-pw')?.value || '';
+    const confirmPw = document.getElementById('input-confirm-pw')?.value || '';
+    const alertEl = document.getElementById('pw-change-alert');
+
+    const showAlert = (msg, isErr) => {
+      if (!alertEl) return;
+      alertEl.style.display = 'block';
+      alertEl.textContent = msg;
+      alertEl.style.background = isErr ? 'rgba(239, 68, 68, 0.15)' : 'rgba(16, 185, 129, 0.15)';
+      alertEl.style.border = isErr ? '1px solid rgba(239, 68, 68, 0.4)' : '1px solid rgba(16, 185, 129, 0.4)';
+      alertEl.style.color = isErr ? '#f87171' : '#34d399';
+    };
+
+    if (!oldPw) return showAlert('Please enter your current password', true);
+    if (!newPw || newPw.length < 4) return showAlert('New password must be at least 4 characters', true);
+    if (newPw !== confirmPw) return showAlert('New passwords do not match', true);
+
+    try {
+      const res = await this._authFetch('/api/auth/change-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ old_password: oldPw, new_password: newPw })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        showAlert('✅ Master password successfully updated and encrypted in database.', false);
+        const elOld = document.getElementById('input-old-pw');
+        const elNew = document.getElementById('input-new-pw');
+        const elConf = document.getElementById('input-confirm-pw');
+        if (elOld) elOld.value = '';
+        if (elNew) elNew.value = '';
+        if (elConf) elConf.value = '';
+        this._showToast('Master password successfully updated', 'ok');
+      } else {
+        showAlert(data.detail || 'Failed to update password', true);
+      }
+    } catch (e) {
+      showAlert('Error updating password', true);
+    }
   },
 
   _closeSettings() {
@@ -2161,7 +2383,7 @@ const App = {
   //  API Calls
   // ════════════════════════════════════════════════════════════
   async _apiUpsertCamera(cam) {
-    await fetch('/api/cameras', {
+    await this._authFetch('/api/cameras', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify(cam),
@@ -2169,13 +2391,13 @@ const App = {
   },
 
   async _apiDeleteCamera(name) {
-    await fetch(`/api/cameras/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    await this._authFetch(`/api/cameras/${encodeURIComponent(name)}`, { method: 'DELETE' });
   },
 
   async _saveMasterPrompt() {
     const text = document.getElementById('master-prompt-ta')?.value;
     if (text == null) return;
-    await fetch('/api/prompts', {
+    await this._authFetch('/api/prompts', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ master: text }),
@@ -2186,7 +2408,7 @@ const App = {
   async _saveFollowupPrompt() {
     const text = document.getElementById('followup-prompt-ta')?.value;
     if (text == null) return;
-    await fetch('/api/prompts', {
+    await this._authFetch('/api/prompts', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ followup: text }),
@@ -2398,7 +2620,7 @@ const App = {
     if (status) status.textContent = 'Running WS-Discovery + TCP scan…';
 
     try {
-      const r = await fetch('/api/scanner/scan', {
+      const r = await this._authFetch('/api/scanner/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2711,7 +2933,7 @@ const App = {
         enabled: true
       }));
       try {
-        await fetch('/api/cameras/batch', {
+        await this._authFetch('/api/cameras/batch', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(cams)
@@ -2728,7 +2950,7 @@ const App = {
         enabled: false
       }));
       try {
-        await fetch('/api/cameras/batch', {
+        await this._authFetch('/api/cameras/batch', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(cams)
@@ -2778,7 +3000,7 @@ const App = {
       const clipRetention = parseFloat(document.getElementById('sys-input-clip-retention')?.value);
 
       try {
-        const res = await fetch('/api/config', {
+        const res = await this._authFetch('/api/config', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -2930,18 +3152,18 @@ const App = {
     });
 
     // Clear alerts
-    document.getElementById('btn-clear-alerts')?.addEventListener('click', () => {
+    document.getElementById('btn-clear-alerts')?.addEventListener('click', async () => {
       this.alerts = [];
       this.alertCount = 0;
       this._renderAllAlerts();
-      fetch('/api/alerts', { method: 'DELETE' }).catch(() => {});
+      await this._authFetch('/api/alerts', { method: 'DELETE' }).catch(() => {});
       this._showToast('Cleared alerts feed', 'ok');
     });
 
     // Trigger Test Alert
     document.getElementById('btn-test-alert')?.addEventListener('click', async () => {
       try {
-        const res = await fetch('/api/alerts/test', { method: 'POST' });
+        const res = await this._authFetch('/api/alerts/test', { method: 'POST' });
         if (res.ok) {
           const body = await res.json();
           this._showToast('⚡ Triggered test incident alert!', 'ok');
@@ -2949,7 +3171,7 @@ const App = {
             this.onAlert({ alert: body.alert });
           }
         } else {
-          this._showToast('Failed to trigger test alert', 'err');
+          this._showToast('Failed to trigger test alert (Admin authentication required)', 'err');
         }
       } catch (e) {
         this._showToast(`Error: ${e.message}`, 'err');
@@ -2958,6 +3180,24 @@ const App = {
 
     // VLM health check button
     document.getElementById('btn-check-vlm')?.addEventListener('click', () => this._fetchVLMEndpoints());
+
+    // Settings Security & Lock events
+    document.getElementById('btn-lock-settings')?.addEventListener('click', () => this._lockSettings());
+    document.getElementById('btn-close-auth')?.addEventListener('click', () => this._closeAuthModal());
+    document.getElementById('btn-cancel-auth')?.addEventListener('click', () => this._closeAuthModal());
+    document.getElementById('modal-admin-auth')?.addEventListener('click', e => {
+      if (e.target.id === 'modal-admin-auth') this._closeAuthModal();
+    });
+    document.getElementById('form-admin-auth')?.addEventListener('submit', () => this._submitAuth());
+    document.getElementById('btn-submit-auth')?.addEventListener('click', () => this._submitAuth());
+    document.getElementById('btn-toggle-pw-vis')?.addEventListener('click', () => {
+      const pwInput = document.getElementById('auth-input-password');
+      if (pwInput) {
+        pwInput.type = pwInput.type === 'password' ? 'text' : 'password';
+      }
+    });
+    document.getElementById('form-change-password')?.addEventListener('submit', () => this._submitPasswordChange());
+    document.getElementById('btn-submit-pw-change')?.addEventListener('click', () => this._submitPasswordChange());
 
     // Alert modal close
     document.getElementById('btn-close-alert-modal')?.addEventListener('click', () => this.closeAlertModal());
@@ -2971,6 +3211,7 @@ const App = {
         this._closeSettings();
         this._closeErrorsModal();
         this._closeVlmInspector();
+        this._closeAuthModal();
       }
     });
   },
@@ -3107,7 +3348,7 @@ const App = {
 
   async _clearErrors() {
     try {
-      const res = await fetch('/api/errors', { method: 'DELETE' });
+      const res = await this._authFetch('/api/errors', { method: 'DELETE' });
       if (res.ok) {
         this._updateErrorBadge(0);
         this._showToast('Error log cleared', 'ok');

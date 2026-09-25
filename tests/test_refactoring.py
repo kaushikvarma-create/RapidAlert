@@ -130,8 +130,12 @@ def test_fastapi_endpoints():
     assert "total_errors" in data
     print(f"✅ GET /api/errors/summary OK (total: {data['total_errors']})")
 
-    # Test DELETE /api/errors
-    res = client.delete("/api/errors")
+    # Test DELETE /api/errors with admin auth
+    login_res = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
+    token = login_res.json().get("token")
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+
+    res = client.delete("/api/errors", headers=headers)
     assert res.status_code == 200
     assert res.json()["status"] == "ok"
     

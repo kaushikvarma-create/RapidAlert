@@ -60,3 +60,21 @@ class TestAlertBody(BaseModel):
     """Payload for initiating a synthetic test incident."""
     cam: Optional[str] = Field(None, description="Camera to trigger test on, or first active camera if omitted")
     severity: str = Field("HIGH", description="Target severity for synthetic alert ('HIGH' or 'MEDIUM')")
+
+
+class LoginBody(BaseModel):
+    """Payload for admin authentication."""
+    username: str = Field(..., description="Admin username")
+    password: str = Field(..., description="Admin password")
+
+
+class SetupAdminBody(BaseModel):
+    """Payload for initializing master admin credentials."""
+    username: str = Field("admin", description="Master admin username")
+    password: str = Field(..., description="Master admin password (min 4 chars)")
+
+
+class ChangePasswordBody(BaseModel):
+    """Payload for updating admin master password."""
+    old_password: str = Field(..., description="Current admin password")
+    new_password: str = Field(..., description="New admin password")

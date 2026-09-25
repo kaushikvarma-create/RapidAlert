@@ -17,9 +17,10 @@ from typing import List, Optional
 import cv2
 import numpy as np
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Request, Depends
 from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 # ── Path setup ─────────────────────────────────────────────────────
 # Ensure both backend root and rapidalert root are in python path
@@ -54,6 +55,9 @@ from backend.schemas.requests import (
     PromptBody,
     ScanBody,
     TestAlertBody,
+    LoginBody,
+    SetupAdminBody,
+    ChangePasswordBody,
 )
 from backend.schemas.responses import (
     StandardStatusResponse,
@@ -72,6 +76,7 @@ from backend.services.alert_engine import AlertEngine
 from backend.services.scheduler import DeadlineScheduler
 from backend.services.ws_manager import WSManager
 from backend.services.storage import StorageManager
+from backend.services.auth_service import AuthService
 from backend.services.rtsp_scanner import RTSPScanner
 from backend.services.metrics_monitor import metrics_loop
 from backend.services.scene_trigger import SceneTriggerEngine
@@ -80,7 +85,7 @@ from backend.core.shutdown_logger import log_system_event
 
 
 # ══════════════════════════════════════════════════════════════════
-#  Singletons Initialization
+#  Singletons Initialization & Security
 # ══════════════════════════════════════════════════════════════════
 
 sys_cfg = config_manager.get()
@@ -92,10 +97,38 @@ result_store = ResultStore()
 alert_engine = AlertEngine()
 ws_manager = WSManager()
 storage = StorageManager(DATABASE_PATH)
+auth_service = AuthService(DATABASE_PATH)
 prompt_manager = PromptManager(
     PROMPTS_CONFIG_PATH,
     cameras_config_provider=camera_manager.get_config,
 )
+
+security = HTTPBearer(auto_error=False)
+
+
+async def require_admin(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    request: Request = None,
+) -> str:
+    """Security guard verifying valid PBKDF2 authenticated session token."""
+    token = None
+    if credentials:
+        token = credentials.credentials
+    elif request and "authorization" in request.headers:
+        hdr = request.headers.get("authorization", "")
+        if hdr.startswith("Bearer "):
+            token = hdr[7:]
+    elif request and "x-admin-token" in request.headers:
+        token = request.headers.get("x-admin-token")
+
+    username = auth_service.validate_session(token) if token else None
+    if not username:
+        raise HTTPException(
+            status_code=401,
+            detail="Admin authentication required to access settings and modify configuration",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return username
 scheduler = DeadlineScheduler(
     camera_manager=camera_manager,
     frame_store=frame_store,
@@ -367,6 +400,82 @@ async def websocket_endpoint(ws: WebSocket):
 
 
 # ══════════════════════════════════════════════════════════════════
+#  REST — Admin Authentication & Security
+# ══════════════════════════════════════════════════════════════════
+
+@app.get("/api/auth/status")
+def api_auth_status(request: Request, credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)):
+    token = None
+    if credentials:
+        token = credentials.credentials
+    elif "authorization" in request.headers:
+        hdr = request.headers.get("authorization", "")
+        if hdr.startswith("Bearer "):
+            token = hdr[7:]
+    elif "x-admin-token" in request.headers:
+        token = request.headers.get("x-admin-token")
+
+    username = auth_service.validate_session(token) if token else None
+    return {
+        "configured": auth_service.is_configured(),
+        "authenticated": username is not None,
+        "username": username,
+    }
+
+
+@app.post("/api/auth/login")
+def api_auth_login(body: LoginBody, request: Request):
+    client_ip = request.client.host if request.client else "unknown"
+    ok, token, err = auth_service.authenticate(body.username, body.password, client_ip=client_ip)
+    if not ok:
+        raise HTTPException(status_code=401, detail=err or "Invalid credentials")
+    return {
+        "status": "ok",
+        "token": token,
+        "username": body.username,
+    }
+
+
+@app.post("/api/auth/setup")
+def api_auth_setup(body: SetupAdminBody):
+    if auth_service.is_configured():
+        raise HTTPException(status_code=400, detail="Admin credentials already configured")
+    ok = auth_service.create_or_update_user(body.username, body.password)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Password must be at least 4 characters")
+    ok, token, _ = auth_service.authenticate(body.username, body.password)
+    return {
+        "status": "ok",
+        "token": token,
+        "username": body.username,
+    }
+
+
+@app.post("/api/auth/logout")
+def api_auth_logout(request: Request, credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)):
+    token = None
+    if credentials:
+        token = credentials.credentials
+    elif "authorization" in request.headers:
+        hdr = request.headers.get("authorization", "")
+        if hdr.startswith("Bearer "):
+            token = hdr[7:]
+    elif "x-admin-token" in request.headers:
+        token = request.headers.get("x-admin-token")
+    if token:
+        auth_service.revoke_session(token)
+    return {"status": "ok"}
+
+
+@app.post("/api/auth/change-password")
+def api_auth_change_password(body: ChangePasswordBody, admin_user: str = Depends(require_admin)):
+    ok, err = auth_service.change_password(admin_user, body.old_password, body.new_password)
+    if not ok:
+        raise HTTPException(status_code=400, detail=err or "Failed to change password")
+    return {"status": "ok", "message": "Password successfully updated"}
+
+
+# ══════════════════════════════════════════════════════════════════
 #  REST — Cameras
 # ══════════════════════════════════════════════════════════════════
 
@@ -380,7 +489,7 @@ def api_get_drifts():
     return scene_trigger.latest_drifts
 
 
-@app.post("/api/cameras")
+@app.post("/api/cameras", dependencies=[Depends(require_admin)])
 async def api_upsert_camera(cam: CameraBody):
     camera_manager.update_camera(cam.model_dump())
     _persist_cameras()
@@ -391,7 +500,7 @@ async def api_upsert_camera(cam: CameraBody):
     return {"status": "ok", "cameras": camera_manager.get_config()}
 
 
-@app.post("/api/cameras/batch")
+@app.post("/api/cameras/batch", dependencies=[Depends(require_admin)])
 async def api_batch_update_cameras(cams: List[CameraBody]):
     for cam in cams:
         camera_manager.update_camera(cam.model_dump())
@@ -403,7 +512,7 @@ async def api_batch_update_cameras(cams: List[CameraBody]):
     return {"status": "ok", "cameras": camera_manager.get_config()}
 
 
-@app.delete("/api/cameras/{name}")
+@app.delete("/api/cameras/{name}", dependencies=[Depends(require_admin)])
 async def api_delete_camera(name: str):
     camera_manager.remove_camera(name)
     _persist_cameras()
@@ -439,10 +548,10 @@ def api_get_config():
     }
 
 
-@app.post("/api/config")
-@app.patch("/api/config")
-@app.post("/api/config/system")
-@app.patch("/api/config/system")
+@app.post("/api/config", dependencies=[Depends(require_admin)])
+@app.patch("/api/config", dependencies=[Depends(require_admin)])
+@app.post("/api/config/system", dependencies=[Depends(require_admin)])
+@app.patch("/api/config/system", dependencies=[Depends(require_admin)])
 async def api_update_system_config(body: SystemConfigBody):
     updates = body.model_dump(exclude_none=True)
     if not updates:
@@ -619,7 +728,7 @@ def api_get_prompts():
     }
 
 
-@app.post("/api/prompts")
+@app.post("/api/prompts", dependencies=[Depends(require_admin)])
 async def api_update_prompts(body: PromptBody):
     prompt_manager.save(
         master=body.master,
@@ -655,13 +764,13 @@ def api_get_single_alert(alert_id: str):
     raise HTTPException(status_code=404, detail="Alert not found")
 
 
-@app.delete("/api/alerts")
+@app.delete("/api/alerts", dependencies=[Depends(require_admin)])
 async def api_clear_alerts():
     alert_engine.clear()
     return {"status": "ok"}
 
 
-@app.post("/api/alerts/test")
+@app.post("/api/alerts/test", dependencies=[Depends(require_admin)])
 async def api_trigger_test_alert(cam: Optional[str] = None):
     """Trigger an immediate test alert to verify notification feed and inspector."""
     active = camera_manager.get_active_cameras()
@@ -736,7 +845,7 @@ def api_get_errors_summary():
     return error_tracker.get_summary()
 
 
-@app.delete("/api/errors", response_model=StandardStatusResponse)
+@app.delete("/api/errors", response_model=StandardStatusResponse, dependencies=[Depends(require_admin)])
 def api_clear_errors():
     """Clear error history from memory and SQLite log."""
     error_tracker.clear()
@@ -782,7 +891,7 @@ def api_scanner_subnet():
     return {"subnet": RTSPScanner.local_subnet()}
 
 
-@app.post("/api/scanner/scan")
+@app.post("/api/scanner/scan", dependencies=[Depends(require_admin)])
 async def api_scan(body: ScanBody):
     """Run ONVIF WS-Discovery + TCP port 554 scan. May take 3-5 seconds."""
     global _scan_running

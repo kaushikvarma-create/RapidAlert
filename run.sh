@@ -311,4 +311,5 @@ echo ""
 exec python3 -m uvicorn backend.main:app \
   --host 0.0.0.0 \
   --port "${DASHBOARD_PORT}" \
+  --reload \
   --log-level info

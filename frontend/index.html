@@ -180,12 +180,20 @@
   <div class="settings-backdrop" id="settings-backdrop" hidden></div>
   <div class="settings-panel" id="settings-panel" hidden>
     <div class="settings-header">
-      <h2>Settings</h2>
-      <button class="btn-icon btn-close-panel" id="btn-close-settings">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-        </svg>
-      </button>
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <h2>Settings</h2>
+        <span class="badge badge-green badge-sm" id="settings-auth-badge" title="Authenticated Session Active">🔒 Master Admin</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <button class="btn-ghost" id="btn-lock-settings" title="Lock Settings & End Session" style="font-size: 0.75rem; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border); cursor: pointer;">
+          🔒 Lock
+        </button>
+        <button class="btn-icon btn-close-panel" id="btn-close-settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </div>
     </div>
 
     <div class="settings-tabs">
@@ -194,6 +202,7 @@
       <button class="stab" data-stab="scanner">🔍 Scan Network</button>
       <button class="stab" data-stab="history">🗄 History</button>
       <button class="stab" data-stab="system">⚙ System</button>
+      <button class="stab" data-stab="security">🔒 Security</button>
     </div>
 
     <!-- ── Cameras Tab ─────────────────────────────────────────── -->
@@ -447,6 +456,57 @@
           <button class="btn-primary" id="btn-save-sys-config">💾 Save & Hot-Reload</button>
           <span id="sys-config-saved" style="font-size: 0.75rem; color: var(--green); display: none;">✅ Hot-reloaded!</span>
         </div>
+      </div>
+    </div>
+
+    <!-- ── Security & Authentication Tab ────────────────────────── -->
+    <div class="stab-content" id="stab-security">
+      <div class="security-card" style="padding: 16px; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 16px;">
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+          <h3 style="font-size: 1rem; display: flex; align-items: center; gap: 8px;">
+            <span>🛡️</span> Administrator Security & Encryption
+          </h3>
+          <span class="badge badge-green badge-sm">PBKDF2-HMAC-SHA256</span>
+        </div>
+        <p style="font-size: 0.8rem; color: var(--text-2); line-height: 1.5; margin-bottom: 12px;">
+          RapidAlert settings and sensitive surveillance endpoints are locked under a salted cryptographic hash stored in the SQLite database.
+          Session tokens are validated on every request and automatically expire after 24 hours.
+        </p>
+        <div style="display: flex; gap: 10px; align-items: center; padding: 10px 12px; background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.2); border-radius: 6px;">
+          <span style="font-size: 1.2rem;">🔒</span>
+          <div>
+            <div style="font-size: 0.82rem; font-weight: 600; color: var(--green);">Session Active</div>
+            <div style="font-size: 0.72rem; color: var(--text-3);" id="security-session-info">Logged in as master administrator</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="security-card" style="padding: 16px; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);">
+        <h3 style="font-size: 0.95rem; margin-bottom: 12px; display: flex; align-items: center; gap: 8px;">
+          <span>🔑</span> Change Master Admin Password
+        </h3>
+        <div id="pw-change-alert" style="display: none; padding: 8px 12px; border-radius: 6px; font-size: 0.8rem; margin-bottom: 12px;"></div>
+        <form id="form-change-password" onsubmit="return false;" style="display: flex; flex-direction: column; gap: 12px;">
+          <div>
+            <label class="field-label" for="input-old-pw">Current Master Password</label>
+            <input type="password" id="input-old-pw" class="input" placeholder="Enter current password" required />
+          </div>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+            <div>
+              <label class="field-label" for="input-new-pw">New Master Password</label>
+              <input type="password" id="input-new-pw" class="input" placeholder="Min 4 characters" required />
+            </div>
+            <div>
+              <label class="field-label" for="input-confirm-pw">Confirm New Password</label>
+              <input type="password" id="input-confirm-pw" class="input" placeholder="Re-type new password" required />
+            </div>
+          </div>
+          <div style="display: flex; justify-content: flex-end; margin-top: 4px;">
+            <button type="submit" class="btn-primary" id="btn-submit-pw-change">
+              <span>🔐 Update Password</span>
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   </div>
@@ -801,9 +861,55 @@
     </div>
   </div>
 
+  <!-- ═══════════════════════════════════════════════════════════ MODAL: ADMIN UNLOCK & SECURITY -->
+  <div class="modal-backdrop" id="modal-admin-auth" style="display: none; align-items: center; justify-content: center; z-index: 10000;">
+    <div class="modal-box" style="max-width: 440px; width: 90%; padding: 0; overflow: hidden; border: 1px solid rgba(255,255,255,0.12); box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7); background: var(--surface);">
+      <div class="modal-header" style="background: rgba(255,255,255,0.03); padding: 16px 20px; border-bottom: 1px solid var(--border);">
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <div style="width: 36px; height: 36px; border-radius: 8px; background: rgba(59, 130, 246, 0.15); border: 1px solid rgba(59, 130, 246, 0.3); display: flex; align-items: center; justify-content: center; font-size: 1.2rem;">
+            🔒
+          </div>
+          <div>
+            <h3 id="auth-modal-title" style="font-size: 1.05rem; font-weight: 700; color: var(--text-1); margin: 0;">Admin Unlock</h3>
+            <span id="auth-modal-sub" style="font-size: 0.75rem; color: var(--text-3);">Encrypted configuration control</span>
+          </div>
+        </div>
+        <button class="btn-icon" id="btn-close-auth" title="Close" style="color: var(--text-3);">✕</button>
+      </div>
+      <div class="modal-body" style="padding: 20px;">
+        <div id="auth-error-banner" style="display: none; padding: 10px 14px; background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 6px; color: #f87171; font-size: 0.8rem; margin-bottom: 16px; display: none; align-items: center; gap: 8px;">
+          <span>⚠️</span>
+          <span id="auth-error-msg">Invalid credentials</span>
+        </div>
+        <form id="form-admin-auth" onsubmit="return false;" style="display: flex; flex-direction: column; gap: 14px;">
+          <div>
+            <label class="field-label" for="auth-input-username">Administrator Username</label>
+            <input type="text" id="auth-input-username" class="input" placeholder="admin" value="admin" autocomplete="username" required />
+          </div>
+          <div>
+            <label class="field-label" for="auth-input-password">Master Password</label>
+            <div style="position: relative;">
+              <input type="password" id="auth-input-password" class="input" placeholder="Enter master password" autocomplete="current-password" required style="padding-right: 36px;" />
+              <button type="button" id="btn-toggle-pw-vis" style="position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; color: var(--text-3); font-size: 0.9rem;" title="Toggle Password Visibility">👁️</button>
+            </div>
+          </div>
+          <div style="padding: 8px 10px; background: rgba(255,255,255,0.02); border: 1px dashed var(--border); border-radius: 6px; font-size: 0.72rem; color: var(--text-3); line-height: 1.4;">
+            🛡️ Passwords encrypted via PBKDF2-HMAC-SHA256 with 100,000 rounds + 32-byte cryptographic salt.
+          </div>
+          <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 6px;">
+            <button type="button" class="btn-ghost" id="btn-cancel-auth">Cancel</button>
+            <button type="submit" class="btn-primary" id="btn-submit-auth" style="min-width: 130px;">
+              <span id="btn-auth-label">🔓 Unlock Settings</span>
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
   <!-- ═══════════════════════════════════════════════════════════ TOAST -->
   <div class="toast-container" id="toast-container"></div>
 
-  <script src="/app.js?v=33"></script>
+  <script src="/app.js?v=34"></script>
 </body>
 </html>
