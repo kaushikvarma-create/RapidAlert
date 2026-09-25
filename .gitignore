@@ -21,8 +21,9 @@ data/
 logs/
 *.log
 
-# Video clips
+# Video clips and streams
 clips/
+stream/
 
 # Developer scratchpad
 scratch/

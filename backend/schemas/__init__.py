@@ -8,6 +8,9 @@ from backend.schemas.requests import (
     PromptBody,
     ScanBody,
     TestAlertBody,
+    LoginBody,
+    SetupAdminBody,
+    ChangePasswordBody,
 )
 from backend.schemas.responses import (
     StandardStatusResponse,
@@ -25,6 +28,9 @@ __all__ = [
     "PromptBody",
     "ScanBody",
     "TestAlertBody",
+    "LoginBody",
+    "SetupAdminBody",
+    "ChangePasswordBody",
     "StandardStatusResponse",
     "AlertResponse",
     "SystemConfigResponse",

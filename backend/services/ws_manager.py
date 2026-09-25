@@ -63,3 +63,14 @@ class WSManager:
                 for ws in dead:
                     if ws in self._connections:
                         self._connections.remove(ws)
+
+    async def close_all(self) -> None:
+        """Closes all active WebSockets immediately on server shutdown."""
+        async with self._lock:
+            clients = list(self._connections)
+            self._connections.clear()
+        for ws in clients:
+            try:
+                await ws.close(code=1000)
+            except Exception:
+                pass

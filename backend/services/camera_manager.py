@@ -255,7 +255,7 @@ class CameraManager:
     def _start_thread(self, name: str, url: str) -> None:
         print(f"[CamMgr] Starting {name}")
         ev = threading.Event()
-        t = CameraThread(name, url, self.frame_store, ev)
+        t = CameraThread(name, url, self.frame_store, ev, use_nvidia=True)
         t.start()
         with self._lock:
             self._threads[name] = t

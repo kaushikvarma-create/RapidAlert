@@ -5,23 +5,25 @@ Provides querying by camera, time range, severity, and safety.
 """
 from __future__ import annotations
 
+import base64
 import json
 import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 from backend.core.error_tracker import error_tracker
 
 
 class StorageManager:
-    DB_VERSION = 1
+    DB_VERSION = 2
 
     def __init__(self, db_path: Path):
         self.db_path = db_path
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()  # one connection per thread
+        self._frame_write_counter = 0
         self._init_schema()
         print(f"[Storage] DB → {db_path}")
 
@@ -65,6 +67,16 @@ class StorageManager:
                     error        INTEGER DEFAULT 0
                 );
 
+                CREATE TABLE IF NOT EXISTS incident_frames (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    incident_id  TEXT    NOT NULL,
+                    event_id     TEXT,
+                    cam          TEXT    NOT NULL,
+                    frame_idx    INTEGER NOT NULL,
+                    frame_data   BLOB    NOT NULL,
+                    ts           REAL    NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS meta (
                     key   TEXT PRIMARY KEY,
                     value TEXT
@@ -101,13 +113,19 @@ class StorageManager:
 
             # Create indexes after all columns are confirmed to exist
             conn.executescript("""
-                CREATE INDEX IF NOT EXISTS idx_analyses_cam       ON analyses(cam);
-                CREATE INDEX IF NOT EXISTS idx_analyses_ts        ON analyses(ts);
-                CREATE INDEX IF NOT EXISTS idx_analyses_severity  ON analyses(severity);
-                CREATE INDEX IF NOT EXISTS idx_analyses_safety    ON analyses(safety);
-                CREATE INDEX IF NOT EXISTS idx_analyses_incident  ON analyses(incident_id);
-                CREATE INDEX IF NOT EXISTS idx_analyses_trigger   ON analyses(trigger_mode);
-                CREATE INDEX IF NOT EXISTS idx_analyses_cam_ts    ON analyses(cam, ts);
+                CREATE INDEX IF NOT EXISTS idx_analyses_cam            ON analyses(cam);
+                CREATE INDEX IF NOT EXISTS idx_analyses_ts             ON analyses(ts);
+                CREATE INDEX IF NOT EXISTS idx_analyses_severity       ON analyses(severity);
+                CREATE INDEX IF NOT EXISTS idx_analyses_safety         ON analyses(safety);
+                CREATE INDEX IF NOT EXISTS idx_analyses_incident       ON analyses(incident_id);
+                CREATE INDEX IF NOT EXISTS idx_analyses_trigger        ON analyses(trigger_mode);
+                CREATE INDEX IF NOT EXISTS idx_analyses_cam_ts         ON analyses(cam, ts);
+
+                CREATE INDEX IF NOT EXISTS idx_incident_frames_inc     ON incident_frames(incident_id);
+                CREATE INDEX IF NOT EXISTS idx_incident_frames_evt     ON incident_frames(event_id);
+                CREATE INDEX IF NOT EXISTS idx_incident_frames_ts      ON incident_frames(ts);
+                CREATE INDEX IF NOT EXISTS idx_incident_frames_cam     ON incident_frames(cam);
+                CREATE INDEX IF NOT EXISTS idx_incident_frames_cam_ts  ON incident_frames(cam, ts);
             """)
 
             # Store DB version
@@ -237,11 +255,24 @@ class StorageManager:
                 clauses.append("trigger_mode = ?")
                 params.append(trigger_mode.upper())
             if search and search.strip():
-                term = f"%{search.strip()}%"
-                clauses.append(
-                    "(observation LIKE ? OR activity LIKE ? OR machinery LIKE ? OR keywords LIKE ? OR incident_id LIKE ? OR labels LIKE ?)"
-                )
-                params.extend([term, term, term, term, term, term])
+                # Split search keywords into individual terms for immaculate multi-keyword filtering
+                terms = [t.strip() for t in search.strip().split() if t.strip()]
+                for term in terms:
+                    like_pattern = f"%{term}%"
+                    clauses.append(
+                        "("
+                        "observation LIKE ? OR "
+                        "activity LIKE ? OR "
+                        "machinery LIKE ? OR "
+                        "keywords LIKE ? OR "
+                        "incident_id LIKE ? OR "
+                        "labels LIKE ? OR "
+                        "cam LIKE ? OR "
+                        "severity LIKE ? OR "
+                        "safety LIKE ?"
+                        ")"
+                    )
+                    params.extend([like_pattern] * 9)
 
             where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
             params.extend([limit, offset])
@@ -409,4 +440,255 @@ class StorageManager:
                 severity="WARNING",
             )
         return pruned_count
+
+    # ── Incident Alert Sets (4-Frame Sequences) ────────────────────
+    def save_incident_frames(
+        self,
+        incident_id: str,
+        event_id: str,
+        cam: str,
+        frames: List[str | bytes],
+        ts: Optional[float] = None,
+        max_sets: int = 3000,
+    ) -> int:
+        """
+        Stores an Alert Set (the sequence of 4 JPEG frames) as binary BLOBs
+        linked to the incident_id and event_id.
+        """
+        if not incident_id or not frames:
+            return 0
+        frame_ts = ts or time.time()
+        inserted = 0
+        try:
+            conn = self._conn()
+            for idx, f in enumerate(frames):
+                raw_bytes: bytes
+                if isinstance(f, str):
+                    raw_bytes = base64.b64decode(f)
+                elif isinstance(f, bytes):
+                    raw_bytes = f
+                else:
+                    continue
+
+                conn.execute(
+                    """
+                    INSERT INTO incident_frames (incident_id, event_id, cam, frame_idx, frame_data, ts)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (incident_id, event_id, cam, idx, raw_bytes, frame_ts),
+                )
+                inserted += 1
+            conn.commit()
+
+            # Trigger rolling eviction periodically (every 25 writes)
+            self._frame_write_counter += 1
+            if self._frame_write_counter % 25 == 0:
+                self.prune_incident_frames(max_sets=max_sets)
+        except Exception as exc:
+            error_tracker.capture_exception(
+                exc,
+                component="StorageManager",
+                camera=cam,
+                effect=f"Failed to persist {len(frames)} alert frames for incident {incident_id}",
+                severity="WARNING",
+            )
+        return inserted
+
+    def get_incident_frames(self, incident_id: str) -> List[dict]:
+        """
+        Fetches all stored frames for an incident set, returning base64 encoded strings
+        and frame index for interactive UI inspection.
+        Supports incident_id, event_id, numeric analyses.id, or camera+timestamp fallback.
+        """
+        if not incident_id:
+            return []
+        try:
+            conn = self._conn()
+            inc_str = str(incident_id).strip()
+
+            # 1. Direct lookup by incident_id or event_id
+            rows = conn.execute(
+                """
+                SELECT incident_id, frame_idx, frame_data, ts, cam, event_id
+                FROM incident_frames
+                WHERE incident_id = ? OR event_id = ?
+                ORDER BY frame_idx ASC
+                """,
+                (inc_str, inc_str),
+            ).fetchall()
+
+            # 2. Lookup via analyses row id if numeric
+            if not rows and inc_str.isdigit():
+                analysis_row = conn.execute(
+                    "SELECT id, cam, ts, incident_id FROM analyses WHERE id = ?",
+                    (int(inc_str),),
+                ).fetchone()
+                if analysis_row:
+                    if analysis_row["incident_id"]:
+                        rows = conn.execute(
+                            """
+                            SELECT incident_id, frame_idx, frame_data, ts, cam, event_id
+                            FROM incident_frames
+                            WHERE incident_id = ? OR event_id = ?
+                            ORDER BY frame_idx ASC
+                            """,
+                            (analysis_row["incident_id"], analysis_row["incident_id"]),
+                        ).fetchall()
+                    if not rows and analysis_row["cam"] and analysis_row["ts"]:
+                        rows = conn.execute(
+                            """
+                            SELECT incident_id, frame_idx, frame_data, ts, cam, event_id
+                            FROM incident_frames
+                            WHERE cam = ? AND abs(ts - ?) <= 3.0
+                            ORDER BY ts DESC, frame_idx ASC
+                            LIMIT 4
+                            """,
+                            (analysis_row["cam"], analysis_row["ts"]),
+                        ).fetchall()
+
+            # 3. Lookup via INC-{cam}-{ts} pattern
+            if not rows and inc_str.startswith("INC-"):
+                parts = inc_str.split("-")
+                if len(parts) >= 3:
+                    cam_hint = parts[1]
+                    try:
+                        ts_hint = float(parts[2])
+                        rows = conn.execute(
+                            """
+                            SELECT incident_id, frame_idx, frame_data, ts, cam, event_id
+                            FROM incident_frames
+                            WHERE cam = ? AND abs(ts - ?) <= 3.0
+                            ORDER BY ts DESC, frame_idx ASC
+                            LIMIT 4
+                            """,
+                            (cam_hint, ts_hint),
+                        ).fetchall()
+                    except (ValueError, IndexError):
+                        pass
+
+            return [
+                {
+                    "idx": r["frame_idx"],
+                    "frame_idx": r["frame_idx"],
+                    "incident_id": r["incident_id"],
+                    "b64": base64.b64encode(r["frame_data"]).decode("utf-8"),
+                    "ts": r["ts"],
+                    "cam": r["cam"],
+                    "event_id": r["event_id"],
+                }
+                for r in rows
+            ]
+        except Exception as exc:
+            error_tracker.capture_exception(
+                exc,
+                component="StorageManager",
+                effect=f"Failed to retrieve incident frames for {incident_id}",
+                severity="WARNING",
+            )
+            return []
+
+    def get_incident_frame_raw(self, incident_id: str, frame_idx: int = 0) -> Optional[bytes]:
+        """Returns direct raw JPEG binary bytes for a single frame index."""
+        try:
+            frames = self.get_incident_frames(incident_id)
+            for f in frames:
+                if f["frame_idx"] == frame_idx:
+                    return base64.b64decode(f["b64"])
+            if frames:
+                return base64.b64decode(frames[0]["b64"])
+        except Exception as exc:
+            error_tracker.capture_exception(
+                exc,
+                component="StorageManager",
+                effect=f"Failed to retrieve raw frame #{frame_idx} for {incident_id}",
+                severity="WARNING",
+            )
+        return None
+
+    def prune_incident_frames(self, max_sets: int = 3000) -> int:
+        """
+        Enforces the FIFO rolling buffer of Alert Sets.
+        Deletes frames of older incidents beyond the latest max_sets.
+        """
+        if max_sets <= 0:
+            return 0
+        try:
+            conn = self._conn()
+            # Find count of distinct incident sets
+            count_row = conn.execute("SELECT COUNT(DISTINCT incident_id) AS total FROM incident_frames").fetchone()
+            total_sets = count_row["total"] if count_row else 0
+            if total_sets <= max_sets:
+                return 0
+
+            # Prune oldest sets
+            cur = conn.execute(
+                """
+                DELETE FROM incident_frames
+                WHERE incident_id NOT IN (
+                    SELECT incident_id FROM (
+                        SELECT DISTINCT incident_id, ts FROM incident_frames
+                        ORDER BY ts DESC
+                        LIMIT ?
+                    )
+                )
+                """,
+                (max_sets,),
+            )
+            pruned_frames = cur.rowcount
+            conn.commit()
+            if pruned_frames > 0:
+                print(f"[Storage] 🧹 Rolling Buffer: Pruned {pruned_frames} historical frames (retaining {max_sets} latest Alert Sets)")
+            return pruned_frames
+        except Exception as exc:
+            error_tracker.capture_exception(
+                exc,
+                component="StorageManager",
+                effect=f"Failed to prune incident frames rolling buffer (limit: {max_sets})",
+                severity="WARNING",
+            )
+            return 0
+
+    def get_archive_stats(self) -> dict:
+        """
+        Summary metrics for the Incident Archive UI.
+        """
+        try:
+            conn = self._conn()
+            r_analyses = conn.execute(
+                "SELECT COUNT(*) AS total, MIN(ts) AS min_ts, MAX(ts) AS max_ts FROM analyses"
+            ).fetchone()
+            r_frames = conn.execute(
+                "SELECT COUNT(DISTINCT incident_id) AS total_sets, COUNT(*) AS total_frames, MIN(ts) AS min_ts, MAX(ts) AS max_ts FROM incident_frames"
+            ).fetchone()
+
+            earliest_ts = (
+                r_analyses["min_ts"]
+                if r_analyses and r_analyses["min_ts"]
+                else (r_frames["min_ts"] if r_frames else None)
+            )
+            latest_ts = (
+                r_analyses["max_ts"]
+                if r_analyses and r_analyses["max_ts"]
+                else (r_frames["max_ts"] if r_frames else None)
+            )
+
+            total_sets = r_frames["total_sets"] if r_frames else 0
+
+            return {
+                "total_analyses": r_analyses["total"] if r_analyses else 0,
+                "total_alert_sets": total_sets,
+                "total_sets": total_sets,
+                "total_frames": r_frames["total_frames"] if r_frames else 0,
+                "earliest_ts": earliest_ts,
+                "latest_ts": latest_ts,
+            }
+        except Exception as exc:
+            return {
+                "total_analyses": 0,
+                "total_alert_sets": 0,
+                "total_sets": 0,
+                "total_frames": 0,
+                "earliest_ts": None,
+                "latest_ts": None,
+            }
 

@@ -9,6 +9,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+export PYTHONWARNINGS="ignore:resource_tracker:UserWarning"
+
 # ── Colours ─────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
@@ -275,24 +277,6 @@ else
     warn "No mig_uuid in config — backend will use default CUDA device selection"
 fi
 
-# Auto-open dashboard in browser immediately across desktop sessions
-(
-  sleep 1.2
-  TARGET_URL="http://localhost:${DASHBOARD_PORT}"
-  export DISPLAY="${DISPLAY:-:1}"
-  export XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}"
-  
-  if command -v xdg-open &>/dev/null; then
-    xdg-open "$TARGET_URL" >/dev/null 2>&1 || true
-  elif command -v brave &>/dev/null; then
-    brave "$TARGET_URL" >/dev/null 2>&1 &
-  elif command -v google-chrome &>/dev/null; then
-    google-chrome "$TARGET_URL" >/dev/null 2>&1 &
-  elif command -v firefox &>/dev/null; then
-    firefox "$TARGET_URL" >/dev/null 2>&1 &
-  fi
-) &
-
 LAN_IPS=$(hostname -I 2>/dev/null || echo "")
 
 echo ""
@@ -311,5 +295,6 @@ echo ""
 exec python3 -m uvicorn backend.main:app \
   --host 0.0.0.0 \
   --port "${DASHBOARD_PORT}" \
+  --timeout-graceful-shutdown 1 \
   --reload \
   --log-level info

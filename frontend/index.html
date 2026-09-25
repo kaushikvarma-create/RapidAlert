@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/style.css?v=36" />
+  <link rel="stylesheet" href="/style.css?v=40" />
   <script>
     (function() {
       var saved = localStorage.getItem('rapidalert_theme') || localStorage.getItem('theme');
@@ -155,6 +155,10 @@
           <span class="alerts-counter-pill" id="alert-count">0</span>
         </div>
         <div class="alerts-actions">
+          <button class="btn-archive-header" id="btn-open-archive" title="Incident Archive & Timeline Explorer (3,000 Alert Sets)" aria-label="Open Incident Archive">
+            <span class="btn-archive-icon">🗄️</span>
+            <span class="btn-archive-text">Archive</span>
+          </button>
           <button class="btn-icon-subtle" id="btn-test-alert" title="Trigger Test Incident Alert" aria-label="Trigger Test Alert">
             <span>⚡</span>
           </button>
@@ -245,7 +249,7 @@
               <th>URL</th>
               <th>On</th>
               <th>Drift Thresh</th>
-              <th>Mandatory (s)</th>
+              <th>Heartbeat (s)</th>
               <th>Day Context</th>
               <th>Night Context</th>
               <th></th>
@@ -808,7 +812,7 @@
           </div>
           <div class="vlm-sum-item">
             <span class="vlm-sum-label">Vision Model</span>
-            <span class="vlm-sum-val" id="vlm-sum-model" style="font-family: var(--font-mono); font-size: 0.78rem;">OpenGVLab/InternVL2_5-1B</span>
+            <span class="vlm-sum-val" id="vlm-sum-model" style="font-family: var(--font-mono); font-size: 0.78rem;">—</span>
           </div>
         </div>
 
@@ -919,9 +923,164 @@
     </div>
   </div>
 
+  <!-- ═══════════════════════════════════════════════════════════ MODAL: INCIDENT ARCHIVE & TIMELINE EXPLORER -->
+  <div class="modal-backdrop" id="archive-modal-backdrop" hidden></div>
+  <div class="modal modal-theater modal-archive-dialog" id="modal-archive" hidden>
+    <div class="modal-header">
+      <div class="archive-modal-title-wrap">
+        <div class="archive-modal-header-top">
+          <span class="archive-modal-icon">🗄️</span>
+          <h2>Incident Archive &amp; Timeline Explorer</h2>
+          <span class="badge badge-accent" id="archive-badge-limit">Rolling Buffer: 3,000 Alert Sets</span>
+        </div>
+        <span class="modal-cam-ts" id="archive-stats-banner">Loading storage statistics...</span>
+      </div>
+      <div class="modal-header-actions">
+        <button type="button" class="btn btn-sm btn-ghost" id="btn-refresh-archive" title="Refresh records">
+          <span>🔄</span> Refresh
+        </button>
+        <button class="btn-icon btn-close-panel" id="btn-close-archive" aria-label="Close archive explorer">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="archive-modal-body">
+      <!-- Filter Controls Toolbar -->
+      <div class="archive-filter-panel">
+        <div class="archive-filter-row">
+          <!-- Keyword Search (Immaculate text filtering) -->
+          <div class="archive-field-group archive-field-search">
+            <label class="field-label" for="archive-filter-search">Keyword Search</label>
+            <div class="archive-search-wrap">
+              <span class="archive-search-glyph">🔍</span>
+              <input type="text" id="archive-filter-search" class="input input-sm" placeholder="Search observation, cam, keyword, ID..." />
+              <button type="button" id="archive-search-clear" class="archive-search-clear-btn" title="Clear search" style="display: none;">✕</button>
+            </div>
+          </div>
+
+          <!-- Camera Selector -->
+          <div class="archive-field-group">
+            <label class="field-label" for="archive-filter-cam">Camera</label>
+            <select id="archive-filter-cam" class="input input-sm">
+              <option value="">All Cameras</option>
+            </select>
+          </div>
+
+          <!-- Severity / Mode Filter -->
+          <div class="archive-field-group">
+            <label class="field-label" for="archive-filter-sev">Severity / Mode</label>
+            <select id="archive-filter-sev" class="input input-sm">
+              <option value="">All Records</option>
+              <option value="HIGH">🚨 High Severity</option>
+              <option value="MEDIUM">⚠️ Medium Severity</option>
+              <option value="TRIGGER">⚡ Scene Shift Triggers</option>
+              <option value="FOLLOWUP">🔄 Follow-Ups</option>
+            </select>
+          </div>
+
+          <!-- Date / Time Pickers -->
+          <div class="archive-field-group">
+            <label class="field-label" for="archive-filter-from">From Time</label>
+            <input type="datetime-local" id="archive-filter-from" class="input input-sm" />
+          </div>
+
+          <div class="archive-field-group">
+            <label class="field-label" for="archive-filter-to">To Time</label>
+            <input type="datetime-local" id="archive-filter-to" class="input input-sm" />
+          </div>
+        </div>
+
+        <div class="archive-filter-actions-row">
+          <div class="archive-preset-pills">
+            <span class="archive-presets-label">Quick Range:</span>
+            <button type="button" class="preset-pill" id="btn-archive-range-1h">1h</button>
+            <button type="button" class="preset-pill" id="btn-archive-range-today">Today</button>
+            <button type="button" class="preset-pill" id="btn-archive-range-24h">24h</button>
+            <button type="button" class="preset-pill" id="btn-archive-range-all">All Time</button>
+          </div>
+          <div class="archive-btn-group">
+            <button type="button" class="btn btn-sm btn-ghost" id="btn-archive-reset-filters">Reset</button>
+            <button type="button" class="btn btn-sm btn-primary" id="btn-archive-apply-filter">🔍 Apply Filter</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Two Column Explorer Layout: Left (Incident List Table), Right (4-Frame Alert Set Inspector) -->
+      <div class="archive-explorer-grid">
+        
+        <!-- Left: Incident Records Table -->
+        <div class="archive-table-card">
+          <div class="archive-table-header-bar">
+            <span class="archive-table-title">Matched Incidents (<span id="archive-matched-count">0</span>)</span>
+            <span class="archive-table-sub">Click any record to inspect 4-frame set</span>
+          </div>
+          <div class="archive-table-scroll" id="archive-table-wrap">
+            <table class="cam-table archive-cam-table">
+              <thead>
+                <tr>
+                  <th style="width: 80px;">Time</th>
+                  <th style="width: 110px;">Camera</th>
+                  <th style="width: 65px;">Sev</th>
+                  <th>AI Observation Summary</th>
+                </tr>
+              </thead>
+              <tbody id="archive-records-body">
+                <!-- Dynamically populated -->
+              </tbody>
+            </table>
+            <div id="archive-empty" class="empty-state" style="display: none;">
+              <div class="empty-icon">🛡️</div>
+              <p>No incidents match criteria</p>
+              <small>Try adjusting keyword search, severity, or date range.</small>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right: Selected Alert Set 4-Frame Inspector & Image Viewer -->
+        <div class="archive-inspector-card" id="archive-inspector-panel">
+          <div class="archive-inspector-header">
+            <div>
+              <h3 id="archive-ins-title">Alert Set Visual Timeline</h3>
+              <span id="archive-ins-id">Select an incident from the left to view its 4-frame trigger sequence</span>
+            </div>
+            <span class="badge" id="archive-ins-badge" style="display: none;">STATUS</span>
+          </div>
+
+          <!-- 4-Frame Carousel / Strip -->
+          <div id="archive-frames-strip" class="archive-frames-strip">
+            <div class="archive-frame-thumb-box"><div class="archive-frame-ph">t-3</div></div>
+            <div class="archive-frame-thumb-box"><div class="archive-frame-ph">t-2</div></div>
+            <div class="archive-frame-thumb-box"><div class="archive-frame-ph">t-1</div></div>
+            <div class="archive-frame-thumb-box"><div class="archive-frame-ph">t-0</div></div>
+          </div>
+
+          <!-- Enlarge Frame Viewport -->
+          <div class="archive-preview-stage">
+            <img id="archive-main-preview" src="" alt="Incident Frame Preview" style="display: none;" />
+            <div id="archive-preview-placeholder" class="archive-preview-placeholder">
+              📸 Click any of the 4 thumbnails above to enlarge and examine
+            </div>
+            <span id="archive-frame-tag" class="archive-frame-tag" style="display: none;">t-0</span>
+          </div>
+
+          <!-- VLM Explanation & Intelligence -->
+          <div class="archive-obs-card">
+            <div class="archive-obs-label">AI Observation &amp; Action Intelligence:</div>
+            <p id="archive-ins-obs">—</p>
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+  </div>
+
   <!-- ═══════════════════════════════════════════════════════════ TOAST -->
   <div class="toast-container" id="toast-container"></div>
 
-  <script src="/app.js?v=37"></script>
+  <script src="/app.js?v=43"></script>
 </body>
 </html>

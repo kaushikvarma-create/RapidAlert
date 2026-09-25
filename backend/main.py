@@ -16,11 +16,17 @@ from typing import List, Optional
 
 import cv2
 import numpy as np
+import warnings
+
+# Suppress harmless PyTorch/Python 3.12 POSIX semaphore cleanup notice at exit
+warnings.filterwarnings("ignore", message=".*resource_tracker.*", category=UserWarning)
+os.environ.setdefault("PYTHONWARNINGS", "ignore:resource_tracker:UserWarning")
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Request, Depends
 from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 # ── Path setup ─────────────────────────────────────────────────────
 # Ensure both backend root and rapidalert root are in python path
@@ -175,10 +181,13 @@ watchdog = SystemWatchdog(
 # ══════════════════════════════════════════════════════════════════
 
 _bg_tasks = []
+_is_shutting_down = False
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _is_shutting_down
+    _is_shutting_down = False
     # ── Startup ─────────────────────────────────────────────────
     t_start = time.monotonic()
     camera_manager.sync()
@@ -195,6 +204,8 @@ async def lifespan(app: FastAPI):
     print(f"\n[RapidAlert] ✅ Dashboard → http://localhost:{port}\n")
     yield
     # ── Shutdown ────────────────────────────────────────────────
+    _is_shutting_down = True
+    await ws_manager.close_all()
     uptime = time.monotonic() - t_start
     summary = watchdog.get_summary()
     watchdog.stop()
@@ -326,6 +337,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+class GracefulShutdownMiddleware:
+    """Catches CancelledError when uvicorn cancels streaming connections on graceful shutdown timeout."""
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        try:
+            await self.app(scope, receive, send)
+        except (asyncio.CancelledError, GeneratorExit):
+            pass
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -333,6 +355,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(GracefulShutdownMiddleware)
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return Response(status_code=204)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -383,7 +411,7 @@ async def websocket_endpoint(ws: WebSocket):
         while True:
             await asyncio.sleep(25)
             await ws.send_json({"type": "ping"})
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, RuntimeError):
         pass
     except asyncio.CancelledError:
         pass
@@ -637,7 +665,23 @@ async def api_camera_stream(name: str, width: int = 640, quality: int = 70):
     async def frame_generator():
         last_ts = 0.0
         try:
-            while True:
+            # 1. Send initial frame or connecting placeholder immediately so browser opens stream in 0ms
+            initial_entry = frame_store.get_latest_jpeg_entry(name, max_w=width, quality=quality)
+            if initial_entry is not None:
+                last_ts, initial_jpeg = initial_entry
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n" + initial_jpeg + b"\r\n"
+                )
+            else:
+                ph_bytes = _get_placeholder_jpeg(name, width=width)
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n" + ph_bytes + b"\r\n"
+                )
+
+            # 2. Continuous real-time stream
+            while not _is_shutting_down:
                 entry = frame_store.get_latest_jpeg_entry(name, max_w=width, quality=quality)
                 if entry is not None:
                     ts, jpeg_bytes = entry
@@ -707,6 +751,30 @@ def api_get_all_history(
 @app.get("/api/storage/stats")
 def api_storage_stats():
     return storage.get_stats()
+
+
+@app.get("/api/archive/stats")
+def api_archive_stats():
+    """Archive summary metrics: total stored alert sets, total frames, and timestamp span."""
+    return storage.get_archive_stats()
+
+
+@app.get("/api/incidents/{incident_id}/frames")
+def api_get_incident_frames(incident_id: str):
+    """Retrieve the sequence of stored frames (base64) for an incident or event ID."""
+    frames = storage.get_incident_frames(incident_id)
+    if not frames:
+        raise HTTPException(status_code=404, detail=f"No stored frames found for incident {incident_id}")
+    return {"incident_id": incident_id, "count": len(frames), "frames": frames}
+
+
+@app.get("/api/incidents/{incident_id}/frame/{frame_idx}")
+def api_get_incident_frame_raw(incident_id: str, frame_idx: int = 0):
+    """Retrieve a single raw JPEG binary image for an incident frame index (0..3)."""
+    raw_jpeg = storage.get_incident_frame_raw(incident_id, frame_idx=frame_idx)
+    if not raw_jpeg:
+        raise HTTPException(status_code=404, detail=f"Frame #{frame_idx} not found for incident {incident_id}")
+    return Response(content=raw_jpeg, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.get("/api/cameras/{name}/stats")

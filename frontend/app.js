@@ -556,7 +556,7 @@ const App = {
     for (const name of Object.keys(this.cameras)) {
       if (!names.has(name)) {
         delete this.cameras[name];
-        document.getElementById(`card-${this._eid(name)}`)?.remove();
+        document.getElementById(`cam-card-${this._eid(name)}`)?.remove();
       }
     }
 
@@ -614,29 +614,41 @@ const App = {
     const endIndex = Math.min(startIndex + this.camsPerPage, totalCams);
     const visibleOnPage = new Set(eligibleCams.slice(startIndex, endIndex));
 
-    // 3. Render cards, toggle visibility, and attach real-time live MJPEG stream
+    // 3. Phase 1: Immediately detach/abort all streams for cameras NOT on this page or if modal is active
     for (const name of camNames) {
-      this._renderCamCard(name);
-      const card = document.getElementById(`cam-card-${this._eid(name)}`);
-      const cardImg = document.getElementById(`cam-card-img-${this._eid(name)}`);
       const isVisible = visibleOnPage.has(name);
       const isEnabled = this.cameras[name]?.config?.enabled !== false;
+      const shouldStream = isVisible && isEnabled && !this.activeCamModal;
 
+      const card = document.getElementById(`cam-card-${this._eid(name)}`);
       if (card) {
         card.style.display = isVisible ? 'flex' : 'none';
       }
 
-      if (cardImg) {
-        const streamUrl = `/api/cameras/${encodeURIComponent(name)}/stream?width=640&quality=65`;
-        if (isVisible && isEnabled) {
+      if (!shouldStream) {
+        const cardImg = document.getElementById(`cam-card-img-${this._eid(name)}`);
+        if (cardImg && (cardImg.src.includes('/stream') || cardImg.src.startsWith('http'))) {
+          cardImg.src = '';
+          cardImg.removeAttribute('src');
+        }
+      }
+    }
+
+    // 3. Phase 2: Attach real-time live MJPEG streams ONLY for visible cameras on active page
+    for (const name of camNames) {
+      this._renderCamCard(name);
+      const isVisible = visibleOnPage.has(name);
+      const isEnabled = this.cameras[name]?.config?.enabled !== false;
+      const shouldStream = isVisible && isEnabled && !this.activeCamModal;
+
+      if (shouldStream) {
+        const cardImg = document.getElementById(`cam-card-img-${this._eid(name)}`);
+        if (cardImg) {
+          const streamUrl = `/api/cameras/${encodeURIComponent(name)}/stream?width=640&quality=65`;
           if (!cardImg.src || !cardImg.src.includes(`/api/cameras/${encodeURIComponent(name)}/stream`)) {
             cardImg.src = streamUrl;
           }
           cardImg.style.opacity = '1';
-        } else {
-          if (cardImg.src && cardImg.src.includes('/stream')) {
-            cardImg.src = this.cameras[name]?.thumbB64 ? `data:image/jpeg;base64,${this.cameras[name].thumbB64}` : '';
-          }
         }
       }
     }
@@ -742,6 +754,16 @@ const App = {
   },
 
   setCamPage(page) {
+    // 1. Immediately abort all active stream requests for existing cards so browser socket pool is freed up
+    for (const name of Object.keys(this.cameras || {})) {
+      const eid = this._eid(name);
+      const cardImg = document.getElementById(`cam-card-img-${eid}`);
+      if (cardImg && (cardImg.src.includes('/stream') || cardImg.src.startsWith('http'))) {
+        cardImg.src = '';
+        cardImg.removeAttribute('src');
+      }
+    }
+
     this.camCurrentPage = page;
     this._updateLayoutUi();
     this._renderCameraGrid();
@@ -844,85 +866,33 @@ const App = {
     const cam = this.cameras[name];
     if (!cam) return;
 
-    let card = document.getElementById(`cam-card-${this._eid(name)}`);
-    if (!card) {
-      card = document.createElement('div');
-      card.className = 'cam-card';
-      card.id = `cam-card-${this._eid(name)}`;
-      grid.appendChild(card);
-    }
-
+    const eid = this._eid(name);
+    let card = document.getElementById(`cam-card-${eid}`);
     const isEnabled = cam.config?.enabled !== false;
     const topResult = cam.results?.[0];
     const sev = (topResult?.severity || 'LOW').toUpperCase();
     const saf = (topResult?.safety || 'OK').toUpperCase();
     const driftVal = cam.drift !== undefined ? Number(cam.drift).toFixed(4) : '—';
     const thresh = cam.config?.threshold ?? (this.systemConfig?.default_threshold || 0.033);
+    const hasOverride = !!(this.prompts.cameras?.[name]);
 
-    // Fault classification & visual glow rings
-    card.classList.remove('fault-danger', 'fault-drift', 'fault-offline');
+    const isVisible = this._isCamOnCurrentPage(name);
+
     let statusText = 'LIVE';
     let statusBadgeClass = 'badge-green';
 
     if (!isEnabled) {
-      card.classList.add('fault-offline');
       statusText = 'OFFLINE';
       statusBadgeClass = 'badge-muted';
     } else if (sev === 'HIGH' || saf === 'DANGER') {
-      card.classList.add('fault-danger');
       statusText = '🚨 INCIDENT';
       statusBadgeClass = 'badge-red';
     } else if (cam.is_incident || (cam.drift !== undefined && cam.drift >= thresh)) {
-      card.classList.add('fault-drift');
       statusText = '⚡ SCENE SHIFT';
       statusBadgeClass = 'badge-cyan';
     } else {
       statusText = '💓 HEALTHY';
       statusBadgeClass = 'badge-green';
-    }
-
-    // 1. Live Video Viewport (Instant frame from cache, updated at 10 FPS over WebSocket)
-    const liveSrc = cam.thumbB64
-      ? `data:image/jpeg;base64,${cam.thumbB64}`
-      : `/api/cameras/${encodeURIComponent(name)}/frame?t=${Date.now()}`;
-
-    // 2. Dedicated Event-Based Photos Strip (Trigger sequence captured for AI analysis)
-    let eventPhotosHtml = '';
-    const hasEvents = cam.eventPhotos && cam.eventPhotos.length > 0;
-    if (hasEvents) {
-      const count = cam.eventPhotos.length;
-      const isInc = (sev === 'HIGH' || saf === 'DANGER' || cam.is_incident);
-      const isDrift = (cam.drift !== undefined && cam.drift >= thresh);
-      const tagLabel = isInc ? '🚨 INCIDENT' : (isDrift ? '⚡ SHIFT' : '📸 CAPTURE');
-      const tagCls = isInc ? 'tag-incident' : (isDrift ? 'tag-drift' : 'tag-periodic');
-
-      eventPhotosHtml = `
-        <div class="cam-event-strip">
-          <div class="cam-event-strip-header">
-            <div class="cam-event-title-wrap">
-              <span class="cam-event-icon">📸</span>
-              <span class="cam-event-title">Event Photos</span>
-              <span class="cam-event-count">(${count} captured)</span>
-            </div>
-            <span class="cam-event-tag ${tagCls}">${tagLabel}</span>
-          </div>
-          <div class="cam-event-thumbs-grid">
-            ${cam.eventPhotos.slice(0, 4).map((b64, idx) => `
-              <div class="cam-event-thumb-item" data-cam="${this._esc(name)}" data-idx="${idx}" title="Event Frame #${idx + 1} (t-${count - 1 - idx}) — Click to view in Theater">
-                <img src="data:image/jpeg;base64,${b64}" alt="Event Frame ${idx + 1}" />
-                <span class="cam-event-thumb-badge">t-${count - 1 - idx}</span>
-              </div>
-            `).join('')}
-          </div>
-        </div>
-      `;
-    } else {
-      eventPhotosHtml = `
-        <div class="cam-card-no-events">
-          <span>📸 Event Photos: No triggers recorded yet</span>
-          <span class="cam-monitoring-pill">● Monitoring</span>
-        </div>
-      `;
     }
 
     const sevCls = { LOW: 'green', MEDIUM: 'amber', HIGH: 'red' }[sev] || 'muted';
@@ -931,58 +901,184 @@ const App = {
     const obsText = isWarmup ? '⏳ VLM Model Initializing (Loading weights into GPU memory)...' : (topResult?.observation || 'Awaiting VLM scene understanding analysis…');
     const latencyText = topResult?.latency ? `${Number(topResult.latency).toFixed(2)}s` : '—';
     const e2eText = topResult?.e2e_latency != null ? `${Number(topResult.e2e_latency).toFixed(2)}s` : '--';
-    const hasOverride = !!(this.prompts.cameras?.[name]);
 
-    card.innerHTML = `
-      <div class="cam-card-header">
-        <div class="cam-card-title-wrap">
-          <span class="cam-live-dot" style="${!isEnabled ? 'background:var(--text-3); box-shadow:none;' : ''}"></span>
-          <span class="cam-card-title">${this._esc(name)}</span>
-          ${hasOverride ? `<span title="Custom requirement prompt active" style="color:var(--accent); font-size:0.7rem; font-weight:700; background:var(--accent-glow); padding:1px 5px; border-radius:3px;">✎ CUSTOM</span>` : ''}
-        </div>
-        <div class="cam-card-header-tags">
-          <span class="cam-drift-badge" title="DINOv2 Drift Cosine Metric">⚡ ${driftVal}</span>
-          <span class="badge ${statusBadgeClass} badge-sm">${statusText}</span>
-        </div>
-      </div>
+    // ── Build Initial Card DOM Structure Once ─────────────────────
+    if (!card) {
+      card = document.createElement('div');
+      card.className = 'cam-card';
+      card.id = `cam-card-${eid}`;
+      card.setAttribute('data-cam', name);
+      card.style.cursor = 'pointer';
 
-      <div class="cam-card-video" id="cam-video-${this._eid(name)}">
-        <img id="cam-card-img-${this._eid(name)}" src="${liveSrc}" class="cam-card-img" alt="${this._esc(name)}" onerror="this.style.opacity='0.4'">
-        <div class="cam-live-indicator">
-          <span class="cam-live-dot ${isEnabled ? 'pulsing' : 'offline'}"></span>
-          <span>${isEnabled ? 'LIVE RTSP' : 'OFFLINE'}</span>
-        </div>
-        <div class="cam-hover-overlay">
-          <span>🔍 Inspect Live Feed &amp; Set Prompts</span>
-        </div>
-      </div>
-
-      ${eventPhotosHtml}
-
-      <div class="cam-card-info">
-        <div class="cam-card-badges-row">
-          <div style="display: flex; gap: 4px;">
-            <span class="badge badge-${safCls} badge-sm">🛡 ${saf}</span>
-            <span class="badge badge-${sevCls} badge-sm">⚠ ${sev}</span>
+      card.innerHTML = `
+        <div class="cam-card-header">
+          <div class="cam-card-title-wrap">
+            <span class="cam-live-dot" id="cam-dot-${eid}"></span>
+            <span class="cam-card-title">${this._esc(name)}</span>
+            <span id="cam-custom-badge-${eid}" style="display:none; color:var(--accent); font-size:0.7rem; font-weight:700; background:var(--accent-glow); padding:1px 5px; border-radius:3px;">✎ CUSTOM</span>
           </div>
-          <span style="font-size: 0.68rem; color: var(--text-3); font-family: var(--font-mono);">
-            ${topResult?.workers ? `👷 ${this._esc(topResult.workers)}` : ''}
-          </span>
+          <div class="cam-card-header-tags">
+            <span class="cam-drift-badge" id="cam-drift-${eid}" title="DINOv2 Drift Cosine Metric">⚡ —</span>
+            <span class="badge badge-sm" id="cam-status-${eid}">LIVE</span>
+          </div>
         </div>
-        <p class="cam-card-obs" title="${this._esc(obsText)}">${this._esc(obsText)}</p>
-        <div class="cam-card-footer">
-          <span>Infer: ${latencyText}</span>
-          <span title="DINOv2 Trigger-to-post latency" style="color:${topResult?.e2e_latency != null ? 'var(--cyan)' : 'var(--text-3)'}; font-weight:600;">
-            Trig→Post: ${e2eText}
-          </span>
-        </div>
-      </div>
-    `;
 
-    // Ensure card attributes for event delegation
-    card.setAttribute('data-cam', name);
-    card.style.cursor = 'pointer';
-    card.style.display = this._isCamOnCurrentPage(name) ? 'flex' : 'none';
+        <div class="cam-card-video" id="cam-video-${eid}">
+          <img id="cam-card-img-${eid}" class="cam-card-img" alt="${this._esc(name)}" onerror="this.style.opacity='0.4'">
+          <div class="cam-live-indicator">
+            <span class="cam-live-dot" id="cam-live-indicator-dot-${eid}"></span>
+            <span id="cam-live-text-${eid}">LIVE RTSP</span>
+          </div>
+          <div class="cam-hover-overlay">
+            <span>🔍 Inspect Live Feed &amp; Set Prompts</span>
+          </div>
+        </div>
+
+        <div id="cam-event-strip-container-${eid}"></div>
+
+        <div class="cam-card-info">
+          <div class="cam-card-badges-row">
+            <div style="display: flex; gap: 4px;">
+              <span class="badge badge-sm" id="cam-badge-saf-${eid}">🛡 OK</span>
+              <span class="badge badge-sm" id="cam-badge-sev-${eid}">⚠ LOW</span>
+            </div>
+            <span style="font-size: 0.68rem; color: var(--text-3); font-family: var(--font-mono);" id="cam-workers-${eid}"></span>
+          </div>
+          <p class="cam-card-obs" id="cam-obs-${eid}">Awaiting VLM scene understanding analysis…</p>
+          <div class="cam-card-footer">
+            <span id="cam-infer-${eid}">Infer: —</span>
+            <span id="cam-e2e-${eid}" title="DINOv2 Trigger-to-post latency" style="color:var(--text-3); font-weight:600;">Trig→Post: --</span>
+          </div>
+        </div>
+      `;
+
+      grid.appendChild(card);
+    }
+
+    // ── Targeted DOM Updates (Never destroy img elements or streaming sockets) ──
+    card.classList.remove('fault-danger', 'fault-drift', 'fault-offline');
+    if (!isEnabled) {
+      card.classList.add('fault-offline');
+    } else if (sev === 'HIGH' || saf === 'DANGER') {
+      card.classList.add('fault-danger');
+    } else if (cam.is_incident || (cam.drift !== undefined && cam.drift >= thresh)) {
+      card.classList.add('fault-drift');
+    }
+
+    card.style.display = isVisible ? 'flex' : 'none';
+
+    const dotEl = document.getElementById(`cam-dot-${eid}`);
+    if (dotEl) dotEl.style.background = !isEnabled ? 'var(--text-3)' : '';
+
+    const customEl = document.getElementById(`cam-custom-badge-${eid}`);
+    if (customEl) customEl.style.display = hasOverride ? 'inline-block' : 'none';
+
+    const driftEl = document.getElementById(`cam-drift-${eid}`);
+    if (driftEl) driftEl.textContent = `⚡ ${driftVal}`;
+
+    const statusEl = document.getElementById(`cam-status-${eid}`);
+    if (statusEl) {
+      statusEl.className = `badge ${statusBadgeClass} badge-sm`;
+      statusEl.textContent = statusText;
+    }
+
+    const liveDot = document.getElementById(`cam-live-indicator-dot-${eid}`);
+    if (liveDot) liveDot.className = `cam-live-dot ${isEnabled ? 'pulsing' : 'offline'}`;
+
+    const liveText = document.getElementById(`cam-live-text-${eid}`);
+    if (liveText) liveText.textContent = isEnabled ? 'LIVE RTSP' : 'OFFLINE';
+
+    // Event Photos Strip
+    const eventContainer = document.getElementById(`cam-event-strip-container-${eid}`);
+    if (eventContainer) {
+      const hasEvents = cam.eventPhotos && cam.eventPhotos.length > 0;
+      if (hasEvents) {
+        const count = cam.eventPhotos.length;
+        const isInc = (sev === 'HIGH' || saf === 'DANGER' || cam.is_incident);
+        const isDrift = (cam.drift !== undefined && cam.drift >= thresh);
+        const tagLabel = isInc ? '🚨 INCIDENT' : (isDrift ? '⚡ SHIFT' : '📸 CAPTURE');
+        const tagCls = isInc ? 'tag-incident' : (isDrift ? 'tag-drift' : 'tag-periodic');
+
+        eventContainer.innerHTML = `
+          <div class="cam-event-strip">
+            <div class="cam-event-strip-header">
+              <div class="cam-event-title-wrap">
+                <span class="cam-event-icon">📸</span>
+                <span class="cam-event-title">Event Photos</span>
+                <span class="cam-event-count">(${count} captured)</span>
+              </div>
+              <span class="cam-event-tag ${tagCls}">${tagLabel}</span>
+            </div>
+            <div class="cam-event-thumbs-grid">
+              ${cam.eventPhotos.slice(0, 4).map((b64, idx) => `
+                <div class="cam-event-thumb-item" data-cam="${this._esc(name)}" data-idx="${idx}" title="Event Frame #${idx + 1} (t-${count - 1 - idx}) — Click to view in Theater">
+                  <img src="data:image/jpeg;base64,${b64}" alt="Event Frame ${idx + 1}" />
+                  <span class="cam-event-thumb-badge">t-${count - 1 - idx}</span>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        `;
+      } else {
+        eventContainer.innerHTML = `
+          <div class="cam-card-no-events">
+            <span>📸 Event Photos: No triggers recorded yet</span>
+            <span class="cam-monitoring-pill">● Monitoring</span>
+          </div>
+        `;
+      }
+    }
+
+    const safBadge = document.getElementById(`cam-badge-saf-${eid}`);
+    if (safBadge) {
+      safBadge.className = `badge badge-${safCls} badge-sm`;
+      safBadge.textContent = `🛡 ${saf}`;
+    }
+
+    const sevBadge = document.getElementById(`cam-badge-sev-${eid}`);
+    if (sevBadge) {
+      sevBadge.className = `badge badge-${sevCls} badge-sm`;
+      sevBadge.textContent = `⚠ ${sev}`;
+    }
+
+    const workersEl = document.getElementById(`cam-workers-${eid}`);
+    if (workersEl) workersEl.textContent = topResult?.workers ? `👷 ${topResult.workers}` : '';
+
+    const obsEl = document.getElementById(`cam-obs-${eid}`);
+    if (obsEl) {
+      obsEl.textContent = obsText;
+      obsEl.title = obsText;
+    }
+
+    const inferEl = document.getElementById(`cam-infer-${eid}`);
+    if (inferEl) inferEl.textContent = `Infer: ${latencyText}`;
+
+    const e2eEl = document.getElementById(`cam-e2e-${eid}`);
+    if (e2eEl) {
+      e2eEl.textContent = `Trig→Post: ${e2eText}`;
+      e2eEl.style.color = topResult?.e2e_latency != null ? 'var(--cyan)' : 'var(--text-3)';
+    }
+
+    // Stream lifecycle attachment / detachment
+    const cardImg = document.getElementById(`cam-card-img-${eid}`);
+    if (cardImg) {
+      const isVisible = this._isCamOnCurrentPage(name);
+      const isEnabled = this.cameras[name]?.config?.enabled !== false;
+      const shouldStream = isVisible && isEnabled && !this.activeCamModal;
+      const streamUrl = `/api/cameras/${encodeURIComponent(name)}/stream?width=640&quality=65`;
+
+      if (shouldStream) {
+        if (!cardImg.src || !cardImg.src.includes('/stream')) {
+          cardImg.src = streamUrl;
+        }
+        cardImg.style.opacity = '1';
+      } else {
+        if (cardImg.src && (cardImg.src.includes('/stream') || cardImg.src.startsWith('http'))) {
+          cardImg.src = '';
+          cardImg.removeAttribute('src');
+        }
+      }
+    }
 
     // If modal is open for this camera, refresh its live frame/stats
     if (this.activeCamModal === name) {
@@ -1938,6 +2034,15 @@ const App = {
     this.modalViewMode = (selectedEventIdx !== null) ? 'event' : 'live';
     this.selectedEventIdx = selectedEventIdx;
 
+    // Immediately detach all background grid streams so ONLY the modal stream runs
+    for (const camName of Object.keys(this.cameras || {})) {
+      const cardImg = document.getElementById(`cam-card-img-${this._eid(camName)}`);
+      if (cardImg && (cardImg.src.includes('/stream') || cardImg.src.startsWith('http'))) {
+        cardImg.src = '';
+        cardImg.removeAttribute('src');
+      }
+    }
+
     const modal = document.getElementById('cam-modal');
     const backdrop = document.getElementById('modal-backdrop');
     if (!modal || !backdrop) return;
@@ -2158,7 +2263,12 @@ const App = {
     }
     const img = document.getElementById('modal-frame');
     if (img && img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
-    if (img) img.src = '';
+    if (img) {
+      img.src = '';
+      img.removeAttribute('src');
+    }
+    // Reconnect ONLY active page cards cleanly
+    this._renderCameraGrid();
   },
 
   // ════════════════════════════════════════════════════════════
@@ -3136,10 +3246,7 @@ const App = {
       this._renderCamCard(name);
     });
 
-    // Modal Close handlers & View Switcher handlers
-    document.getElementById('btn-close-modal')?.addEventListener('click', () => this._closeModal());
-    document.getElementById('modal-backdrop')?.addEventListener('click', () => this._closeModal());
-
+    // Modal View Switcher handlers
     document.getElementById('modal-btn-live')?.addEventListener('click', () => {
       this.modalViewMode = 'live';
       this.selectedEventIdx = null;
@@ -3265,12 +3372,73 @@ const App = {
     document.getElementById('btn-close-alert-modal')?.addEventListener('click', () => this.closeAlertModal());
     document.getElementById('alert-modal-backdrop')?.addEventListener('click', () => this.closeAlertModal());
 
+    // Archive Explorer Modal handlers
+    document.getElementById('btn-open-archive')?.addEventListener('click', () => this._openArchiveModal());
+    document.getElementById('btn-close-archive')?.addEventListener('click', () => this._closeArchiveModal());
+    document.getElementById('archive-modal-backdrop')?.addEventListener('click', () => this._closeArchiveModal());
+    document.getElementById('btn-refresh-archive')?.addEventListener('click', () => {
+      this._fetchArchiveStats();
+      this._fetchArchiveRecords();
+    });
+    document.getElementById('btn-archive-apply-filter')?.addEventListener('click', () => this._fetchArchiveRecords());
+    document.getElementById('btn-archive-reset-filters')?.addEventListener('click', () => this._resetArchiveFilters());
+
+    // Keyword search bindings
+    const searchInput = document.getElementById('archive-filter-search');
+    const searchClear = document.getElementById('archive-search-clear');
+    let searchDebounce = null;
+
+    searchInput?.addEventListener('input', (e) => {
+      const val = e.target.value.trim();
+      if (searchClear) searchClear.style.display = val ? 'inline-block' : 'none';
+      clearTimeout(searchDebounce);
+      searchDebounce = setTimeout(() => this._fetchArchiveRecords(), 350);
+    });
+
+    searchInput?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        clearTimeout(searchDebounce);
+        this._fetchArchiveRecords();
+      }
+    });
+
+    searchClear?.addEventListener('click', () => {
+      if (searchInput) {
+        searchInput.value = '';
+        searchClear.style.display = 'none';
+        this._fetchArchiveRecords();
+      }
+    });
+
+    // Auto query on dropdown changes
+    document.getElementById('archive-filter-cam')?.addEventListener('change', () => this._fetchArchiveRecords());
+    document.getElementById('archive-filter-sev')?.addEventListener('change', () => this._fetchArchiveRecords());
+
+    document.getElementById('btn-archive-range-1h')?.addEventListener('click', () => {
+      this._setArchiveDatePreset('1h');
+      this._fetchArchiveRecords();
+    });
+    document.getElementById('btn-archive-range-today')?.addEventListener('click', () => {
+      this._setArchiveDatePreset('today');
+      this._fetchArchiveRecords();
+    });
+    document.getElementById('btn-archive-range-24h')?.addEventListener('click', () => {
+      this._setArchiveDatePreset('24h');
+      this._fetchArchiveRecords();
+    });
+    document.getElementById('btn-archive-range-all')?.addEventListener('click', () => {
+      this._setArchiveDatePreset('all');
+      this._fetchArchiveRecords();
+    });
+
     // Keyboard shortcuts
     document.addEventListener('keydown', e => {
       if (e.key === 'Escape') {
         this.closeAlertModal();
         this._closeModal();
         this._closeSettings();
+        this._closeArchiveModal();
         this._closeErrorsModal();
         this._closeVlmInspector();
         this._closeAuthModal();
@@ -3419,6 +3587,286 @@ const App = {
     } catch (e) {
       this._showToast(`Failed to clear errors: ${e.message}`, 'err');
     }
+  },
+
+  // ════════════════════════════════════════════════════════════
+  //  Incident Archive & Timeline Explorer (3,000 Alert Sets)
+  // ════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════════════════════════
+  //  Incident Archive & Timeline Explorer (3,000 Alert Sets)
+  // ════════════════════════════════════════════════════════════
+  async _openArchiveModal() {
+    const modal = document.getElementById('modal-archive');
+    const backdrop = document.getElementById('archive-modal-backdrop');
+    if (!modal) return;
+
+    if (backdrop) backdrop.removeAttribute('hidden');
+    modal.removeAttribute('hidden');
+
+    // Populate camera dropdown
+    const selCam = document.getElementById('archive-filter-cam');
+    if (selCam) {
+      const currentVal = selCam.value;
+      const camNames = Object.keys(this.cameras || {});
+      selCam.innerHTML = '<option value="">All Cameras</option>' + camNames.map(c => `<option value="${this._esc(c)}">${this._esc(c)}</option>`).join('');
+      selCam.value = currentVal;
+    }
+
+    // Default to last 24 hours if empty
+    const fromEl = document.getElementById('archive-filter-from');
+    const toEl = document.getElementById('archive-filter-to');
+    if (fromEl && !fromEl.value) {
+      this._setArchiveDatePreset('24h');
+    }
+
+    await this._fetchArchiveStats();
+    await this._fetchArchiveRecords();
+  },
+
+  _closeArchiveModal() {
+    const modal = document.getElementById('modal-archive');
+    const backdrop = document.getElementById('archive-modal-backdrop');
+    if (modal) modal.setAttribute('hidden', '');
+    if (backdrop) backdrop.setAttribute('hidden', '');
+  },
+
+  _resetArchiveFilters() {
+    const searchInput = document.getElementById('archive-filter-search');
+    const searchClear = document.getElementById('archive-search-clear');
+    const selCam = document.getElementById('archive-filter-cam');
+    const selSev = document.getElementById('archive-filter-sev');
+    
+    if (searchInput) searchInput.value = '';
+    if (searchClear) searchClear.style.display = 'none';
+    if (selCam) selCam.value = '';
+    if (selSev) selSev.value = '';
+
+    this._setArchiveDatePreset('24h');
+    this._fetchArchiveRecords();
+  },
+
+  async _fetchArchiveStats() {
+    const banner = document.getElementById('archive-stats-banner');
+    try {
+      const res = await fetch('/api/archive/stats');
+      if (res.ok) {
+        const stats = await res.json();
+        const earliest = stats.earliest_ts ? new Date(stats.earliest_ts * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'None';
+        const latest = stats.latest_ts ? new Date(stats.latest_ts * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'None';
+        if (banner) {
+          banner.textContent = `Rolling Buffer: ${stats.total_alert_sets || stats.total_analyses || 0} Alert Sets stored (${stats.total_frames || 0} frames) • Range: ${earliest} → ${latest}`;
+        }
+      }
+    } catch (e) {
+      if (banner) banner.textContent = 'Historical persistence active (analyses.db)';
+    }
+  },
+
+  _setArchiveDatePreset(preset) {
+    const now = new Date();
+    const toEl = document.getElementById('archive-filter-to');
+    const fromEl = document.getElementById('archive-filter-from');
+    if (!toEl || !fromEl) return;
+
+    // Highlight active preset pill
+    const pills = document.querySelectorAll('.archive-preset-pills .preset-pill');
+    pills.forEach(p => p.classList.remove('active'));
+    const activePill = document.getElementById(`btn-archive-range-${preset}`);
+    if (activePill) activePill.classList.add('active');
+
+    const toStr = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+    toEl.value = toStr;
+
+    let fromDate = new Date();
+    if (preset === '1h') {
+      fromDate = new Date(now.getTime() - 3600000);
+    } else if (preset === 'today') {
+      fromDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+    } else if (preset === '24h') {
+      fromDate = new Date(now.getTime() - 86400000);
+    } else if (preset === 'all') {
+      fromEl.value = '';
+      toEl.value = '';
+      return;
+    }
+    const fromStr = new Date(fromDate.getTime() - fromDate.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+    fromEl.value = fromStr;
+  },
+
+  async _fetchArchiveRecords() {
+    const searchVal = document.getElementById('archive-filter-search')?.value.trim() || '';
+    const cam = document.getElementById('archive-filter-cam')?.value || '';
+    const sev = document.getElementById('archive-filter-sev')?.value || '';
+    const fromVal = document.getElementById('archive-filter-from')?.value;
+    const toVal = document.getElementById('archive-filter-to')?.value;
+
+    let sinceTs = null;
+    let untilTs = null;
+    if (fromVal) sinceTs = new Date(fromVal).getTime() / 1000;
+    if (toVal) untilTs = new Date(toVal).getTime() / 1000;
+
+    const params = new URLSearchParams({ limit: '150', offset: '0' });
+    if (searchVal) params.set('search', searchVal);
+    if (cam) params.set('cam', cam);
+    if (sev) {
+      if (sev === 'TRIGGER' || sev === 'FOLLOWUP') {
+        params.set('trigger_mode', sev);
+      } else {
+        params.set('severity', sev);
+      }
+    }
+    if (sinceTs) params.set('since', sinceTs.toString());
+    if (untilTs) params.set('until', untilTs.toString());
+
+    try {
+      const res = await fetch(`/api/history?${params.toString()}`);
+      if (res.ok) {
+        const records = await res.json();
+        this._renderArchiveRecords(records);
+      }
+    } catch (e) {
+      console.warn('Failed to query archive records:', e);
+    }
+  },
+
+  _renderArchiveRecords(records = []) {
+    const tbody = document.getElementById('archive-records-body');
+    const countEl = document.getElementById('archive-matched-count');
+    const emptyEl = document.getElementById('archive-empty');
+    if (!tbody) return;
+
+    if (countEl) countEl.textContent = records.length;
+    tbody.innerHTML = '';
+
+    if (!records || records.length === 0) {
+      if (emptyEl) emptyEl.style.display = 'flex';
+      return;
+    }
+    if (emptyEl) emptyEl.style.display = 'none';
+
+    records.forEach((rec, idx) => {
+      const tr = document.createElement('tr');
+      tr.className = 'archive-record-row';
+      const timeStr = rec.ts ? new Date(rec.ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—';
+      const sev = (rec.severity || 'LOW').toUpperCase();
+      const sevColor = sev === 'HIGH' ? '#ef4444' : (sev === 'MEDIUM' ? '#f59e0b' : '#10b981');
+      const obs = (rec.observation || 'Analysis recorded');
+
+      tr.innerHTML = `
+        <td style="white-space: nowrap; font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-tertiary);">${this._esc(timeStr)}</td>
+        <td style="font-weight: 600; color: var(--text-primary);">${this._esc(rec.cam || '')}</td>
+        <td><span class="badge" style="background: ${sevColor}20; color: ${sevColor}; font-size: 0.65rem; font-weight: 700;">${sev}</span></td>
+        <td style="color: var(--text-secondary); max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${this._esc(obs)}">${this._esc(obs)}</td>
+      `;
+
+      tr.addEventListener('click', () => {
+        tbody.querySelectorAll('.archive-record-row').forEach(r => r.classList.remove('selected'));
+        tr.classList.add('selected');
+        this._selectArchiveRecord(rec);
+      });
+
+      tbody.appendChild(tr);
+
+      // Auto-select first item
+      if (idx === 0) {
+        tr.classList.add('selected');
+        this._selectArchiveRecord(rec);
+      }
+    });
+  },
+
+  async _selectArchiveRecord(rec) {
+    const titleEl = document.getElementById('archive-ins-title');
+    const idEl = document.getElementById('archive-ins-id');
+    const obsEl = document.getElementById('archive-ins-obs');
+    const badgeEl = document.getElementById('archive-ins-badge');
+    const stripEl = document.getElementById('archive-frames-strip');
+    const mainImg = document.getElementById('archive-main-preview');
+    const phEl = document.getElementById('archive-preview-placeholder');
+    const tagEl = document.getElementById('archive-frame-tag');
+
+    const incId = rec.incident_id || rec.id || `INC-${rec.cam}-${rec.id}`;
+    if (titleEl) titleEl.textContent = `${rec.cam} Alert Set Sequence`;
+    if (idEl) idEl.textContent = `${incId} • ${rec.ts ? new Date(rec.ts * 1000).toLocaleString() : ''}`;
+    if (obsEl) obsEl.textContent = rec.observation || 'No visual anomalies reported.';
+
+    const sev = (rec.severity || 'LOW').toUpperCase();
+    if (badgeEl) {
+      badgeEl.textContent = `${sev} SEVERITY`;
+      badgeEl.className = `badge ${sev === 'HIGH' ? 'badge-red' : (sev === 'MEDIUM' ? 'badge-amber' : 'badge-green')}`;
+      badgeEl.style.display = 'inline-block';
+    }
+
+    if (!stripEl) return;
+    stripEl.innerHTML = `
+      <div class="archive-frame-thumb-box"><div class="archive-frame-ph">Loading...</div></div>
+      <div class="archive-frame-thumb-box"><div class="archive-frame-ph">Loading...</div></div>
+      <div class="archive-frame-thumb-box"><div class="archive-frame-ph">Loading...</div></div>
+      <div class="archive-frame-thumb-box"><div class="archive-frame-ph">Loading...</div></div>
+    `;
+
+    try {
+      const res = await fetch(`/api/incidents/${encodeURIComponent(incId)}/frames`);
+      if (res.ok) {
+        const data = await res.json();
+        const frames = data.frames || [];
+        if (frames.length > 0) {
+          stripEl.innerHTML = frames.map((f, idx) => `
+            <div class="archive-frame-thumb-box ${idx === frames.length - 1 ? 'active' : ''}" data-idx="${idx}" title="Frame #${idx + 1} (t-${frames.length - 1 - idx})">
+              <img src="data:image/jpeg;base64,${f.b64}" alt="Frame ${idx + 1}" />
+              <span class="cam-event-thumb-badge" style="position: absolute; bottom: 3px; right: 3px; background: rgba(0,0,0,0.7); font-size: 0.65rem; padding: 1px 4px; border-radius: 3px; font-family: var(--font-mono); color: #fff;">t-${frames.length - 1 - idx}</span>
+            </div>
+          `).join('');
+
+          // Bind clicks on frame thumbnails
+          const boxes = stripEl.querySelectorAll('.archive-frame-thumb-box');
+          boxes.forEach((box, idx) => {
+            box.addEventListener('click', () => {
+              boxes.forEach(b => b.classList.remove('active'));
+              box.classList.add('active');
+              if (mainImg) {
+                mainImg.src = `data:image/jpeg;base64,${frames[idx].b64}`;
+                mainImg.style.display = 'block';
+              }
+              if (phEl) phEl.style.display = 'none';
+              if (tagEl) {
+                tagEl.textContent = `Frame #${idx + 1} (t-${frames.length - 1 - idx})`;
+                tagEl.style.display = 'inline-block';
+              }
+            });
+          });
+
+          // Show trigger frame (last frame) by default
+          const lastIdx = frames.length - 1;
+          if (mainImg) {
+            mainImg.src = `data:image/jpeg;base64,${frames[lastIdx].b64}`;
+            mainImg.style.display = 'block';
+          }
+          if (phEl) phEl.style.display = 'none';
+          if (tagEl) {
+            tagEl.textContent = `Trigger Frame #${lastIdx + 1} (t-0)`;
+            tagEl.style.display = 'inline-block';
+          }
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn('Could not load 4-frame set from DB:', e);
+    }
+
+    // Fallback if no frames were saved for this row
+    stripEl.innerHTML = `
+      <div class="archive-frame-thumb-box"><div class="archive-frame-ph">t-3</div></div>
+      <div class="archive-frame-thumb-box"><div class="archive-frame-ph">t-2</div></div>
+      <div class="archive-frame-thumb-box"><div class="archive-frame-ph">t-1</div></div>
+      <div class="archive-frame-thumb-box"><div class="archive-frame-ph">t-0</div></div>
+    `;
+    if (mainImg) mainImg.style.display = 'none';
+    if (phEl) {
+      phEl.textContent = '📸 No stored frame sequence for this earlier record.';
+      phEl.style.display = 'block';
+    }
+    if (tagEl) tagEl.style.display = 'none';
   },
 };
 

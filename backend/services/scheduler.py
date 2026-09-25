@@ -363,16 +363,30 @@ class DeadlineScheduler:
         # Persist to SQLite
         if self.storage:
             try:
+                rec_ts = res.get("ts") or time.time()
+                inc_target_id = (
+                    (alert.get("incident_id") if alert else incident_id)
+                    or (alert.get("id") if alert else f"INC-{cam_name}-{int(rec_ts)}")
+                )
+
                 self.storage.save(
                     dict(res, cam=cam_name),
                     latency=latency,
                     e2e_latency=e2e_latency,
-                    incident_id=alert.get("incident_id") if alert else incident_id,
+                    incident_id=inc_target_id,
                     parent_id=alert.get("parent_id") if alert else parent_id,
                     trigger_mode=alert.get("trigger_mode") if alert else ("TRIGGER" if is_incident else ("FOLLOWUP" if is_followup else "PERIODIC")),
                     clip_path=alert.get("clip_path") if alert else None,
                     labels=job_labels,
                 )
+                if thumbs_b64 and len(thumbs_b64) > 0:
+                    self.storage.save_incident_frames(
+                        incident_id=inc_target_id,
+                        event_id=alert.get("id") if alert else None,
+                        cam=cam_name,
+                        frames=thumbs_b64,
+                        ts=rec_ts,
+                    )
             except Exception as exc:
                 error_tracker.capture_exception(
                     exc,
