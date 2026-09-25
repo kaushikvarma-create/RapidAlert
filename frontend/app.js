@@ -365,6 +365,13 @@ const App = {
     if (!this.cameras[cam]) return;
     this.cameras[cam].thumbB64 = thumbnail_b64;
 
+    // Performance optimization: only schedule DOM painting if camera is on the active page or modal is open
+    const isOnPage = this._isCamOnCurrentPage(cam);
+    const isModalOpen = (this.activeCamModal === cam);
+    if (!isOnPage && !isModalOpen) {
+      return;
+    }
+
     if (!this._frameRafPending) {
       this._frameRafPending = {};
     }
