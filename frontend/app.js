@@ -366,7 +366,12 @@ const App = {
     if (!this.cameras[cam]) return;
     this.cameras[cam].thumbB64 = thumbnail_b64;
 
-    // Performance optimization: only schedule DOM painting if camera is on the active page or modal is open
+    // If card is already connected to real-time native /stream, native C++ stream handles 25+ FPS without JS intervention
+    const cardImg = document.getElementById(`cam-card-img-${this._eid(cam)}`);
+    if (cardImg && cardImg.src && cardImg.src.includes('/stream')) {
+      return;
+    }
+
     const isOnPage = this._isCamOnCurrentPage(cam);
     const isModalOpen = (this.activeCamModal === cam);
     if (!isOnPage && !isModalOpen) {
@@ -381,19 +386,16 @@ const App = {
 
     requestAnimationFrame(() => {
       this._frameRafPending[cam] = false;
-      const cardImg = document.getElementById(`cam-card-img-${this._eid(cam)}`);
-      if (cardImg) {
+      if (cardImg && (!cardImg.src || !cardImg.src.includes('/stream'))) {
         cardImg.src = `data:image/jpeg;base64,${thumbnail_b64}`;
         cardImg.style.opacity = '1';
       }
       if (this.activeCamModal === cam && this.modalViewMode === 'live') {
         const modalImg = document.getElementById('modal-frame');
         const loading = document.getElementById('modal-frame-loading');
-        if (modalImg) {
-          if (!modalImg.src || modalImg.src === '' || modalImg.src.includes('data:image')) {
-            modalImg.src = `data:image/jpeg;base64,${thumbnail_b64}`;
-            modalImg.style.opacity = '1';
-          }
+        if (modalImg && (!modalImg.src || !modalImg.src.includes('/stream'))) {
+          modalImg.src = `data:image/jpeg;base64,${thumbnail_b64}`;
+          modalImg.style.opacity = '1';
           if (loading) loading.style.display = 'none';
         }
       }
@@ -612,12 +614,30 @@ const App = {
     const endIndex = Math.min(startIndex + this.camsPerPage, totalCams);
     const visibleOnPage = new Set(eligibleCams.slice(startIndex, endIndex));
 
-    // 3. Render cards and toggle visibility
+    // 3. Render cards, toggle visibility, and attach real-time live MJPEG stream
     for (const name of camNames) {
       this._renderCamCard(name);
       const card = document.getElementById(`cam-card-${this._eid(name)}`);
+      const cardImg = document.getElementById(`cam-card-img-${this._eid(name)}`);
+      const isVisible = visibleOnPage.has(name);
+      const isEnabled = this.cameras[name]?.config?.enabled !== false;
+
       if (card) {
-        card.style.display = visibleOnPage.has(name) ? 'flex' : 'none';
+        card.style.display = isVisible ? 'flex' : 'none';
+      }
+
+      if (cardImg) {
+        const streamUrl = `/api/cameras/${encodeURIComponent(name)}/stream?width=640&quality=65`;
+        if (isVisible && isEnabled) {
+          if (!cardImg.src || !cardImg.src.includes(`/api/cameras/${encodeURIComponent(name)}/stream`)) {
+            cardImg.src = streamUrl;
+          }
+          cardImg.style.opacity = '1';
+        } else {
+          if (cardImg.src && cardImg.src.includes('/stream')) {
+            cardImg.src = this.cameras[name]?.thumbB64 ? `data:image/jpeg;base64,${this.cameras[name].thumbB64}` : '';
+          }
+        }
       }
     }
 
