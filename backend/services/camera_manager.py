@@ -50,11 +50,17 @@ class CameraThread(threading.Thread):
 
     def run(self) -> None:
         nvdec_consecutive_failures = 0
-        MAX_NVDEC_RETRIES = 3
+        MAX_NVDEC_RETRIES = 5
+        last_nvdec_upgrade_attempt = time.monotonic()
 
         while not self.stop_event.is_set():
             cap = None
             is_hw = False
+
+            # Periodic reset of NVDEC retry counter so CPU streams always attempt upgrade back to hardware
+            if not is_hw and time.monotonic() - last_nvdec_upgrade_attempt > 60:
+                nvdec_consecutive_failures = 0
+                last_nvdec_upgrade_attempt = time.monotonic()
 
             # Prefer Hardware NVDEC if available
             if self.use_nvidia and nvdec_consecutive_failures < MAX_NVDEC_RETRIES:
@@ -87,6 +93,7 @@ class CameraThread(threading.Thread):
 
             if cap is None:
                 is_hw = False
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
                 cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, CAMERA_BUFFER_SIZE)
 

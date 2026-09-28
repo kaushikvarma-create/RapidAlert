@@ -718,7 +718,7 @@ def api_get_active_streams():
 
 
 @app.get("/api/cameras/{name}/stream")
-async def api_camera_stream(name: str, width: int = 640, quality: int = 70):
+async def api_camera_stream(name: str, width: int = 1280, quality: int = 85):
     """Continuous real-time MJPEG live video stream (25+ FPS, multipart/x-mixed-replace)."""
     async def frame_generator():
         last_ts = 0.0

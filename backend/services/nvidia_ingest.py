@@ -101,7 +101,7 @@ class NvidiaStreamCapture:
         from gi.repository import Gst
 
         pipeline_str = (
-            f'nvurisrcbin uri="{self.uri}" rtsp-reconnect-interval=5 latency=200 drop-frame-interval=0 ! '
+            f'nvurisrcbin uri="{self.uri}" select-rtp-protocol=4 rtsp-reconnect-interval=5 latency=200 drop-frame-interval=0 ! '
             f'nvvideoconvert ! '
             f'video/x-raw, width={self.width}, height={self.height}, format=RGBA ! '
             f'appsink name=sink emit-signals=true max-buffers=2 drop=true sync=false'

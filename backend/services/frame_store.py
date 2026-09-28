@@ -87,8 +87,8 @@ class FrameStore:
         quality: Optional[int] = None,
     ) -> Optional[Tuple[float, bytes]]:
         """Returns (timestamp, jpeg_bytes) of the latest frame, with memoized cache."""
-        mw = max_w if max_w is not None else 640
-        q = quality if quality is not None else 65
+        mw = max_w if max_w is not None else 1280
+        q = quality if quality is not None else 85
 
         with self._lock:
             q_store = self._store.get(cam_name)

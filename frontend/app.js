@@ -749,10 +749,17 @@ const App = {
       if (shouldStream) {
         const cardImg = document.getElementById(`cam-card-img-${this._eid(name)}`);
         if (cardImg) {
-          const streamUrl = `/api/cameras/${encodeURIComponent(name)}/stream?width=640&quality=65`;
+          const streamUrl = `/api/cameras/${encodeURIComponent(name)}/stream?width=1280&quality=85`;
           if (!cardImg.src || !cardImg.src.includes(`/api/cameras/${encodeURIComponent(name)}/stream`)) {
             cardImg.src = streamUrl;
           }
+          cardImg.onerror = () => {
+            setTimeout(() => {
+              if (cardImg.isConnected && visibleOnPage.has(name) && !this.activeCamModal) {
+                cardImg.src = streamUrl + '&retry=' + Date.now();
+              }
+            }, 1500);
+          };
           cardImg.style.opacity = '1';
         }
       }
@@ -760,7 +767,7 @@ const App = {
 
     // 5. Update Header Badges & Empty State
     if (badge) {
-      badge.textContent = `${activeCount} / ${camNames.length} Configured`;
+      badge.textContent = `${activeCount} / ${camNames.length} Active`;
     }
 
     if (empty) {

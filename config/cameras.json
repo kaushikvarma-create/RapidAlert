@@ -51,7 +51,7 @@
     "name": "ADMIN_CABIN",
     "url": "rtsp://malliswar:Cl0ve%40123@10.91.87.35:554/cam/realmonitor?channel=5&subtype=0",
     "enabled": true,
-    "normal_context_day": "Executive admin office. 3-4 employees seated at desks, using laptops/monitors, reading documents, and talking are normal.",
+    "normal_context_day": "Executive admin office. Employees seated at desks, using laptops/monitors, walking through the office, talking, and carrying items are normal.",
     "normal_context_night": "Admin office unoccupied, computers in sleep mode, lights dimmed. Flag unauthorized intrusion or physical theft.",
     "priority": "normal",
     "threshold": 0.033,

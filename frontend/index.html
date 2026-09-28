@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/style.css?v=63" />
+  <link rel="stylesheet" href="/style.css?v=67" />
   <script>
     (function() {
       var saved = localStorage.getItem('rapidalert_theme') || localStorage.getItem('theme');
@@ -84,14 +84,11 @@
   <main class="dashboard-layout">
     <!-- Camera Matrix (Left ~75%) -->
     <section class="camera-matrix-section">
+      <div class="matrix-toolbar">
         <div class="matrix-toolbar-left">
           <div class="section-heading">
-            <span class="matrix-title">Live Camera Matrix</span>
-            <span class="active-count-badge" id="cams-active-badge">0 / 0 Configured</span>
-            <span class="active-streams-badge" id="live-streams-pull-badge" title="Live video streams currently being decoded and streamed across the network to clients">
-              <span class="live-pulse-dot"></span>
-              <span id="live-streams-pull-text">0 Streams Pulled</span>
-            </span>
+            <span class="matrix-title">Live Camera Streams</span>
+            <span class="active-count-badge" id="cams-active-badge">0 / 0 Active</span>
           </div>
           <div class="matrix-filters">
             <button class="filter-chip active" data-filter="all">All Feeds</button>
@@ -1280,6 +1277,6 @@
   <!-- ═══════════════════════════════════════════════════════════ TOAST -->
   <div class="toast-container" id="toast-container"></div>
 
-  <script src="/app.js?v=63"></script>
+  <script src="/app.js?v=67"></script>
 </body>
 </html>
