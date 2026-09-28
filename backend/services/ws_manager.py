@@ -51,7 +51,7 @@ class WSManager:
 
         async def _send(ws: WebSocket):
             try:
-                await ws.send_json(data)
+                await asyncio.wait_for(ws.send_json(data), timeout=1.5)
                 return None
             except Exception:
                 return ws

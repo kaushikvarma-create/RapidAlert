@@ -33,11 +33,14 @@ const App = {
     this._updateLayoutUi();
     this._initAudio();
     this.bindUIEvents();
+    this._bindWakeListeners();
     this._fetchVLMEndpoints();
     this._fetchInitialAlerts();
     this._fetchReportingStats();
     this._fetchReports();
+    this._fetchActiveStreams();
     this.connectWS();
+    this.startLivenessWatchdog();
     this.startTimestampTicker();
   },
 
@@ -125,21 +128,33 @@ const App = {
   },
 
   // ════════════════════════════════════════════════════════════
-  //  WebSocket
+  //  WebSocket & Autonomous Self-Healing
   // ════════════════════════════════════════════════════════════
   connectWS() {
+    if (this.ws && (this.ws.readyState === WebSocket.CONNECTING || this.ws.readyState === WebSocket.OPEN)) {
+      return;
+    }
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    this.ws = new WebSocket(`${proto}//${location.host}/ws`);
+    try {
+      this.ws = new WebSocket(`${proto}//${location.host}/ws`);
+    } catch (e) {
+      console.warn('WS construct error:', e);
+      return;
+    }
 
     this.ws.onopen = () => {
       this.wsReady = true;
+      this._lastWsMsgTime = Date.now();
       this._wsStatus(true);
+      this._frameRafPending = {};
     };
 
     this.ws.onclose = () => {
       this.wsReady = false;
       this._wsStatus(false);
-      setTimeout(() => this.connectWS(), 3000);
+      this._frameRafPending = {};
+      if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = setTimeout(() => this.connectWS(), 2000);
     };
 
     this.ws.onerror = () => {
@@ -148,9 +163,70 @@ const App = {
     };
 
     this.ws.onmessage = ({ data }) => {
+      this._lastWsMsgTime = Date.now();
       try { this.handleMessage(JSON.parse(data)); }
       catch (e) { console.warn('WS parse error:', e); }
     };
+  },
+
+  startLivenessWatchdog() {
+    this._lastWsMsgTime = Date.now();
+    setInterval(() => {
+      const now = Date.now();
+      const silenceMs = now - (this._lastWsMsgTime || now);
+      // If socket is disconnected, or if no messages arrived for > 6s (e.g. after computer sleep / half-open socket)
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN || silenceMs > 6000) {
+        this._wsStatus(false);
+        this._frameRafPending = {};
+        if (this.ws) {
+          try { this.ws.close(); } catch (_) {}
+        }
+        this.connectWS();
+        this._fetchStatusSnapshot();
+      }
+    }, 3000);
+  },
+
+  _bindWakeListeners() {
+    // When user unlocks OS / returns to tab after screen sleep
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        this.onTabWake();
+      }
+    });
+    window.addEventListener('focus', () => this.onTabWake());
+  },
+
+  onTabWake() {
+    this._frameRafPending = {};
+    const now = Date.now();
+    const silenceMs = now - (this._lastWsMsgTime || 0);
+    if (!this.wsReady || silenceMs > 3500) {
+      if (this.ws) {
+        try { this.ws.close(); } catch (_) {}
+      }
+      this.connectWS();
+    }
+    this._fetchStatusSnapshot();
+    this._fetchInitialAlerts();
+  },
+
+  async _fetchStatusSnapshot() {
+    try {
+      const res = await fetch('/api/status');
+      if (res.ok) {
+        const data = await res.json();
+        for (const [cam, item] of Object.entries(data)) {
+          if (!this.cameras[cam]) {
+            this.cameras[cam] = { config: { name: cam }, results: [], lastTs: 0, lastFrameTs: 0, thumbB64: null, eventPhotos: [] };
+          }
+          if (item && item.ts) {
+            this.cameras[cam].lastAnalysisTs = item.ts;
+          }
+        }
+        this._updateAllResults();
+      }
+    } catch (_) {}
   },
 
   handleMessage(msg) {
@@ -168,8 +244,35 @@ const App = {
       case 'config_updated': return this.onConfigUpdated(msg);
       case 'system_error': return this.onSystemError(msg);
       case 'followup_status': return this.onFollowupStatus(msg);
+      case 'active_streams_count': return this.onActiveStreamsCount(msg);
       case 'ping':    break; // keep-alive, no-op
     }
+  },
+
+  onActiveStreamsCount(msg) {
+    const total = msg.active_streams || 0;
+    const cams = msg.active_cams || [];
+    const badge = document.getElementById('live-streams-pull-badge');
+    const textEl = document.getElementById('live-streams-pull-text');
+    if (textEl) {
+      textEl.textContent = `${total} Stream${total === 1 ? '' : 's'} Pulled`;
+    }
+    if (badge) {
+      badge.classList.toggle('empty', total === 0);
+      badge.title = total > 0
+        ? `Live Streams Pulled (${total}): ${cams.join(', ')}`
+        : 'Zero active video display streams currently pulled.';
+    }
+  },
+
+  async _fetchActiveStreams() {
+    try {
+      const res = await fetch('/api/cameras/active-streams');
+      if (res.ok) {
+        const data = await res.json();
+        this.onActiveStreamsCount(data);
+      }
+    } catch (_) {}
   },
 
   _sortAlerts() {
@@ -367,12 +470,7 @@ const App = {
     const { cam, thumbnail_b64 } = msg;
     if (!this.cameras[cam]) return;
     this.cameras[cam].thumbB64 = thumbnail_b64;
-
-    // If card is already connected to real-time native /stream, native C++ stream handles 25+ FPS without JS intervention
-    const cardImg = document.getElementById(`cam-card-img-${this._eid(cam)}`);
-    if (cardImg && cardImg.src && cardImg.src.includes('/stream')) {
-      return;
-    }
+    this.cameras[cam].lastFrameTs = Date.now() / 1000;
 
     const isOnPage = this._isCamOnCurrentPage(cam);
     const isModalOpen = (this.activeCamModal === cam);
@@ -383,11 +481,16 @@ const App = {
     if (!this._frameRafPending) {
       this._frameRafPending = {};
     }
-    if (this._frameRafPending[cam]) return;
-    this._frameRafPending[cam] = true;
+    const lastPending = this._frameRafPending[cam] || 0;
+    const now = Date.now();
+    if (lastPending && (now - lastPending < 50)) {
+      return;
+    }
+    this._frameRafPending[cam] = now;
 
     requestAnimationFrame(() => {
-      this._frameRafPending[cam] = false;
+      this._frameRafPending[cam] = 0;
+      const cardImg = document.getElementById(`cam-card-img-${this._eid(cam)}`);
       if (cardImg && (!cardImg.src || !cardImg.src.includes('/stream'))) {
         cardImg.src = `data:image/jpeg;base64,${thumbnail_b64}`;
         cardImg.style.opacity = '1';
@@ -636,7 +739,7 @@ const App = {
       }
     }
 
-    // 3. Phase 2: Attach real-time live MJPEG streams ONLY for visible cameras on active page
+    // 4. Phase 2: Attach real-time live MJPEG streams ONLY for visible cameras on active page
     for (const name of camNames) {
       this._renderCamCard(name);
       const isVisible = visibleOnPage.has(name);
@@ -655,19 +758,19 @@ const App = {
       }
     }
 
-    // 4. Update Header Badges & Empty State
+    // 5. Update Header Badges & Empty State
     if (badge) {
-      badge.textContent = `${activeCount} / ${camNames.length} Active`;
+      badge.textContent = `${activeCount} / ${camNames.length} Configured`;
     }
 
     if (empty) {
       empty.style.display = totalCams === 0 ? 'flex' : 'none';
     }
 
-    // 5. Update Pagination Bar
+    // 6. Update Pagination Bar
     this._renderPagination(totalCams, totalPages, startIndex, endIndex);
 
-    // 6. Refresh Active Follow-Up Observation Banner
+    // 7. Refresh Active Follow-Up Observation Banner
     this._renderFollowupObservationBanner();
   },
 
@@ -1061,25 +1164,11 @@ const App = {
       e2eEl.style.color = topResult?.e2e_latency != null ? 'var(--cyan)' : 'var(--text-3)';
     }
 
-    // Stream lifecycle attachment / detachment
+    // Frame thumbnail rendering
     const cardImg = document.getElementById(`cam-card-img-${eid}`);
-    if (cardImg) {
-      const isVisible = this._isCamOnCurrentPage(name);
-      const isEnabled = this.cameras[name]?.config?.enabled !== false;
-      const shouldStream = isVisible && isEnabled && !this.activeCamModal;
-      const streamUrl = `/api/cameras/${encodeURIComponent(name)}/stream?width=640&quality=65`;
-
-      if (shouldStream) {
-        if (!cardImg.src || !cardImg.src.includes('/stream')) {
-          cardImg.src = streamUrl;
-        }
-        cardImg.style.opacity = '1';
-      } else {
-        if (cardImg.src && (cardImg.src.includes('/stream') || cardImg.src.startsWith('http'))) {
-          cardImg.src = '';
-          cardImg.removeAttribute('src');
-        }
-      }
+    if (cardImg && this.cameras[name]?.thumbB64 && (!cardImg.src || !cardImg.src.startsWith('data:'))) {
+      cardImg.src = `data:image/jpeg;base64,${this.cameras[name].thumbB64}`;
+      cardImg.style.opacity = '1';
     }
 
     // If modal is open for this camera, refresh its live frame/stats
@@ -2019,8 +2108,10 @@ const App = {
   // ════════════════════════════════════════════════════════════
   _applyPrompts(p) {
     this.prompts = p;
+    const masterSceneTA = document.getElementById('master-scene-context-ta');
     const masterTA = document.getElementById('master-prompt-ta');
     const followupTA = document.getElementById('followup-prompt-ta');
+    if (masterSceneTA && masterSceneTA !== document.activeElement) masterSceneTA.value = p.master_scene_context || '';
     if (masterTA && masterTA !== document.activeElement) masterTA.value = p.master || '';
     if (followupTA && followupTA !== document.activeElement) followupTA.value = p.followup || '';
   },
@@ -2338,6 +2429,9 @@ const App = {
     }
     // Sync cam table
     this._syncCamTable(Object.values(this.cameras).map(c => c.config));
+    // Sync master scene context
+    const masterSceneTA = document.getElementById('master-scene-context-ta');
+    if (masterSceneTA) masterSceneTA.value = this.prompts.master_scene_context || '';
     // Sync master prompt
     const masterTA = document.getElementById('master-prompt-ta');
     if (masterTA) masterTA.value = this.prompts.master || '';
@@ -2410,6 +2504,7 @@ const App = {
     this._authSuccessCallback = null;
     const modal = document.getElementById('modal-admin-auth');
     if (modal) modal.style.display = 'none';
+    this._renderCameraGrid();
   },
 
   async _submitAuth() {
@@ -2429,15 +2524,22 @@ const App = {
     }
 
     const endpoint = this.isAuthConfigured ? '/api/auth/login' : '/api/auth/setup';
+    const submitBtn = document.getElementById('btn-submit-auth');
     const originalText = btnLabel ? btnLabel.textContent : 'Unlock';
     if (btnLabel) btnLabel.textContent = 'Verifying...';
+    if (submitBtn) submitBtn.disabled = true;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 6000);
 
     try {
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password })
+        body: JSON.stringify({ username, password }),
+        signal: controller.signal,
       });
+      clearTimeout(timeoutId);
       const data = await res.json();
       if (res.ok && data.token) {
         this.adminToken = data.token;
@@ -2469,10 +2571,12 @@ const App = {
         }
       }
     } catch (e) {
-      if (errMsgEl) errMsgEl.textContent = 'Network or server error during authentication.';
+      clearTimeout(timeoutId);
+      if (errMsgEl) errMsgEl.textContent = e.name === 'AbortError' ? 'Authentication timed out. Please try again.' : 'Network or server error during authentication.';
       if (errBanner) errBanner.style.display = 'flex';
     } finally {
       if (btnLabel) btnLabel.textContent = originalText;
+      if (submitBtn) submitBtn.disabled = false;
     }
   },
 
@@ -2557,6 +2661,7 @@ const App = {
     sessionStorage.removeItem('rapidalert_admin_token');
     sessionStorage.removeItem('rapidalert_admin_user');
     this._updateAuthBadge(false);
+    this._renderCameraGrid();
   },
 
   // ════════════════════════════════════════════════════════════
@@ -2687,6 +2792,17 @@ const App = {
     await this._authFetch(`/api/cameras/${encodeURIComponent(name)}`, { method: 'DELETE' });
   },
 
+  async _saveMasterSceneContext() {
+    const text = document.getElementById('master-scene-context-ta')?.value;
+    if (text == null) return;
+    await this._authFetch('/api/prompts', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ master_scene_context: text }),
+    });
+    this._flashSaveFeedback('master-scene-save-fb', '✓ Saved');
+  },
+
   async _saveMasterPrompt() {
     const text = document.getElementById('master-prompt-ta')?.value;
     if (text == null) return;
@@ -2803,22 +2919,30 @@ const App = {
     setInterval(() => {
       const now = Date.now() / 1000;
       for (const [name, cam] of Object.entries(this.cameras)) {
-        if (!cam.lastTs) continue;
-        const el = document.getElementById(`ts-${this._eid(name)}`);
-        if (!el) continue;
-        const ago = now - cam.lastTs;
-        el.textContent = ago < 60
-          ? `${Math.round(ago)}s ago`
-          : ago < 3600
-            ? `${Math.round(ago / 60)}m ago`
-            : `${Math.round(ago / 3600)}h ago`;
+        const frameAgo = cam.lastFrameTs ? (now - cam.lastFrameTs) : (cam.lastTs ? (now - cam.lastTs) : 9999);
+        const analysisAgo = cam.lastAnalysisTs ? (now - cam.lastAnalysisTs) : (cam.lastTs ? (now - cam.lastTs) : null);
 
-        // Live dot colour
+        const el = document.getElementById(`ts-${this._eid(name)}`);
+        if (el) {
+          if (frameAgo < 10) {
+            el.textContent = 'Live';
+          } else if (analysisAgo !== null) {
+            el.textContent = analysisAgo < 60
+              ? `${Math.round(analysisAgo)}s ago`
+              : analysisAgo < 3600
+                ? `${Math.round(analysisAgo / 60)}m ago`
+                : `${Math.round(analysisAgo / 3600)}h ago`;
+          } else {
+            el.textContent = 'Connecting…';
+          }
+        }
+
+        // Live dot colour based on real-time frame arrival
         const dot = document.getElementById(`dot-${this._eid(name)}`);
         if (dot) {
-          if      (ago < 20)  dot.className = 'cam-live-dot live-ok';
-          else if (ago < 60)  dot.className = 'cam-live-dot live-warn';
-          else                dot.className = 'cam-live-dot';
+          if      (frameAgo < 15)  dot.className = 'cam-live-dot live-ok';
+          else if (frameAgo < 45)  dot.className = 'cam-live-dot live-warn';
+          else                     dot.className = 'cam-live-dot';
         }
       }
     }, 1000);
@@ -3586,6 +3710,7 @@ const App = {
     });
 
     // Prompt actions
+    document.getElementById('btn-save-master-scene-context')?.addEventListener('click', () => this._saveMasterSceneContext());
     document.getElementById('btn-save-master')?.addEventListener('click', () => this._saveMasterPrompt());
     document.getElementById('btn-save-followup')?.addEventListener('click', () => this._saveFollowupPrompt());
 

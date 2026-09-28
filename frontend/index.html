@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/style.css?v=56" />
+  <link rel="stylesheet" href="/style.css?v=63" />
   <script>
     (function() {
       var saved = localStorage.getItem('rapidalert_theme') || localStorage.getItem('theme');
@@ -84,11 +84,14 @@
   <main class="dashboard-layout">
     <!-- Camera Matrix (Left ~75%) -->
     <section class="camera-matrix-section">
-      <div class="matrix-toolbar">
         <div class="matrix-toolbar-left">
           <div class="section-heading">
-            <span class="matrix-title">Live Camera Streams</span>
-            <span class="active-count-badge" id="cams-active-badge">0 / 0 Active</span>
+            <span class="matrix-title">Live Camera Matrix</span>
+            <span class="active-count-badge" id="cams-active-badge">0 / 0 Configured</span>
+            <span class="active-streams-badge" id="live-streams-pull-badge" title="Live video streams currently being decoded and streamed across the network to clients">
+              <span class="live-pulse-dot"></span>
+              <span id="live-streams-pull-text">0 Streams Pulled</span>
+            </span>
           </div>
           <div class="matrix-filters">
             <button class="filter-chip active" data-filter="all">All Feeds</button>
@@ -268,11 +271,24 @@
 
     <!-- ── Prompts Tab ─────────────────────────────────────────── -->
     <div class="stab-content" id="stab-prompts">
+      <!-- Master Scene Context -->
+      <div class="prompt-section">
+        <div class="prompt-section-header">
+          <h3>Master Scene Context (Global Baseline)</h3>
+          <span class="prompt-hint">Global facility context injected via <code>{master_scene_context}</code> across all camera feeds</span>
+        </div>
+        <textarea id="master-scene-context-ta" class="prompt-ta" spellcheck="false" rows="4" placeholder="Describe the overall facility environment, expected operational routines, and what constitutes abnormal/malicious activity..."></textarea>
+        <div class="prompt-actions">
+          <button class="btn-primary" id="btn-save-master-scene-context">💾 Save Master Scene Context</button>
+          <span class="save-feedback" id="master-scene-save-fb"></span>
+        </div>
+      </div>
+
       <!-- Master Prompt -->
       <div class="prompt-section">
         <div class="prompt-section-header">
-          <h3>Master Prompt</h3>
-          <span class="prompt-hint">Used for all initial trigger analyses &mdash; use <code>{normal_context}</code> to inject the camera&rsquo;s scene context</span>
+          <h3>Master Prompt (VLM Inference Template)</h3>
+          <span class="prompt-hint">Used for all initial trigger analyses &mdash; use <code>{master_scene_context}</code> and <code>{normal_context}</code></span>
         </div>
         <textarea id="master-prompt-ta" class="prompt-ta" spellcheck="false"></textarea>
         <div class="prompt-actions">
@@ -285,7 +301,7 @@
       <div class="prompt-section prompt-section-alt">
         <div class="prompt-section-header">
           <h3>Follow-Up Prompt</h3>
-          <span class="prompt-hint">Used for HIGH &amp; EXTREME alert re-check cycles &mdash; use <code>{normal_context}</code> and <code>{followup_context}</code></span>
+          <span class="prompt-hint">Used for HIGH &amp; EXTREME alert re-check cycles &mdash; use <code>{master_scene_context}</code>, <code>{normal_context}</code> and <code>{followup_context}</code></span>
         </div>
         <textarea id="followup-prompt-ta" class="prompt-ta" spellcheck="false"></textarea>
         <div class="prompt-actions">
@@ -296,7 +312,7 @@
 
       <!-- Context hint -->
       <div class="prompt-section-hint-block">
-        <span class="prompt-hint">💡 Per-camera normal context (day &amp; night) is set per camera via the <strong>camera card</strong> or the <strong>Cameras</strong> tab &mdash; not here.</span>
+        <span class="prompt-hint">💡 Per-camera normal context (day &amp; night) is set per camera via the <strong>camera card</strong> or the <strong>Cameras</strong> tab.</span>
       </div>
     </div>
 
@@ -1264,6 +1280,6 @@
   <!-- ═══════════════════════════════════════════════════════════ TOAST -->
   <div class="toast-container" id="toast-container"></div>
 
-  <script src="/app.js?v=56"></script>
+  <script src="/app.js?v=63"></script>
 </body>
 </html>

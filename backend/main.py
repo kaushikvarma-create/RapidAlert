@@ -9,6 +9,7 @@ import base64
 import json
 import os
 import sys
+import threading
 import time
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
@@ -215,7 +216,6 @@ async def lifespan(app: FastAPI):
     _bg_tasks.append(asyncio.create_task(prompt_manager.watch_loop()))
     _bg_tasks.append(asyncio.create_task(_config_sync_loop()))
     _bg_tasks.append(asyncio.create_task(metrics_loop(ws_manager.broadcast)))
-    _bg_tasks.append(asyncio.create_task(_snapshot_stream_loop()))
     
     port = config_manager.get().dashboard_port
     print(f"\n[RapidAlert] ✅ Dashboard → http://localhost:{port}\n")
@@ -311,39 +311,7 @@ async def _config_sync_loop() -> None:
             await asyncio.sleep(2.0)
 
 
-async def _snapshot_stream_loop() -> None:
-    """Broadcast live camera snapshots over WebSocket for fluid grid streaming."""
-    last_pushed_ts: dict[str, float] = {}
-    while True:
-        try:
-            if not ws_manager.has_clients:
-                await asyncio.sleep(0.5)
-                continue
 
-            await asyncio.sleep(0.083)  # 12 FPS fluid real-time streaming with zero UI lag
-            active = camera_manager.get_active_cameras()
-            for cam in active:
-                entry = frame_store.get_latest_cached_entry(cam)
-                if entry is not None:
-                    ts, snap = entry
-                    if ts > last_pushed_ts.get(cam, 0.0):
-                        last_pushed_ts[cam] = ts
-                        if snap:
-                            await ws_manager.broadcast({
-                                "type": "camera_frame",
-                                "cam": cam,
-                                "thumbnail_b64": snap,
-                            })
-        except asyncio.CancelledError:
-            break
-        except Exception as exc:
-            error_tracker.capture_exception(
-                exc,
-                component="CameraManager",
-                effect="Error in live snapshot broadcast loop; pausing 1s",
-                severity="WARNING",
-            )
-            await asyncio.sleep(1.0)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -421,9 +389,22 @@ async def websocket_endpoint(ws: WebSocket):
             },
             "prompts": {
                 "master": prompt_manager.get_master(),
+                "master_scene_context": prompt_manager.get_master_scene_context(),
+                "followup": prompt_manager._followup,
                 "cameras": prompt_manager.get_cam_overrides(),
             },
             "recent_errors": error_tracker.get_recent(limit=10),
+        })
+
+        with _stream_tracker_lock:
+            total_active = sum(_active_display_streams.values())
+            cams_active = list(_active_display_streams.keys())
+            counts_active = dict(_active_display_streams)
+        await ws.send_json({
+            "type": "active_streams_count",
+            "active_streams": total_active,
+            "active_cams": cams_active,
+            "stream_counts": counts_active,
         })
 
         # Keep connection alive with periodic pings
@@ -678,11 +659,70 @@ async def api_get_frame(name: str, width: int = 640, quality: int = 80):
     )
 
 
+# ── Live Active Stream Tracker ─────────────────────────────────────
+_active_display_streams: dict[str, int] = {}
+_stream_tracker_lock = threading.Lock()
+
+def _register_stream_start(cam_name: str) -> None:
+    with _stream_tracker_lock:
+        _active_display_streams[cam_name] = _active_display_streams.get(cam_name, 0) + 1
+        total = sum(_active_display_streams.values())
+        active_cams = [f"{k}({v})" if v > 1 else k for k, v in sorted(_active_display_streams.items())]
+    print(f"\033[1;32m[StreamMgr] 🟢 Stream connected: '{cam_name}' → Actively pulled: {total} feed(s) [{', '.join(active_cams)}]\033[0m")
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_broadcast_active_streams())
+    except RuntimeError:
+        pass
+
+def _register_stream_stop(cam_name: str) -> None:
+    with _stream_tracker_lock:
+        if cam_name in _active_display_streams:
+            _active_display_streams[cam_name] -= 1
+            if _active_display_streams[cam_name] <= 0:
+                del _active_display_streams[cam_name]
+        total = sum(_active_display_streams.values())
+        active_cams = [f"{k}({v})" if v > 1 else k for k, v in sorted(_active_display_streams.items())]
+    print(f"\033[1;33m[StreamMgr] 🔴 Stream closed: '{cam_name}' → Actively pulled: {total} feed(s) [{', '.join(active_cams) if active_cams else 'None'}]\033[0m")
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_broadcast_active_streams())
+    except RuntimeError:
+        pass
+
+async def _broadcast_active_streams() -> None:
+    with _stream_tracker_lock:
+        total = sum(_active_display_streams.values())
+        cams = list(_active_display_streams.keys())
+        counts = dict(_active_display_streams)
+    await ws_manager.broadcast({
+        "type": "active_streams_count",
+        "active_streams": total,
+        "active_cams": cams,
+        "stream_counts": counts,
+    })
+
+
+@app.get("/api/cameras/active-streams")
+def api_get_active_streams():
+    """Returns exact real-time count and names of video streams actively pulled right now."""
+    with _stream_tracker_lock:
+        total = sum(_active_display_streams.values())
+        cams = list(_active_display_streams.keys())
+        counts = dict(_active_display_streams)
+    return {
+        "active_streams": total,
+        "active_cams": cams,
+        "stream_counts": counts,
+    }
+
+
 @app.get("/api/cameras/{name}/stream")
 async def api_camera_stream(name: str, width: int = 640, quality: int = 70):
     """Continuous real-time MJPEG live video stream (25+ FPS, multipart/x-mixed-replace)."""
     async def frame_generator():
         last_ts = 0.0
+        _register_stream_start(name)
         try:
             # 1. Send initial frame or connecting placeholder immediately so browser opens stream in 0ms
             initial_entry = frame_store.get_latest_jpeg_entry(name, max_w=width, quality=quality)
@@ -713,6 +753,8 @@ async def api_camera_stream(name: str, width: int = 640, quality: int = 70):
                 await asyncio.sleep(0.02)  # 50Hz poll for instant push as soon as camera thread writes
         except (asyncio.CancelledError, GeneratorExit):
             pass
+        finally:
+            _register_stream_stop(name)
 
     return StreamingResponse(
         frame_generator(),
@@ -809,6 +851,7 @@ def api_cam_stats(name: str, hours: float = 24):
 def api_get_prompts():
     return {
         "master": prompt_manager.get_master(),
+        "master_scene_context": prompt_manager.get_master_scene_context(),
         "followup": prompt_manager._followup,
         "cameras": prompt_manager.get_cam_overrides(),
     }
@@ -818,6 +861,7 @@ def api_get_prompts():
 async def api_update_prompts(body: PromptBody):
     prompt_manager.save(
         master=body.master,
+        master_scene_context=body.master_scene_context,
         followup=body.followup,
         cam_name=body.cam_name,
         cam_prompt=body.cam_prompt,
@@ -826,6 +870,7 @@ async def api_update_prompts(body: PromptBody):
         "type": "prompts",
         "data": {
             "master": prompt_manager.get_master(),
+            "master_scene_context": prompt_manager.get_master_scene_context(),
             "followup": prompt_manager._followup,
             "cameras": prompt_manager.get_cam_overrides(),
         },
@@ -1223,10 +1268,14 @@ def api_send_daily_digest():
 
 
 
-# ══════════════════════════════════════════════════════════════
-#  Static files & frontend — mount LAST
-# ══════════════════════════════════════════════════════════════
+class NoCacheStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
 
 app.mount("/clips", StaticFiles(directory=str(CLIPS_DIR)), name="clips")
-app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
+app.mount("/", NoCacheStaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
 

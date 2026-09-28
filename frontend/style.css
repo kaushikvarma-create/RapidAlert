@@ -456,6 +456,29 @@ code { font-family: var(--font-mono); font-size: 0.82em; color: var(--accent); b
   border-radius: 99px;
 }
 
+.active-streams-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.72rem;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  padding: 2px 9px;
+  border-radius: 99px;
+  background: rgba(16, 185, 129, 0.12);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.15);
+  transition: all 0.2s ease;
+}
+
+.active-streams-badge.empty {
+  background: rgba(107, 114, 128, 0.12);
+  color: var(--text-3);
+  border-color: rgba(107, 114, 128, 0.25);
+  box-shadow: none;
+}
+
 .matrix-filters {
   display: flex;
   align-items: center;

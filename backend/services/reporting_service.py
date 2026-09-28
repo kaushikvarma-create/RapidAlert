@@ -223,6 +223,123 @@ class ReportingService:
             pass
         return "2W: 0\n4W: 0\nHV: 0"
 
+    def _get_camera_key_frames(
+        self,
+        conn: sqlite3.Connection,
+        cam_name: str,
+        p_start: float,
+        p_end: float,
+        evidence_tmp_dir: Path,
+        cam_events: list[dict],
+    ) -> list[dict]:
+        """
+        Pulls up to 2 key visual frames for a specific camera:
+        - Prioritizes Alert / Incident frames (HIGH/MEDIUM severity, safety warning/danger).
+        - If clean routine shift, pulls 2 routine/checkpoint frames across the shift.
+        - Tags each image with an explicit badge (e.g. '🚨 ALERT FRAME (10:15:22)' vs '📷 ROUTINE CHECKPOINT (07:00:00)').
+        """
+        key_frames = []
+        seen_ts = []
+
+        # 1. First priority: Check alert events for this camera
+        alert_events = [e for e in cam_events if e.get("sev") in ("HIGH", "MEDIUM")]
+        alert_events.sort(key=lambda x: (0 if x.get("sev") == "HIGH" else 1, x["mtime"]))
+
+        for ev in alert_events:
+            if len(key_frames) >= 2:
+                break
+            if any(abs(ev["mtime"] - t) < 10.0 for t in seen_ts):
+                continue
+
+            img_data = None
+            if ev.get("img_path") and Path(ev["img_path"]).exists():
+                key_frames.append({
+                    "img_path": ev["img_path"],
+                    "badge_text": f"🚨 ALERT FRAME ({ev['ts']})",
+                    "badge_class": "badge-alert",
+                    "caption": (ev["obs"][:65] + "...") if len(ev["obs"]) > 65 else ev["obs"],
+                    "time_str": ev["ts"],
+                })
+                seen_ts.append(ev["mtime"])
+                continue
+
+            if ev.get("incident_id"):
+                f_row = conn.execute("SELECT frame_data FROM incident_frames WHERE incident_id = ? LIMIT 1", (ev["incident_id"],)).fetchone()
+                if f_row and f_row["frame_data"]:
+                    img_data = f_row["frame_data"]
+
+            if not img_data:
+                f_row = conn.execute("SELECT frame_data FROM incident_frames WHERE cam = ? AND ABS(ts - ?) < 6.0 LIMIT 1", (cam_name, ev["mtime"])).fetchone()
+                if f_row and f_row["frame_data"]:
+                    img_data = f_row["frame_data"]
+
+            if img_data:
+                img_file = evidence_tmp_dir / f"kf_alert_{cam_name}_{int(ev['mtime'])}.jpg"
+                with open(img_file, "wb") as f:
+                    f.write(img_data)
+                key_frames.append({
+                    "img_path": str(img_file.resolve()),
+                    "badge_text": f"🚨 ALERT FRAME ({ev['ts']})",
+                    "badge_class": "badge-alert",
+                    "caption": (ev["obs"][:65] + "...") if len(ev["obs"]) > 65 else ev["obs"],
+                    "time_str": ev["ts"],
+                })
+                seen_ts.append(ev["mtime"])
+
+        # 2. Check incident_frames table for any frames during shift period
+        if len(key_frames) < 2:
+            rows = conn.execute("""
+                SELECT frame_data, ts FROM incident_frames
+                WHERE cam = ? AND ts >= ? AND ts <= ?
+                ORDER BY ts ASC
+            """, (cam_name, p_start, p_end)).fetchall()
+
+            if rows:
+                candidates = [rows[0]]
+                if len(rows) > 1:
+                    candidates.append(rows[-1])
+                for r in candidates:
+                    if len(key_frames) >= 2:
+                        break
+                    ts_val = r["ts"]
+                    if any(abs(ts_val - t) < 15.0 for t in seen_ts):
+                        continue
+                    ts_str = datetime.fromtimestamp(ts_val).strftime("%H:%M:%S")
+                    img_file = evidence_tmp_dir / f"kf_chk_{cam_name}_{int(ts_val)}.jpg"
+                    with open(img_file, "wb") as f:
+                        f.write(r["frame_data"])
+                    key_frames.append({
+                        "img_path": str(img_file.resolve()),
+                        "badge_text": f"📷 ROUTINE CHECKPOINT ({ts_str})",
+                        "badge_class": "badge-routine",
+                        "caption": "Normal operational zone status",
+                        "time_str": ts_str,
+                    })
+                    seen_ts.append(ts_val)
+
+        # 3. Fallback to FrameStore cached entry / live snapshot if still under 2 frames
+        if len(key_frames) < 2 and self.frame_store:
+            entry = self.frame_store.get_latest_cached_entry(cam_name)
+            if entry:
+                try:
+                    ts_val, b64_snap = entry
+                    img_data = base64.b64decode(b64_snap)
+                    ts_str = datetime.fromtimestamp(ts_val).strftime("%H:%M:%S")
+                    img_file = evidence_tmp_dir / f"kf_live_{cam_name}_{int(ts_val)}.jpg"
+                    with open(img_file, "wb") as f:
+                        f.write(img_data)
+                    key_frames.append({
+                        "img_path": str(img_file.resolve()),
+                        "badge_text": f"📷 BASELINE MONITOR ({ts_str})",
+                        "badge_class": "badge-routine",
+                        "caption": "Active zone baseline surveillance",
+                        "time_str": ts_str,
+                    })
+                except Exception:
+                    pass
+
+        return key_frames
+
     # ── Report Generation ───────────────────────────────────────
 
     def generate_shift_report(
@@ -356,7 +473,6 @@ class ReportingService:
                 seen_mins.add(min_key)
                 
                 # Multi-stage image frame lookup:
-                # 1. Exact incident_id match in incident_frames
                 f_row = None
                 if ev.get("incident_id"):
                     f_row = conn.execute("""
@@ -365,7 +481,6 @@ class ReportingService:
                         LIMIT 1
                     """, (ev["incident_id"],)).fetchone()
 
-                # 2. Approximate timestamp & camera match in incident_frames
                 if not f_row:
                     f_row = conn.execute("""
                         SELECT frame_data FROM incident_frames
@@ -374,7 +489,6 @@ class ReportingService:
                         LIMIT 1
                     """, (ev["cam"], ev["mtime"], ev["mtime"])).fetchone()
 
-                # 3. Fallback to latest cached frame from FrameStore if available
                 img_data = f_row["frame_data"] if f_row and f_row["frame_data"] else None
                 if not img_data and self.frame_store:
                     entry = self.frame_store.get_latest_cached_entry(ev["cam"])
@@ -394,7 +508,7 @@ class ReportingService:
 
         selected_events.sort(key=lambda x: x["mtime"])
 
-        # Latest parking image for vehicle categorization (multi-stage resolution)
+        # Latest parking image for vehicle categorization
         parking_img_bytes = None
         if self.frame_store:
             p_entry = self.frame_store.get_latest_cached_entry("PARKING")
@@ -405,7 +519,6 @@ class ReportingService:
                     pass
 
         if not parking_img_bytes:
-            # Query recent frame from incident_frames table
             p_row = conn.execute("""
                 SELECT frame_data FROM incident_frames
                 WHERE cam = 'PARKING'
@@ -415,9 +528,10 @@ class ReportingService:
             if p_row and p_row["frame_data"]:
                 parking_img_bytes = p_row["frame_data"]
 
-        # Compile general info rows per camera
+        # Compile general info rows and executive zone activity per camera
         general_info = []
         routines = {}
+        zone_activity = []
         for c in all_cams:
             zone = ZONE_MAP.get(c, "Surveillance Zone")
             p_occ = peak_occ_by_cam.get(c, 0)
@@ -434,7 +548,20 @@ class ReportingService:
             general_info.append([c, zone, in_cnt, out_cnt, str(p_occ), veh_str, act_pct, "OK"])
 
             # Routine summary via LLM
-            routines[c] = self._get_routine_summary(c, events_by_cam.get(c, []))
+            c_events = events_by_cam.get(c, [])
+            rout_desc = self._get_routine_summary(c, c_events)
+            routines[c] = rout_desc
+
+            # Pull 2 key visual frames tagged per camera
+            c_keyframes = self._get_camera_key_frames(conn, c, p_start, p_end, evidence_tmp_dir, c_events)
+            zone_activity.append({
+                "cam": c,
+                "zone": zone,
+                "summary": rout_desc,
+                "act_pct": act_pct,
+                "peak_occ": p_occ,
+                "key_frames": c_keyframes,
+            })
 
         # Overall Stats
         stats = {
@@ -469,6 +596,7 @@ class ReportingService:
             general_info=general_info,
             all_events=selected_events[:20],
             routines=routines,
+            zone_activity=zone_activity,
         )
 
         pdf_filename = f"Clove_HQ_Shift_Report_{now.strftime('%Y%m%d_%H%M%S')}.pdf"

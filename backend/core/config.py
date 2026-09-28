@@ -168,6 +168,7 @@ def load_prompts_config() -> Dict[str, Any]:
         except Exception as e:
             print(f"[Config] ⚠️ Error loading {PROMPTS_CONFIG_PATH}: {e}")
     return {
+        "master_scene_context": "",
         "master": "",
         "followup": "",
         "cameras": {},

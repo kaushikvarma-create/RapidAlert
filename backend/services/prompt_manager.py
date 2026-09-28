@@ -30,6 +30,7 @@ class PromptManager:
         
         # Load initial prompts from config file
         initial_cfg = load_prompts_config()
+        self._master_scene_context: str = initial_cfg.get("master_scene_context", "")
         self._master: str = initial_cfg.get("master", "")
         self._followup: str = initial_cfg.get("followup", "")
         self._cam_overrides: dict[str, str] = initial_cfg.get("cameras", {})
@@ -60,6 +61,8 @@ class PromptManager:
                 "Flag any deviation from this normal context."
             )
 
+        master_scene = self._master_scene_context.strip() if self._master_scene_context else "Standard facility environment."
+
         if is_followup:
             followup_info = (
                 f"FOLLOW-UP CONTEXT:\n"
@@ -72,10 +75,21 @@ class PromptManager:
             followup_info += " Objectively determine whether this has resolved or is persisting."
 
             template = self._followup
-            return template.replace("{normal_context}", ctx_str).replace("{followup_context}", followup_info)
+            return (
+                template
+                .replace("{master_scene_context}", master_scene)
+                .replace("{global_context}", master_scene)
+                .replace("{normal_context}", ctx_str)
+                .replace("{followup_context}", followup_info)
+            )
 
         template = self._cam_overrides.get(cam_name) or self._master
-        return template.replace("{normal_context}", ctx_str)
+        return (
+            template
+            .replace("{master_scene_context}", master_scene)
+            .replace("{global_context}", master_scene)
+            .replace("{normal_context}", ctx_str)
+        )
 
     def get_followup_prompt(self, cam_name: str, hour: Optional[int] = None) -> str:
         return self.get_prompt(cam_name, hour=hour, is_followup=True)
@@ -83,12 +97,16 @@ class PromptManager:
     def get_master(self) -> str:
         return self._master
 
+    def get_master_scene_context(self) -> str:
+        return self._master_scene_context
+
     def get_cam_overrides(self) -> dict[str, str]:
         return dict(self._cam_overrides)
 
     def save(
         self,
         master: Optional[str] = None,
+        master_scene_context: Optional[str] = None,
         followup: Optional[str] = None,
         cam_name: Optional[str] = None,
         cam_prompt: Optional[str] = None,
@@ -96,6 +114,8 @@ class PromptManager:
         """Update one or more fields and persist to config/prompts.json."""
         if master is not None:
             self._master = master
+        if master_scene_context is not None:
+            self._master_scene_context = master_scene_context
         if followup is not None:
             self._followup = followup
         if cam_name is not None:
@@ -105,6 +125,7 @@ class PromptManager:
                 self._cam_overrides.pop(cam_name, None)
 
         data = {
+            "master_scene_context": self._master_scene_context,
             "master": self._master,
             "followup": self._followup,
             "cameras": self._cam_overrides,
@@ -151,6 +172,8 @@ class PromptManager:
                 return
             with open(self.path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            if "master_scene_context" in data:
+                self._master_scene_context = data["master_scene_context"]
             if "master" in data:
                 self._master = data["master"]
             if "followup" in data:
