@@ -5,11 +5,12 @@ get_snapshot_b64() encodes to JPEG + base64 for VLM submission.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import collections
 import threading
 import time
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Set
 
 import cv2
 import numpy as np
@@ -23,10 +24,35 @@ class FrameStore:
         self._store: dict[str, collections.deque[Tuple[np.ndarray, float]]] = collections.defaultdict(
             lambda: collections.deque(maxlen=300)
         )
-        self._latest_jpeg: dict[str, Tuple[float, bytes, str]] = {}
+        self._latest_jpeg: dict[str, Tuple[float, bytes, int, int]] = {}
+        self._subscribers: dict[str, Set[asyncio.Queue]] = collections.defaultdict(set)
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._lock = threading.Lock()
         self.max_w = max_w
         self.jpeg_quality = jpeg_quality
+
+    def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Binds the FastAPI asyncio event loop for threadsafe stream push notifications."""
+        self._loop = loop
+
+    def subscribe(self, cam_name: str) -> asyncio.Queue:
+        """Subscribes an active client stream to instant push frame events (zero polling latency)."""
+        q: asyncio.Queue = asyncio.Queue(maxsize=2)
+        with self._lock:
+            self._subscribers[cam_name].add(q)
+            cached = self._latest_jpeg.get(cam_name)
+            if cached is not None:
+                try:
+                    q.put_nowait(cached[1])
+                except Exception:
+                    pass
+        return q
+
+    def unsubscribe(self, cam_name: str, q: asyncio.Queue) -> None:
+        """Removes a client stream subscription."""
+        with self._lock:
+            if cam_name in self._subscribers:
+                self._subscribers[cam_name].discard(q)
 
     def put(self, cam_name: str, frame: np.ndarray) -> None:
         if frame is None or frame.size == 0:
@@ -34,6 +60,31 @@ class FrameStore:
         ts = time.monotonic()
         with self._lock:
             self._store[cam_name].append((frame, ts))
+            subs = list(self._subscribers.get(cam_name, []))
+
+        # If any client is actively streaming this camera, encode ONCE and push immediately
+        if subs:
+            try:
+                ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 78])
+                if ok:
+                    raw_bytes = buf.tobytes()
+                    with self._lock:
+                        self._latest_jpeg[cam_name] = (ts, raw_bytes, self.max_w, 78)
+                    if self._loop and self._loop.is_running():
+                        for q in subs:
+                            def _push(queue=q, data=raw_bytes):
+                                if queue.full():
+                                    try:
+                                        queue.get_nowait()
+                                    except Exception:
+                                        pass
+                                try:
+                                    queue.put_nowait(data)
+                                except Exception:
+                                    pass
+                            self._loop.call_soon_threadsafe(_push)
+            except Exception:
+                pass
 
     def get_latest(self, cam_name: str) -> Optional[Tuple[np.ndarray, float]]:
         with self._lock:
@@ -88,7 +139,7 @@ class FrameStore:
     ) -> Optional[Tuple[float, bytes]]:
         """Returns (timestamp, jpeg_bytes) of the latest frame, with memoized cache."""
         mw = max_w if max_w is not None else 1280
-        q = quality if quality is not None else 85
+        q = quality if quality is not None else 78
 
         with self._lock:
             q_store = self._store.get(cam_name)

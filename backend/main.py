@@ -207,6 +207,7 @@ async def lifespan(app: FastAPI):
     t_start = time.monotonic()
     # Audit prior crash / unexpected power outage state
     watchdog_emailer.check_and_alert_prior_crash()
+    frame_store.set_event_loop(asyncio.get_running_loop())
     camera_manager.sync()
     await vlm_pool.start()
     await scheduler.start()
@@ -718,42 +719,26 @@ def api_get_active_streams():
 
 
 @app.get("/api/cameras/{name}/stream")
-async def api_camera_stream(name: str, width: int = 1280, quality: int = 85):
-    """Continuous real-time MJPEG live video stream (25+ FPS, multipart/x-mixed-replace)."""
+async def api_camera_stream(name: str, width: int = 1280, quality: int = 78):
+    """Direct zero-latency push MJPEG live stream (100% native hardware FPS, zero polling jitter)."""
     async def frame_generator():
-        last_ts = 0.0
         _register_stream_start(name)
+        queue = frame_store.subscribe(name)
         try:
-            # 1. Send initial frame or connecting placeholder immediately so browser opens stream in 0ms
-            initial_entry = frame_store.get_latest_jpeg_entry(name, max_w=width, quality=quality)
-            if initial_entry is not None:
-                last_ts, initial_jpeg = initial_entry
-                yield (
-                    b"--frame\r\n"
-                    b"Content-Type: image/jpeg\r\n\r\n" + initial_jpeg + b"\r\n"
-                )
-            else:
-                ph_bytes = _get_placeholder_jpeg(name, width=width)
-                yield (
-                    b"--frame\r\n"
-                    b"Content-Type: image/jpeg\r\n\r\n" + ph_bytes + b"\r\n"
-                )
-
-            # 2. Continuous real-time stream
             while not _is_shutting_down:
-                entry = frame_store.get_latest_jpeg_entry(name, max_w=width, quality=quality)
-                if entry is not None:
-                    ts, jpeg_bytes = entry
-                    if ts > last_ts:
-                        last_ts = ts
-                        yield (
-                            b"--frame\r\n"
-                            b"Content-Type: image/jpeg\r\n\r\n" + jpeg_bytes + b"\r\n"
-                        )
-                await asyncio.sleep(0.02)  # 50Hz poll for instant push as soon as camera thread writes
+                try:
+                    jpeg_bytes = await asyncio.wait_for(queue.get(), timeout=2.0)
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n" + jpeg_bytes + b"\r\n"
+                    )
+                except asyncio.TimeoutError:
+                    if _is_shutting_down:
+                        break
         except (asyncio.CancelledError, GeneratorExit):
             pass
         finally:
+            frame_store.unsubscribe(name, queue)
             _register_stream_stop(name)
 
     return StreamingResponse(

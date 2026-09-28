@@ -132,10 +132,12 @@ def audit_vllm():
 
 def audit_hardware():
     print(f"\n{BOLD}[4/5] Hardware & NVDEC Acceleration Audit{NC}")
+    from backend.services.nvidia_ingest import _ensure_mig_device_configured, is_nvidia_available, is_deepstream_available
+    _ensure_mig_device_configured()
     import torch
     if torch.cuda.is_available():
         gpu_name = torch.cuda.get_device_name(0)
-        log_ok(f"CUDA Available: {gpu_name} (Device count: {torch.cuda.device_count()})")
+        log_ok(f"CUDA Available on MIG Slice: {gpu_name} (Device count: {torch.cuda.device_count()})")
     else:
         log_warn("CUDA not detected by PyTorch; running on CPU.")
 

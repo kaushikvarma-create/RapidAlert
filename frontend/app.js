@@ -749,7 +749,7 @@ const App = {
       if (shouldStream) {
         const cardImg = document.getElementById(`cam-card-img-${this._eid(name)}`);
         if (cardImg) {
-          const streamUrl = `/api/cameras/${encodeURIComponent(name)}/stream?width=1280&quality=85`;
+          const streamUrl = `/api/cameras/${encodeURIComponent(name)}/stream?width=1280&quality=78`;
           if (!cardImg.src || !cardImg.src.includes(`/api/cameras/${encodeURIComponent(name)}/stream`)) {
             cardImg.src = streamUrl;
           }
