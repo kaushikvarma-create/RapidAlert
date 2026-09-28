@@ -8,7 +8,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/style.css?v=68" />
+  <link rel="stylesheet" href="/style.css?v=71" />
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.8/dist/hls.min.js"></script>
   <script>
     (function() {
       var saved = localStorage.getItem('rapidalert_theme') || localStorage.getItem('theme');
@@ -109,6 +110,12 @@
               <span>3×2</span>
             </button>
           </div>
+
+          <!-- Quick Live Stream Resync Button -->
+          <button class="btn-resync-streams" id="btn-resync-streams" title="🔄 Live Resync: Re-attach and refresh all visible hardware camera streams" aria-label="Resync Streams">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            <span>Resync</span>
+          </button>
 
           <!-- Camera Grid Dynamic Pagination Controls -->
           <div class="cam-pagination-bar" id="cam-pagination-bar">
@@ -1277,6 +1284,6 @@
   <!-- ═══════════════════════════════════════════════════════════ TOAST -->
   <div class="toast-container" id="toast-container"></div>
 
-  <script src="/app.js?v=68"></script>
+  <script src="/app.js?v=72"></script>
 </body>
 </html>

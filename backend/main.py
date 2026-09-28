@@ -92,6 +92,7 @@ from backend.services.metrics_monitor import metrics_loop
 from backend.services.scene_trigger import SceneTriggerEngine
 from backend.services.watchdog import SystemWatchdog
 from backend.services.watchdog_emailer import WatchdogEmailer
+from backend.services.mediamtx_service import mediamtx_service, get_safe_cam_slug
 from backend.core.shutdown_logger import log_system_event
 
 
@@ -207,13 +208,13 @@ async def lifespan(app: FastAPI):
     t_start = time.monotonic()
     # Audit prior crash / unexpected power outage state
     watchdog_emailer.check_and_alert_prior_crash()
-    frame_store.set_event_loop(asyncio.get_running_loop())
     camera_manager.sync()
     await vlm_pool.start()
     await scheduler.start()
     scene_trigger.start()
     watchdog.start()
     reporting_service.start()
+    mediamtx_service.start(camera_manager.get_config())
     _bg_tasks.append(asyncio.create_task(prompt_manager.watch_loop()))
     _bg_tasks.append(asyncio.create_task(_config_sync_loop()))
     _bg_tasks.append(asyncio.create_task(metrics_loop(ws_manager.broadcast)))
@@ -229,6 +230,7 @@ async def lifespan(app: FastAPI):
     summary = watchdog.get_summary()
     watchdog.stop()
     reporting_service.stop()
+    mediamtx_service.stop()
     for task in _bg_tasks:
         task.cancel()
     scene_trigger.stop()
@@ -720,25 +722,27 @@ def api_get_active_streams():
 
 @app.get("/api/cameras/{name}/stream")
 async def api_camera_stream(name: str, width: int = 1280, quality: int = 78):
-    """Direct zero-latency push MJPEG live stream (100% native hardware FPS, zero polling jitter)."""
+    """Direct zero-latency continuous MJPEG live stream (100% native hardware FPS, zero polling jitter)."""
     async def frame_generator():
         _register_stream_start(name)
-        queue = frame_store.subscribe(name)
+        last_seq = -1
         try:
             while not _is_shutting_down:
-                try:
-                    jpeg_bytes = await asyncio.wait_for(queue.get(), timeout=2.0)
+                frame_data = await asyncio.to_thread(frame_store.get_frame_since, name, last_seq, 1.0, width, quality)
+                if frame_data is not None:
+                    seq, jpeg_bytes = frame_data
+                    last_seq = seq
                     yield (
                         b"--frame\r\n"
                         b"Content-Type: image/jpeg\r\n\r\n" + jpeg_bytes + b"\r\n"
                     )
-                except asyncio.TimeoutError:
+                else:
                     if _is_shutting_down:
                         break
+                    await asyncio.sleep(0.01)
         except (asyncio.CancelledError, GeneratorExit):
             pass
         finally:
-            frame_store.unsubscribe(name, queue)
             _register_stream_stop(name)
 
     return StreamingResponse(
@@ -747,8 +751,24 @@ async def api_camera_stream(name: str, width: int = 1280, quality: int = 78):
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Pragma": "no-cache",
+            "Connection": "close",
         },
     )
+
+
+@app.get("/api/cameras/{name}/stream-urls")
+def api_camera_stream_urls(name: str, request: Request):
+    """Returns direct ultra-low latency WebRTC, WHEP, and LL-HLS stream endpoints."""
+    host = request.headers.get("host", "localhost:7000").split(":")[0]
+    slug = get_safe_cam_slug(name)
+    return {
+        "slug": slug,
+        "webrtc_player": f"http://{host}:8889/{slug}",
+        "hls_player": f"http://{host}:8888/{slug}/",
+        "hls_m3u8": f"http://{host}:8888/{slug}/index.m3u8",
+        "whep_url": f"http://{host}:8889/{slug}/whep",
+        "mjpeg_url": f"/api/cameras/{name}/stream",
+    }
 
 
 # ══════════════════════════════════════════════════════════════════

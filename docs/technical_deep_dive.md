@@ -5,13 +5,15 @@
 
 ## 1. System Philosophy & Executive Summary
 
-Traditional CCTV computer vision relies on narrow object detection (YOLO) or optical flow bounding boxes that lack semantic context, causal reasoning, and temporal understanding. Conversely, cloud-hosted Multimodal Large Language Models (MLLMs) introduce multi-second network latencies, bandwidth saturation from high-resolution multi-camera feeds, and critical data sovereignty liabilities.
+Traditional CCTV computer vision relies on narrow object detection (e.g. YOLO bounding boxes) or basic optical flow thresholds that lack semantic context, causal reasoning, and temporal continuity. Conversely, cloud-hosted Multimodal Large Language Models (MLLMs) introduce multi-second network latencies, bandwidth saturation from multi-camera feeds, and critical data sovereignty liabilities.
 
 **RapidAlert** resolves this paradigm through an **Edge-Native Hybrid Vision Pipeline**:
+
 1. **Tier 1 (Sub-10ms Fast Path)**: Real-time dense feature extraction via **DINOv2** (`facebook/dinov2-small`) computes continuous cosine embedding drift on local frames to detect any structural or semantic shift with near-zero compute overhead.
 2. **Tier 2 (Deep Multimodal Reasoning Path)**: When a shift exceeds calibrated thresholds, a multi-tier deadline scheduler captures a **4-frame temporal sequence** ($t-10s, t-6.5s, t-3s, t-0s$) and routes it to **Cosmos Reason2 8B (NVFP4)** running across hardware-isolated **NVIDIA Multi-Instance GPU (MIG)** compute shards.
-3. **Tier 3 (Autonomous Persistence & Follow-Up)**: If a safety hazard or critical incident is flagged (`HIGH`/`DANGER`), an autonomous follow-up loop re-inspects the scene every 10 seconds until the situation resolves.
-4. **Tier 4 (Continuous Watchdog & Reporting)**: A continuous hardware sentinel tracks power cuts, kernel crashes, camera blackouts, and cluster outages, dispatching real-time email alerts and automated 24-hour health digests alongside scheduled shift PDF reports.
+3. **Tier 3 (Direct Hardware Streaming & Active-Page Viewport)**: High-resolution camera feeds bypass Python CPU image compression entirely through an **Embedded MediaMTX Gateway**, delivering direct Low-Latency HLS (LL-HLS) to HTML5 `<video>` elements decoded by Chromium's GPU hardware video engine.
+4. **Tier 4 (Autonomous Persistence & Follow-Up)**: If a safety hazard or critical incident is flagged (`HIGH`/`DANGER`), an autonomous follow-up loop re-inspects the scene every 10 seconds until the situation resolves.
+5. **Tier 5 (Continuous Watchdog & Shift Reporting)**: A continuous hardware sentinel tracks power cuts, kernel crashes, camera blackouts, and cluster outages, dispatching real-time email alerts and automated 24-hour health digests alongside scheduled shift PDF reports stored in a rolling 69-report archive.
 
 ---
 
@@ -41,7 +43,7 @@ Traditional CCTV computer vision relies on narrow object detection (YOLO) or opt
 │ • RapidAlert Backend (DINOv2 + NVMM)        │ • 1× OFA (Optical Flow Accel)│
 │                                              │ • 1× JPEG Hardware Decoder   │
 │                                              │ • vLLM Instance 1 (Port 8001)│
-└──────────────────────────────────────────────┴──────────────────────────────┘
+└──────────────────────────────┴───────────────┴──────────────────────────────┘
 ```
 
 ### 2.2 Unified Memory Mechanics & Allocation Topology
@@ -74,11 +76,47 @@ $$\text{Activity } (\%) = \min\left(100, \max\left(0, \frac{\text{Power}_{\text{
 
 ---
 
-## 3. Multi-Instance GPU (MIG) & Container Virtualization
+## 3. Direct Hardware RTSP Streaming & Low-Latency HLS Architecture
 
-### 3.1 Partition Profiles on JetPack 7.2
+Streaming 7 high-definition CCTV cameras over standard HTTP multipart MJPEG requires continuous server-side JPEG compression, consuming upwards of 200–400% CPU on multi-core systems and introducing frame lag. RapidAlert bypasses this through an **Embedded MediaMTX Hardware Passthrough Architecture**.
 
-Under JetPack 7.2 for Jetson AGX Thor, hardware partitioning is established prior to display manager initialization via `/usr/local/bin/create-thor-mig.sh`:
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                 DIRECT HARDWARE VIDEO INGESTION & PLAYBACK                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ 1. IP Cameras (H.264/H.265 RTSP) ──> MediaMTX Daemon (Port 8888 / 8889)    │
+│ 2. MediaMTX Repackages RTSP into Low-Latency HLS fMP4 Chunks (200ms parts)  │
+│ 3. Frontend HTML5 <video> + Hls.js Pulls Chunks via HTTP                    │
+│ 4. Chromium GPU Video Decoder (VDPAU / NVDEC) Decodes Directly to Display   │
+│                                                                             │
+│ Result: 0% Server CPU Transcoding | Native 30/60 FPS | Sub-Second Latency   │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 3.1 MediaMTX Daemon Lifecycle & Dynamic Configuration
+* **Supervision**: `backend/services/mediamtx_service.py` dynamically writes `stream/mediamtx.yml` based on active cameras in `config/cameras.json`.
+* **Port Allocations**:
+  - `8888`: Low-Latency HLS (LL-HLS) endpoint (`http://localhost:8888/{slug}/index.m3u8`).
+  - `8889`: WebRTC / WHEP endpoint (`http://localhost:8889/{slug}/whep`).
+  - `8554`: Local RTSP proxy.
+  - `9997`: MediaMTX control API.
+
+### 3.2 Active-Page Pagination & Zero-Overhead Viewport Policy
+* **Pagination Bounds**:
+  - In $2\times2$ mode (4 cameras/page), only the 4 cameras on the current page have active media sockets.
+  - In $3\times2$ mode (6 cameras/page), only the 6 cameras on the current page are connected.
+* **Socket Teardown on Page Switch**:
+  - When switching pages (e.g. Page 1 $\leftrightarrow$ Page 2), `_detachDirectStream(name)` immediately calls `hls.destroy()` and unloads the `<video>` element, freeing browser socket pools and network bandwidth.
+* **Thread-Safe Fallback Pipeline (`FrameStore`)**:
+  - If a browser lacks HLS support or during stream initialization, `FrameStore` provides an optimized MJPEG stream using a `threading.Condition` and monotonic sequence numbers (`cur_seq`), waking waiting threads in $<0.1\text{ms}$ upon new NVDEC frame decode.
+
+---
+
+## 4. Multi-Instance GPU (MIG) & Container Virtualization
+
+### 4.1 Partition Profiles on JetPack 7.2
+
+Under JetPack 7.2 for Jetson AGX Thor, hardware partitioning is established via `/usr/local/bin/create-thor-mig.sh`:
 
 1. **Slice 0 (Profile 83 / `2g.0gb+gfx`)**:
    * **12 Streaming Multiprocessors (SMs)**.
@@ -87,9 +125,9 @@ Under JetPack 7.2 for Jetson AGX Thor, hardware partitioning is established prio
    * **8 Physical SMs** (6 general-purpose CUDA Compute SMs + 2 SMs dedicated to NVDEC, NVENC, OFA, and JPEG engines).
    * Houses `vllm_1` (Port 8001) for dedicated video reasoning.
 
-### 3.2 Jetson CDI Capability Mapping Architecture
+### 4.2 Jetson CDI Capability Mapping Architecture
 
-Standard desktop Docker flags like `NVIDIA_VISIBLE_DEVICES=MIG-...` fail on Jetson's Container Device Interface (CDI) in CSV mode. RapidAlert resolves this by mounting the specific **MIG Capability Nodes** directly into the container namespace:
+Standard desktop Docker flags like `NVIDIA_VISIBLE_DEVICES=MIG-...` fail on Jetson's Container Device Interface (CDI) in CSV mode. RapidAlert mounts the specific **MIG Capability Nodes** directly into the container namespace:
 
 ```bash
 # Instance 0 (GI 1): Maps cap1, cap12, cap13
@@ -123,291 +161,84 @@ docker run -d \
 
 ---
 
-## 4. Ingestion Pipeline: DeepStream NVDEC & FrameStore
+## 5. Two-Tier In-Memory Queuing & Scheduling System
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                    HIGH-THROUGHPUT NVDEC INGESTION PIPELINE                 │
-├───────────────┬───────────────────┬───────────────────┬─────────────────────┤
-│  RTSP Stream  │ Hardware Decoder  │  Format Transform │ Thread-Safe Storage │
-│ (H.264/H.265) │   (nvurisrcbin)   │ (nvvideoconvert)  │  (Ring FrameStore)  │
-├───────────────┼───────────────────┼───────────────────┼─────────────────────┤
-│ 7 Streams @   │ Zero-Copy NVMM    │ Hardware NVMM to  │ Rolling circular    │
-│ 1080p / 4K    │ Hardware Decoder  │ BGR/RGB 768px max │ buffer of 4 frames  │
-│ 25-30 FPS     │ 0% CPU footprint  │ with 0-copy DMA   │ with timestamps     │
-└───────────────┴───────────────────┴───────────────────┴─────────────────────┘
+Trigger Event (Tier 2 / Tier 3 / Follow-Up)
+                  │
+                  ▼
+┌─────────────────────────────────────────────────────────┐
+│     Tier A: Global Dispatch Priority Queue              │
+│     (In-Memory asyncio.PriorityQueue, Zero IPC)         │
+│     • Priority 0: Critical Follow-Up & Major Incident   │
+│     • Priority 1: Minor Scene Shift                     │
+│     • Priority 3: Routine Ambient Heartbeat             │
+└─────────────────────────┬───────────────────────────────┘
+                          │
+                          ▼  Weighted Least-Connections Router
+┌─────────────────────────────────────────────────────────┐
+│     Tier B: Per-MIG Endpoint Worker Shard Queues        │
+├────────────────────────────┬────────────────────────────┤
+│   Shard 0 (MIG 12 SMs)     │   Shard 1 (MIG 8 SMs)      │
+│   • Weight: 3              │   • Weight: 2              │
+│   • Bounded Queue: max=12  │   • Bounded Queue: max=12  │
+│   • Concurrency: sem=4     │   • Concurrency: sem=4     │
+└────────────────────────────┴────────────────────────────┘
 ```
 
-### 4.1 Zero-Staleness Frame Ingestion & CPU Fallback
-In real-time VLM surveillance, inference takes **1.2–2.0 seconds**, while cameras produce frames every **33 ms** (30 FPS). Traditional FIFO queues inevitably back up, causing models to analyze stale history.
+### 5.1 Tier A: Global Priority Router
+* Tasks are prioritized into `asyncio.PriorityQueue` tuples: `(priority, timestamp, task)`.
+* Priority ordering ensures that ongoing critical follow-ups (Priority 0) preempt minor background scene shifts (Priority 1) or ambient heartbeats (Priority 3).
 
-RapidAlert implements a **Non-Blocking Ring Buffer (`FrameStore`)**:
-* Dedicated ingestion threads poll hardware NVDEC decoders (`nvurisrcbin`).
-* If an NVDEC bufferpool error or corrupt RTSP keyframe sequence occurs, the camera manager dynamically fails over to a high-speed **CPU OpenCV fallback engine**, preventing stream drops.
-* As frames arrive, they overwrite a fixed-capacity ring buffer ($t-10s, t-6.5s, t-3s, t-0s$).
-* When an inference trigger fires, the scheduler immediately extracts the exact $4$-frame temporal history without queuing delay.
+### 5.2 Tier B: Weighted Least-Connections Router
+The router selects the optimal MIG shard using a weighted load score:
+$$\text{Load Score} = \frac{\text{In-Flight Requests} + \text{Queued Tasks}}{\text{Weight}_{\text{shard}}}$$
+* Shard 0 (12 SMs) has `weight = 3` (capacity for 4 concurrent requests).
+* Shard 1 (8 SMs) has `weight = 2` (capacity for 4 concurrent requests).
 
 ---
 
-## 5. Dual-Tier Scene Shift Intelligence
+## 6. Automated Watchdog Sentinel & 24h Diagnostic Digest
 
-```mermaid
-flowchart LR
-    FRAME["Live Camera Frame (t-0)"] --> DINO["DINOv2 Feature Extractor"]
-    DINO --> EMBED["384-Dim Embedding Vector E(t)"]
-    EMBED --> DRIFT["Cosine Distance vs Baseline E(0)"]
-    DRIFT --> EVAL{"Drift Value"}
-    EVAL -->|">= 0.060"| MAJOR["🚨 Major Shift (P1)<br>Tier-2 Emergency VLM"]
-    EVAL -->|">= 0.030"| MINOR["⚠️ Minor Shift (P1)<br>Tier-3 Scene Shift VLM"]
-    EVAL -->|"< 0.030 & > 35s"| HB["💓 Periodic Audit (P3)<br>Tier-4 Heartbeat VLM"]
-```
+### 6.1 Real-Time Critical Incident Dispatch
+The `WatchdogEmailer` service (`backend/services/watchdog_emailer.py`) executes non-blocking asynchronous email notifications via Gmail SMTP:
+* **`SYSTEM_RESTART`**: Notifies administrators on startup, distinguishing between clean reboots and unexpected crash recoveries.
+* **`CAMERA_BLACKOUT`**: Triggers if $>50\%$ of feeds freeze or drop for $>30\text{ seconds}$.
+* **`VLLM_CLUSTER_DOWN`**: Triggers if both MIG inference endpoints fail health checks.
+* **`STORAGE_CRITICAL`**: Triggers if disk capacity drops below $5\%$ or SQLite corruption is detected.
+* **`FATAL_EXCEPTION`**: Triggers upon unhandled pipeline crashes.
 
-### 5.1 Cosine Distance Metric
-$$\mathcal{D}_{\text{drift}}(E_t, E_{\text{baseline}}) = 1 - \frac{\sum_{i=1}^{384} E_{t,i} \cdot E_{\text{baseline},i}}{\sqrt{\sum_{i=1}^{384} E_{t,i}^2} \cdot \sqrt{\sum_{i=1}^{384} E_{\text{baseline},i}^2}}$$
+### 6.2 Automatic Resolution Notices
+When active fault conditions clear, the watchdog automatically dispatches a green `[RESOLVED]` notice, resetting cooldown trackers.
 
-### 5.2 Dynamic Drift Adaptation
-To handle natural lighting shifts (e.g. dawn, dusk, cloud cover) without triggering false alarms, the baseline embedding is updated via an exponential moving average (EMA) filter:
-$$E_{\text{baseline}} \leftarrow (1 - \alpha) E_{\text{baseline}} + \alpha E_t \quad (\alpha = 0.02)$$
-
-When an actual incident occurs ($\mathcal{D}_{\text{drift}} \ge \text{threshold}$), EMA adaptation is temporarily frozen to prevent the anomaly from poisoning the reference baseline.
+### 6.3 Executive 24-Hour System Health Digest
+* **Trigger Schedule**: Automated at **08:00 AM IST** daily.
+* **SQL Aggregation**: Compiles total uptime, completed analyses, error log severities, NVDEC vs CPU decoding ratios, and MIG shard latencies from `data/analyses.db`.
 
 ---
 
-## 6. Multi-Frame Temporal Reasoning Engine
+## 7. Shift Intelligence Reporting & 69-Report Rolling Buffer
 
-### 6.1 Interleaved Multimodal Token Representation
-When a trigger fires, RapidAlert constructs a multi-image payload with explicit temporal frame markers:
+### 7.1 Automated Shift Schedule
+`ReportingService` (`backend/services/reporting_service.py`) generates multi-page executive shift intelligence PDFs at:
+* **06:00 AM IST**: Concluding the Night Shift.
+* **06:00 PM IST**: Concluding the Day Shift.
 
-```
-[SYSTEM PROMPT]
-You are RapidAlert Edge Reasoning Engine running on NVIDIA Jetson AGX Thor.
-Analyze the 4-frame temporal sequence below. Frames are ordered sequentially from t-3 to t-0.
-
-[FRAME 1: t -10.0s (Baseline Context)]
-<image_token_1>
-
-[FRAME 2: t -6.5s (Pre-Incident Initiation)]
-<image_token_2>
-
-[FRAME 3: t -3.0s (Incident Development)]
-<image_token_3>
-
-[FRAME 4: t 0.0s (Current Trigger State)]
-<image_token_4>
-
-[INSTRUCTION]
-1. State exactly what changed between t-3 and t-0.
-2. Identify actors (workers, vehicles, intruders).
-3. Classify severity: LOW, MEDIUM, or HIGH.
-4. Classify safety hazard: OK, WARNING, or DANGER.
-5. Return strictly valid JSON.
-```
+### 7.2 Circular Buffer Management
+* Stored in `data/reports/` with naming convention `shift_report_YYYYMMDD_HHMMSS.pdf`.
+* Retains a rolling buffer of **69 reports** (~1 month of operational shift history).
+* When report #70 is generated, the oldest report is automatically purged.
+* Operators can inspect, view, and download all 69 past reports via the **Reports Archive Modal** on the dashboard.
 
 ---
 
-## 7. Two-Tier In-Memory Queuing & Dispatch System
+## 8. Summary of Performance Metrics
 
-```
-                        [ DINOv2 / Timer / API Events ]
-                                       │
-                                       ▼
-    ┌─────────────────────────────────────────────────────────────────────┐
-    │     Tier A: Global Dispatch Priority Queue (PriorityQueue)          │
-    │     • Priority 1: Instant Scene Shift & Trigger Events (P1)         │
-    │     • Priority 2: 10s Adaptive Follow-up Verification (P2)          │
-    │     • Priority 3: Routine Ambient Heartbeat Audits (P3)             │
-    └──────────────────────────────────┬──────────────────────────────────┘
-                                       │  Deadlock Prevention: In-Flight Lock Set
-                                       ▼
-    ┌─────────────────────────────────────────────────────────────────────┐
-    │     Weighted Least-Connections Load Balancer (MIGAwareVLMPool)      │
-    │                                                                     │
-    │                 load_score = (in_flight + queued) / weight          │
-    └──────────────────┬───────────────────────────────┬──────────────────┘
-                       │ (weight=3)                    │ (weight=2)
-                       ▼                               ▼
-    ┌────────────────────────────────────┐ ┌────────────────────────────────────┐
-    │ Tier B1: Shard 0 Bounded Queue     │ │ Tier B2: Shard 1 Bounded Queue     │
-    │ • asyncio.Queue (maxsize=12)       │ │ • asyncio.Queue (maxsize=12)       │
-    │ • asyncio.Semaphore (max=4)        │ │ • asyncio.Semaphore (max=4)        │
-    │ • 4 Coroutine Workers (Port 8000)  │ │ • 4 Coroutine Workers (Port 8001)  │
-    └────────────────────────────────────┘ └────────────────────────────────────┘
-```
-
-### 7.1 Tier A: Global Dispatch Priority Queue (`PriorityQueue`)
-* **Underlying Implementation**: `asyncio.PriorityQueue` storing tuples of `(priority_int, timestamp, job_payload)`.
-* **Zero-IPC Latency**: Eliminates network message broker hops (Redis/RabbitMQ), operating purely in Python memory.
-* **Priority Tiers**:
-  * **Priority 1 (`TRIGGER`)**: Emergency scene shifts triggered by DINOv2 major/minor threshold breach.
-  * **Priority 2 (`FOLLOWUP`)**: 10-second adaptive verification cycle for ongoing hazard tracking.
-  * **Priority 3 (`PERIODIC / HEARTBEAT`)**: Background ambient baseline health checks every 35s.
-
-### 7.2 Tier B: Per-MIG Endpoint Worker Shard Queues (`_EndpointShard`)
-* **Bounded Queues**: `asyncio.Queue(maxsize=queue_depth)` per shard enforces strict backpressure.
-* **Concurrency Cap**: `asyncio.Semaphore(max_concurrent=4)` prevents overloading the vLLM KV-cache.
-* **Weighted Load Score Formula**:
-  $$\text{Load Score}_i = \frac{\text{In-Flight Requests}_i + \text{Queue Depth}_i}{\text{Weight}_i}$$
-  * Shard 0 (12 SMs): $\text{Weight} = 3$ ($60\%$ compute capacity).
-  * Shard 1 (8 SMs): $\text{Weight} = 2$ ($40\%$ compute capacity).
-
-### 7.3 Deadlock Prevention & In-Flight Lock Deduplication
-* An atomic `_in_flight: set[str]` lock tracks active camera analyses.
-* If a new scene shift fires on Camera A while Camera A is already in-flight, the frame timestamp is updated in place without duplicate queue generation, preventing queue stampedes.
-
-### 7.4 Cold-Boot Model Warmup & Self-Healing Circuit Breaker
-* During the 60–90s cold-start weight-loading window on boot, `MIGAwareVLMPool` holds requests and returns benign non-crashing payloads (`"verdict": "WARMUP"`).
-* Continuous background health probes (every 5s during warmup, 15s during normal operation) automatically transition shards to active routing upon receiving HTTP `200 OK`.
-
----
-
-## 8. Autonomous Follow-Up Lifecycle
-
-```mermaid
-stateDiagram-v2
-    [*] --> HealthyMonitoring
-    HealthyMonitoring --> IncidentTriggered: DINOv2 Drift >= Threshold
-    
-    IncidentTriggered --> VLM_Analysis: Multi-Frame Temporal Inference
-    
-    state VLM_Analysis {
-        [*] --> ProcessFrames
-        ProcessFrames --> CheckSeverity
-    }
-    
-    CheckSeverity --> LowResolved: Severity == LOW & Safety == OK
-    CheckSeverity --> HighHazard: Severity == HIGH | Safety == DANGER
-    
-    LowResolved --> HealthyMonitoring: Incident Closed & Baseline Reset
-    HighHazard --> ScheduleFollowUp: Spawn Persistent Follow-Up (P2)
-    
-    ScheduleFollowUp --> SleepCadence: Wait 10.0 Seconds
-    SleepCadence --> VLM_Analysis: Re-evaluate Camera Feed
-    
-    ScheduleFollowUp --> MaxCyclesReached: Follow-Up Count > 6
-    MaxCyclesReached --> HealthyMonitoring: Log Unresolved Incident
-```
-
----
-
-## 9. Continuous Health Watchdog & Real-Time Alerting
-
-RapidAlert implements a multi-layer autonomous alerting and diagnostic engine ([`watchdog_emailer.py`](file:///home/clove/RapidAlert/backend/services/watchdog_emailer.py) & [`watchdog.py`](file:///home/clove/RapidAlert/backend/services/watchdog.py)):
-
-### 9.1 Real-Time Critical Incident Criteria
-Immediate executive HTML emails are dispatched with anti-spam deduplication (10-minute cooldown per incident key) and automatic green `[RESOLVED]` emails:
-
-1. **Camera Stream Blackout**: Triggers when $\ge 50\%$ of active feeds have no frame updates for $>15\text{s}$.
-2. **vLLM Inference Cluster Down**: Triggers when all MIG instances report unhealthy after the 90s boot grace period.
-3. **Storage Critical**: Triggers when host storage drops below $5\%$ free disk space.
-4. **Fatal Exceptions**: Hooks into `ErrorTracker.capture_exception` and `capture_error` for `CRITICAL`/`FATAL` events, including full stack trace and caller location.
-
-### 9.2 Hardware Sentinel & Power Outage / Crash Detection
-Using a persistent sentinel file (`data/system_state.json`) and Linux kernel boot time inspection (`/proc/uptime`), RapidAlert mathematically detects:
-
-$$\Delta T_{\text{outage}} = T_{\text{boot}} - T_{\text{last\_heartbeat}}$$
-
-* **Power Outage Recovery** ($T_{\text{host\_boot}} > T_{\text{last\_heartbeat}}$): Physical machine suffered hard power loss or reboot.
-* **Process Crash Recovery** ($T_{\text{host\_boot}} \le T_{\text{last\_heartbeat}}$ and prior state was `RUNNING`): Unexpected process crash or OOM kill.
-* **NVIDIA Thor Host Reboot** (`THOR_SYSTEM_REBOOT`): Clean OS/hardware restart notification.
-* **Application Restart** (`SYSTEM_RESTART`): Graceful service restart notification.
-* **15-Second Rolling Heartbeat**: `heartbeat_tick()` records live timestamps to ensure sub-minute outage duration precision.
-
-### 9.3 24-Hour System Health & Diagnostics Digest
-Triggered automatically every morning at **08:00 AM IST**:
-* Summarizes 24h error log frequency (Critical, Error, Warning).
-* Tallies total analyses, High hazards, and Medium incidents.
-* Details NVDEC vs CPU camera decoder distribution and vLLM shard health.
-* Audits PDF shift reports delivered.
-
----
-
-## 10. Automated Shift Reporting & ReportLab PDF Generation
-
-The reporting engine ([`reporting_service.py`](file:///home/clove/RapidAlert/backend/services/reporting_service.py)) compiles and emails high-resolution PDF intelligence reports:
-
-### 10.1 Shift Boundaries & Delivery
-* **Day Shift**: 06:00 AM – 06:00 PM IST (Triggered at 18:00 IST).
-* **Night Shift**: 06:00 PM – 06:00 AM IST (Triggered at 06:00 IST).
-* **SMTP Delivery**: Asynchronous delivery via Gmail SMTP to `pandalavacarji@gmail.com` and `reportsclove@gmail.com`.
-
-### 10.2 ReportLab Dynamic Auto-Pagination
-* Employs dynamic height calculation to budget page space and inject `PageBreak()` elements safely.
-* Guarantees zero text truncation, zero visual overlap, and crisp layout rendering.
-* Features executive KPI cards, High/Danger incident cards with embedded camera visual evidence, and chronological telemetry logs.
-
-### 10.3 69-Report Rolling Buffer
-* Maintains a circular buffer of **69 shift reports** (~**34.5 days**) in `data/reports/`.
-* Total disk footprint is under **25 MB**, with automatic FIFO pruning on overflow.
-
----
-
-## 11. Structured Error Tracking & Downstream Effect Tracing
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                    RAPIDALERT THREE-TIER DEFENSE SYSTEM                     │
-├─────────────────────────┬─────────────────────────┬─────────────────────────┤
-│  Pre-Flight Auditor     │  Runtime Watchdog       │  Structured Tracker     │
-│ (system_health_audit.py)│ (SystemWatchdog Daemon) │ (error_tracker.py)      │
-├─────────────────────────┼─────────────────────────┼─────────────────────────┤
-│ • Validates all JSON    │ • Checks frame age      │ • Zero silent swallows  │
-│ • Reaps zombie procs    │ • Recycles frozen RTSP  │ • Line & component tags │
-│ • Tests vLLM endpoints  │ • Non-blocking waitpid  │ • Downstream effect log │
-│ • Verifies NVDEC & CUDA │ • Heartbeat probes      │ • WebSocket broadcast   │
-└─────────────────────────┴─────────────────────────┴─────────────────────────┘
-```
-
-* **Zero Silent Swallowing**: Every exception records Error Type, Message, Caller File & Line, Function Name, Camera Name, and **Downstream Operational Effect**.
-* **Dual Persistence**: Memory circular deque (300 records) + SQLite `error_logs` table (WAL mode).
-* **Live Broadcast**: Pushes error records to WebSocket clients for instant HUD display.
-
----
-
-## 12. Frontend Architecture & Multi-Stream Viewport
-
-* **4-Stream Viewport Pagination**: Displays camera cards in a 2×2 grid with pagination pills (`Page 1: 1-4`, `Page 2: 5-7`).
-* **Active Stream Optimization**: Off-screen camera streams suspend WebSocket frame decoding, maintaining $< 4\%$ browser CPU usage across 7+ 4K camera streams.
-* **Camera Theater Modal**: Instant freeze-frame inspection, chronological incident strips, and dynamic prompt tuning.
-* **Shift Reports Modal**: Live report browser, on-demand PDF generation, and in-browser download.
-
----
-
-## 13. REST API Specification
-
-| Method | Endpoint | Description |
+| Subsystem | Metric | Jetson AGX Thor Performance |
 | :--- | :--- | :--- |
-| `GET` | `/api/status` | System operational summary, feed health, and vLLM status |
-| `GET` | `/api/cameras` | Active camera list and ingestion backend status |
-| `GET` | `/api/drifts` | Real-time DINOv2 visual drift scores across all feeds |
-| `GET` | `/api/alerts` | Historical incident feed and security alerts |
-| `GET` | `/api/errors` | Structured error logs and stack traces |
-| `GET` | `/api/errors/summary` | Error aggregation by component, severity, and effect |
-| `GET` | `/api/metrics` | Hardware telemetry (GPU power, memory, temperatures) |
-| `GET` | `/api/reports` | List of stored shift intelligence PDF reports |
-| `GET` | `/api/reports/{id}/pdf`| Download specific shift report PDF |
-| `POST` | `/api/reports/generate`| Generate custom shift report on-demand |
-| `GET` | `/api/reports/stats` | Reporting schedule, buffer status, and next run time |
-| `GET` | `/api/watchdog/status` | Health watchdog telemetry and 24h diagnostic snapshot |
-| `POST` | `/api/watchdog/test-alert` | Dispatch a test critical incident alert email (Admin) |
-| `POST` | `/api/watchdog/send-daily-digest` | Force compile & dispatch 24h health digest (Admin) |
-| `WS` | `/ws` | Real-time binary/JSON telemetry, alerts, and 10 FPS video |
-
----
-
-## 14. Verification, Logging & Operations
-
-```bash
-# Launch RapidAlert
-./run.sh
-
-# Graceful Stop
-./stop.sh
-
-# Run Pre-Flight System Health Audit
-python3 scripts/system_health_audit.py --fix
-
-# Inspect Live Logs
-tail -f logs/app.log
-tail -f logs/system_events.log
-tail -f logs/errors.log
-```
+| **DINOv2 Feature Extractor** | Latency per frame | **8.5 ms** (CPU / CUDA) |
+| **Cosmos Reason2 8B Inference** | 4-Frame Temporal Latency | **1.35 s – 1.85 s** (NVFP4 on MIG) |
+| **Direct Hardware HLS Stream** | Client-side playback | **30 FPS** @ 0% Server CPU |
+| **MIG Ingestion Parallelism** | Concurrent VLM Streams | **8 Active Requests** (4 per MIG shard) |
+| **Camera Ingest Capacity** | Stream Concurrency | **7× 1080p Streams** simultaneously |
+| **Watchdog Alert Dispatch** | Mean Notification Delay | **< 1.5 s** via Async SMTP |

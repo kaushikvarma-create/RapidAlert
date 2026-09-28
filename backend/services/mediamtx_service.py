@@ -53,9 +53,7 @@ class MediaMTXService:
             paths_config[slug] = {
                 "source": url,
                 "sourceProtocol": "tcp",
-                "sourceOnDemand": True,
-                "sourceOnDemandStartTimeout": "15s",
-                "sourceOnDemandCloseAfter": "60s",
+                "sourceOnDemand": False,
             }
 
         config_dict = {
@@ -64,14 +62,19 @@ class MediaMTXService:
             "api": True,
             "apiAddress": "127.0.0.1:9997",
             "rtspAddress": ":8554",
+            "hls": True,
             "hlsAddress": ":8888",
-            "webrtc": False,
-            "rtpAddress": ":8100",
-            "rtcpAddress": ":8101",
+            "hlsAllowOrigin": "*",
             "hlsVariant": "lowLatency",
-            "hlsSegmentCount": 7,
+            "hlsSegmentCount": 5,
             "hlsSegmentDuration": "1s",
             "hlsPartDuration": "200ms",
+            "webrtc": True,
+            "webrtcAddress": ":8889",
+            "webrtcAllowOrigin": "*",
+            "webrtcHandshakeTimeout": "10s",
+            "rtpAddress": ":8100",
+            "rtcpAddress": ":8101",
             "paths": paths_config,
         }
 

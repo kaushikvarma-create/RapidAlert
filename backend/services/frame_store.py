@@ -24,67 +24,69 @@ class FrameStore:
         self._store: dict[str, collections.deque[Tuple[np.ndarray, float]]] = collections.defaultdict(
             lambda: collections.deque(maxlen=300)
         )
-        self._latest_jpeg: dict[str, Tuple[float, bytes, int, int]] = {}
-        self._subscribers: dict[str, Set[asyncio.Queue]] = collections.defaultdict(set)
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._frame_seq: dict[str, int] = collections.defaultdict(int)
+        self._latest_jpeg: dict[str, Tuple[int, float, bytes, int, int]] = {}  # (seq, ts, bytes, w, q)
+        self._condition = threading.Condition()
         self._lock = threading.Lock()
         self.max_w = max_w
         self.jpeg_quality = jpeg_quality
-
-    def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Binds the FastAPI asyncio event loop for threadsafe stream push notifications."""
-        self._loop = loop
-
-    def subscribe(self, cam_name: str) -> asyncio.Queue:
-        """Subscribes an active client stream to instant push frame events (zero polling latency)."""
-        q: asyncio.Queue = asyncio.Queue(maxsize=2)
-        with self._lock:
-            self._subscribers[cam_name].add(q)
-            cached = self._latest_jpeg.get(cam_name)
-            if cached is not None:
-                try:
-                    q.put_nowait(cached[1])
-                except Exception:
-                    pass
-        return q
-
-    def unsubscribe(self, cam_name: str, q: asyncio.Queue) -> None:
-        """Removes a client stream subscription."""
-        with self._lock:
-            if cam_name in self._subscribers:
-                self._subscribers[cam_name].discard(q)
 
     def put(self, cam_name: str, frame: np.ndarray) -> None:
         if frame is None or frame.size == 0:
             return
         ts = time.monotonic()
-        with self._lock:
+        with self._condition:
             self._store[cam_name].append((frame, ts))
-            subs = list(self._subscribers.get(cam_name, []))
+            self._frame_seq[cam_name] += 1
+            self._condition.notify_all()
 
-        # If any client is actively streaming this camera, encode ONCE and push immediately
-        if subs:
-            try:
-                ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 78])
-                if ok:
-                    raw_bytes = buf.tobytes()
-                    with self._lock:
-                        self._latest_jpeg[cam_name] = (ts, raw_bytes, self.max_w, 78)
-                    if self._loop and self._loop.is_running():
-                        for q in subs:
-                            def _push(queue=q, data=raw_bytes):
-                                if queue.full():
-                                    try:
-                                        queue.get_nowait()
-                                    except Exception:
-                                        pass
-                                try:
-                                    queue.put_nowait(data)
-                                except Exception:
-                                    pass
-                            self._loop.call_soon_threadsafe(_push)
-            except Exception:
-                pass
+    def get_frame_since(
+        self,
+        cam_name: str,
+        last_seq: int,
+        timeout: float = 1.0,
+        max_w: Optional[int] = None,
+        quality: Optional[int] = None,
+    ) -> Optional[Tuple[int, bytes]]:
+        """
+        Thread-safe blocking wait for next camera frame sequence.
+        Returns (seq, jpeg_bytes) immediately if new frame is ready, or waits up to timeout seconds.
+        """
+        mw = max_w if max_w is not None else 1280
+        q = quality if quality is not None else 78
+
+        with self._condition:
+            cur_seq = self._frame_seq.get(cam_name, 0)
+            if cur_seq <= last_seq:
+                self._condition.wait(timeout=timeout)
+                cur_seq = self._frame_seq.get(cam_name, 0)
+
+            if cur_seq <= last_seq or cam_name not in self._store or not self._store[cam_name]:
+                return None
+
+            # Fast path: check if this sequence is already cached
+            cached = self._latest_jpeg.get(cam_name)
+            if cached is not None and cached[0] == cur_seq and cached[3] == mw and cached[4] == q:
+                return cur_seq, cached[2]
+
+            frame, ts = self._store[cam_name][-1]
+
+        # Single-pass encode outside condition lock
+        try:
+            h, w = frame.shape[:2]
+            if w > mw:
+                resized = cv2.resize(frame, (mw, int(h * mw / w)), interpolation=cv2.INTER_LINEAR)
+            else:
+                resized = frame
+            ok, buf = cv2.imencode(".jpg", resized, [cv2.IMWRITE_JPEG_QUALITY, q, cv2.IMWRITE_JPEG_OPTIMIZE, 0])
+            if ok:
+                raw_bytes = buf.tobytes()
+                with self._condition:
+                    self._latest_jpeg[cam_name] = (cur_seq, ts, raw_bytes, mw, q)
+                return cur_seq, raw_bytes
+        except Exception:
+            pass
+        return None
 
     def get_latest(self, cam_name: str) -> Optional[Tuple[np.ndarray, float]]:
         with self._lock:

@@ -41,6 +41,7 @@ const App = {
     this._fetchActiveStreams();
     this.connectWS();
     this.startLivenessWatchdog();
+    this._startStreamWatchdog();
     this.startTimestampTicker();
   },
 
@@ -688,7 +689,7 @@ const App = {
   // ════════════════════════════════════════════════════════════
   //  Camera Grid Rendering & 4-Stream Pagination
   // ════════════════════════════════════════════════════════════
-  _renderCameraGrid() {
+  _renderCameraGrid(forceRefresh = false) {
     const grid = document.getElementById('camera-grid');
     const empty = document.getElementById('empty-camera-grid');
     const badge = document.getElementById('cams-active-badge');
@@ -709,7 +710,7 @@ const App = {
       }
     }
 
-    // 2. Compute pagination bounds (Max 4 streams per page)
+    // 2. Compute pagination bounds
     const totalCams = eligibleCams.length;
     const totalPages = Math.max(1, Math.ceil(totalCams / this.camsPerPage));
     if (this.camCurrentPage > totalPages) this.camCurrentPage = totalPages;
@@ -719,7 +720,7 @@ const App = {
     const endIndex = Math.min(startIndex + this.camsPerPage, totalCams);
     const visibleOnPage = new Set(eligibleCams.slice(startIndex, endIndex));
 
-    // 3. Phase 1: Immediately detach/abort all streams for cameras NOT on this page or if modal is active
+    // 3. Phase 1: Detach streams for cameras NOT on this page or if modal is active
     for (const name of camNames) {
       const isVisible = visibleOnPage.has(name);
       const isEnabled = this.cameras[name]?.config?.enabled !== false;
@@ -731,15 +732,11 @@ const App = {
       }
 
       if (!shouldStream) {
-        const cardImg = document.getElementById(`cam-card-img-${this._eid(name)}`);
-        if (cardImg && (cardImg.src.includes('/stream') || cardImg.src.startsWith('http'))) {
-          cardImg.src = '';
-          cardImg.removeAttribute('src');
-        }
+        this._detachDirectStream(name);
       }
     }
 
-    // 4. Phase 2: Attach real-time live MJPEG streams ONLY for visible cameras on active page
+    // 4. Phase 2: Attach hardware-accelerated streams for visible cameras on active page
     for (const name of camNames) {
       this._renderCamCard(name);
       const isVisible = visibleOnPage.has(name);
@@ -747,21 +744,7 @@ const App = {
       const shouldStream = isVisible && isEnabled && !this.activeCamModal;
 
       if (shouldStream) {
-        const cardImg = document.getElementById(`cam-card-img-${this._eid(name)}`);
-        if (cardImg) {
-          const streamUrl = `/api/cameras/${encodeURIComponent(name)}/stream?width=1280&quality=78`;
-          if (!cardImg.src || !cardImg.src.includes(`/api/cameras/${encodeURIComponent(name)}/stream`)) {
-            cardImg.src = streamUrl;
-          }
-          cardImg.onerror = () => {
-            setTimeout(() => {
-              if (cardImg.isConnected && visibleOnPage.has(name) && !this.activeCamModal) {
-                cardImg.src = streamUrl + '&retry=' + Date.now();
-              }
-            }, 1500);
-          };
-          cardImg.style.opacity = '1';
-        }
+        this._attachDirectStream(name, forceRefresh);
       }
     }
 
@@ -779,6 +762,106 @@ const App = {
 
     // 7. Refresh Active Follow-Up Observation Banner
     this._renderFollowupObservationBanner();
+  },
+
+  _getCamSlug(name) {
+    return (name || '').trim().toLowerCase().replace(/ /g, '_').replace(/-/g, '_');
+  },
+
+  _attachDirectStream(name, forceRefresh = false) {
+    const eid = this._eid(name);
+    const cardImg = document.getElementById(`cam-card-img-${eid}`);
+    if (!cardImg) return;
+
+    const streamUrl = `/api/cameras/${encodeURIComponent(name)}/stream?width=1280&quality=78`;
+    const curSrc = cardImg.getAttribute('src') || '';
+    if (forceRefresh || !curSrc || !curSrc.includes(`/api/cameras/${encodeURIComponent(name)}/stream`)) {
+      cardImg.src = `${streamUrl}&t=${Date.now()}`;
+    }
+    cardImg.onerror = () => {
+      setTimeout(() => {
+        if (cardImg.isConnected && this._isCamOnCurrentPage(name) && !this.activeCamModal) {
+          cardImg.src = `${streamUrl}&retry=${Date.now()}`;
+        }
+      }, 1500);
+    };
+    cardImg.style.opacity = '1';
+  },
+
+  _detachDirectStream(name) {
+    const eid = this._eid(name);
+    const cardImg = document.getElementById(`cam-card-img-${eid}`);
+    if (cardImg && (cardImg.src.includes('/stream') || cardImg.src.startsWith('http'))) {
+      cardImg.src = '';
+      cardImg.removeAttribute('src');
+    }
+  },
+
+  resyncAllStreams() {
+    const btn = document.getElementById('btn-resync-streams');
+    if (btn) btn.classList.add('spinning');
+
+    const eligibleCams = Object.keys(this.cameras).filter(n => this._shouldShowCamCard(n));
+    const startIndex = (this.camCurrentPage - 1) * this.camsPerPage;
+    const endIndex = Math.min(startIndex + this.camsPerPage, eligibleCams.length);
+    const visibleOnPage = eligibleCams.slice(startIndex, endIndex);
+
+    for (const name of visibleOnPage) {
+      this._attachDirectStream(name, true);
+    }
+
+    this._showToast(`🔄 Resynced ${visibleOnPage.length} live camera stream(s)`, 'ok');
+
+    setTimeout(() => {
+      if (btn) btn.classList.remove('spinning');
+    }, 800);
+  },
+
+  _startStreamWatchdog() {
+    if (this._streamWatchdogTimer) clearInterval(this._streamWatchdogTimer);
+
+    this._streamWatchdogTimer = setInterval(() => {
+      // If modal is active, don't interrupt
+      if (this.activeCamModal) return;
+
+      const eligibleCams = Object.keys(this.cameras).filter(n => this._shouldShowCamCard(n));
+      const startIndex = (this.camCurrentPage - 1) * this.camsPerPage;
+      const endIndex = Math.min(startIndex + this.camsPerPage, eligibleCams.length);
+      const visibleOnPage = eligibleCams.slice(startIndex, endIndex);
+
+      for (const name of visibleOnPage) {
+        if (this.cameras[name]?.config?.enabled === false) continue;
+
+        const eid = this._eid(name);
+        const cardImg = document.getElementById(`cam-card-img-${eid}`);
+        if (cardImg) {
+          const curSrc = cardImg.getAttribute('src') || '';
+          if (!curSrc || !curSrc.includes('/stream')) {
+            this._attachDirectStream(name, true);
+          }
+        }
+      }
+    }, 4000);
+  },
+
+  _detachDirectStream(name) {
+    const eid = this._eid(name);
+    const videoEl = document.getElementById(`cam-card-video-${eid}`);
+    const cardImg = document.getElementById(`cam-card-img-${eid}`);
+
+    if (this._hlsInstances && this._hlsInstances[name]) {
+      try { this._hlsInstances[name].destroy(); } catch (e) {}
+      delete this._hlsInstances[name];
+    }
+    if (videoEl) {
+      videoEl.removeAttribute('src');
+      videoEl.load();
+      videoEl.style.display = 'none';
+    }
+    if (cardImg) {
+      cardImg.src = '';
+      cardImg.removeAttribute('src');
+    }
   },
 
   _renderPagination(totalCams, totalPages, startIndex, endIndex) {
@@ -866,19 +949,9 @@ const App = {
   },
 
   setCamPage(page) {
-    // 1. Immediately abort all active stream requests for existing cards so browser socket pool is freed up
-    for (const name of Object.keys(this.cameras || {})) {
-      const eid = this._eid(name);
-      const cardImg = document.getElementById(`cam-card-img-${eid}`);
-      if (cardImg && (cardImg.src.includes('/stream') || cardImg.src.startsWith('http'))) {
-        cardImg.src = '';
-        cardImg.removeAttribute('src');
-      }
-    }
-
     this.camCurrentPage = page;
     this._updateLayoutUi();
-    this._renderCameraGrid();
+    this._renderCameraGrid(true);
   },
 
   _isCamOnCurrentPage(name) {
@@ -1171,11 +1244,9 @@ const App = {
       e2eEl.style.color = topResult?.e2e_latency != null ? 'var(--cyan)' : 'var(--text-3)';
     }
 
-    // Frame thumbnail rendering
-    const cardImg = document.getElementById(`cam-card-img-${eid}`);
-    if (cardImg && this.cameras[name]?.thumbB64 && (!cardImg.src || !cardImg.src.startsWith('data:'))) {
-      cardImg.src = `data:image/jpeg;base64,${this.cameras[name].thumbB64}`;
-      cardImg.style.opacity = '1';
+    // Ensure direct hardware live stream is active for visible cameras
+    if (isVisible && isEnabled && !this.activeCamModal) {
+      this._attachDirectStream(name);
     }
 
     // If modal is open for this camera, refresh its live frame/stats
@@ -2134,15 +2205,6 @@ const App = {
     this.modalViewMode = (selectedEventIdx !== null) ? 'event' : 'live';
     this.selectedEventIdx = selectedEventIdx;
 
-    // Immediately detach all background grid streams so ONLY the modal stream runs
-    for (const camName of Object.keys(this.cameras || {})) {
-      const cardImg = document.getElementById(`cam-card-img-${this._eid(camName)}`);
-      if (cardImg && (cardImg.src.includes('/stream') || cardImg.src.startsWith('http'))) {
-        cardImg.src = '';
-        cardImg.removeAttribute('src');
-      }
-    }
-
     const modal = document.getElementById('cam-modal');
     const backdrop = document.getElementById('modal-backdrop');
     if (!modal || !backdrop) return;
@@ -2368,7 +2430,7 @@ const App = {
       img.removeAttribute('src');
     }
     // Reconnect ONLY active page cards cleanly
-    this._renderCameraGrid();
+    this._renderCameraGrid(true);
   },
 
   // ════════════════════════════════════════════════════════════
@@ -3609,6 +3671,11 @@ const App = {
         const cams = parseInt(btn.dataset.cams, 10);
         this.setLayout(cams);
       });
+    });
+
+    // Quick Live Stream Resync Button
+    document.getElementById('btn-resync-streams')?.addEventListener('click', () => {
+      this.resyncAllStreams();
     });
 
     // Camera pagination navigation (multicam_behavior_test style)
