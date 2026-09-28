@@ -354,7 +354,7 @@ class WatchdogEmailer:
             action_box_style = "background: #f0fdf4; border-left: 4px solid #16a34a; padding: 10px 14px; border-radius: 0 6px 6px 0;"
             action_box_title = "<strong style='color: #15803d;'>✅ Status & Operation:</strong>"
             action_box_text_style = "color: #166534; font-size: 11.5px; margin-top: 3px;"
-            subject_prefix = "⚡ [RAPIDALERT]" if "THOR" in event_type or "POWER" in event_type else "🔄 [RAPIDALERT]"
+            subject_prefix = "⚡ [THE SENTRY]" if "THOR" in event_type or "POWER" in event_type else "🔄 [THE SENTRY]"
         else:
             border_color = "#dc2626"
             hdr_bg = "linear-gradient(135deg, #7f1d1d 0%, #991b1b 100%)"
@@ -362,7 +362,7 @@ class WatchdogEmailer:
             action_box_style = "background: #fff7ed; border-left: 4px solid #ea580c; padding: 10px 14px; border-radius: 0 6px 6px 0;"
             action_box_title = "<strong style='color: #9a3412;'>🛠️ Recommended Action:</strong>"
             action_box_text_style = "color: #c2410c; font-size: 11.5px; margin-top: 3px;"
-            subject_prefix = "🚨 [RAPIDALERT CRITICAL]"
+            subject_prefix = "🚨 [THE SENTRY CRITICAL]"
 
         action_html = f"""
         <div style='margin-top: 14px; {action_box_style}'>
@@ -403,14 +403,14 @@ class WatchdogEmailer:
 
             <div style='margin-top: 20px; text-align: center;'>
                 <a href='http://localhost:7000' style='background: #0f172a; color: #ffffff; text-decoration: none; padding: 10px 20px; border-radius: 6px; font-size: 12px; font-weight: 700; display: inline-block;'>
-                    🖥️ Open RapidAlert Dashboard
+                    🖥️ Open The Sentry Dashboard
                 </a>
             </div>
         </div>
 
         <!-- Footer -->
         <div style='background: #f8fafc; padding: 12px 24px; border-top: 1px solid #e2e8f0; font-size: 10px; color: #94a3b8; text-align: center;'>
-            Automated Alert from RapidAlert Continuous Health Watchdog • Clove HQ
+            Automated Alert from The Sentry Continuous Health Watchdog • Clove Technologies
         </div>
     </div>
 </body>
@@ -420,7 +420,7 @@ class WatchdogEmailer:
         msg["Subject"] = f"{subject_prefix} {title} — {ts_str}"
         msg["From"] = sender_email
         msg["To"] = ", ".join(recipients)
-        msg.set_content(f"RapidAlert System Event: {title}\nTime: {ts_str}\n\n{message}\n\nUptime: {uptime_str}")
+        msg.set_content(f"The Sentry System Event: {title}\nTime: {ts_str}\n\n{message}\n\nUptime: {uptime_str}")
         msg.add_alternative(html_body, subtype="html")
 
         try:
@@ -689,24 +689,24 @@ class WatchdogEmailer:
 
             <div style='margin-top: 20px; text-align: center;'>
                 <a href='http://localhost:7000' style='background: #0f172a; color: #ffffff; text-decoration: none; padding: 10px 20px; border-radius: 6px; font-size: 12px; font-weight: 700; display: inline-block;'>
-                    🖥️ Open RapidAlert Dashboard
+                    🖥️ Open The Sentry Dashboard
                 </a>
             </div>
         </div>
 
         <!-- Footer -->
         <div style='background: #f8fafc; padding: 12px 24px; border-top: 1px solid #e2e8f0; font-size: 10px; color: #94a3b8; text-align: center;'>
-            RapidAlert Autonomous Surveillance Watchdog • Jetson Thor Platform • Clove HQ
+            The Sentry Autonomous Surveillance Watchdog • Jetson Thor Platform • Clove Technologies
         </div>
     </div>
 </body>
 </html>"""
 
         msg = EmailMessage()
-        msg["Subject"] = f"📊 [RapidAlert] 24-Hour System Health & Diagnostics Digest — {date_str}"
+        msg["Subject"] = f"📊 [The Sentry] 24-Hour System Health & Diagnostics Digest — {date_str}"
         msg["From"] = sender_email
         msg["To"] = ", ".join(recipients)
-        msg.set_content(f"RapidAlert 24-Hour System Health Digest for {date_str}\nUptime: {summary['uptime']}\nTotal Errors: {total_errs}\nAI Analyses: {summary['total_analyses_24h']}")
+        msg.set_content(f"The Sentry 24-Hour System Health Digest for {date_str}\nUptime: {summary['uptime']}\nTotal Errors: {total_errs}\nAI Analyses: {summary['total_analyses_24h']}")
         msg.add_alternative(html_body, subtype="html")
 
         try:

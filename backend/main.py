@@ -321,9 +321,9 @@ async def _config_sync_loop() -> None:
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(
-    title="RapidAlert",
+    title="The Sentry — CLOVE HQ Site Intelligence",
     version="2.0.0",
-    description="High-Speed Hybrid VLM Surveillance & Incident Detection Engine",
+    description="High-Speed Hybrid VLM Surveillance & Incident Detection Engine (Clove Technologies)",
     lifespan=lifespan,
 )
 

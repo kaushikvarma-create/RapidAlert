@@ -738,11 +738,11 @@ class ReportingService:
 <body style='margin: 0; padding: 20px 0; background-color: #f1f5f9; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;'>
     <div style='max-width: 620px; margin: 0 auto; background-color: #ffffff; border-radius: 10px; overflow: hidden; border: 1px solid #cbd5e1;'>
         <div style='background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); padding: 24px 22px; color: #ffffff;'>
-            <div style='font-size: 10px; font-weight: 700; color: #38bdf8; text-transform: uppercase; letter-spacing: 1px;'>CLOVE HQ SURVEILLANCE • RAPIDALERT</div>
+            <div style='font-size: 10px; font-weight: 700; color: #ea6f3e; text-transform: uppercase; letter-spacing: 1px;'>CLOVE HQ SURVEILLANCE • THE SENTRY</div>
             <h1 style='margin: 6px 0 10px 0; font-size: 18px; font-weight: 800; color: #ffffff;'>{shift_label} Site Intelligence Report</h1>
             <div style='font-size: 11px; color: #94a3b8;'>
                 <span style='background: rgba(255,255,255,0.12); color: #f8fafc; padding: 3px 8px; border-radius: 4px; margin-right: 6px;'>📅 {date_str}</span>
-                <span style='background: rgba(56,189,248,0.2); color: #38bdf8; padding: 3px 8px; border-radius: 4px;'>⏱ {timeframe_str}</span>
+                <span style='background: rgba(234,111,62,0.2); color: #ea6f3e; padding: 3px 8px; border-radius: 4px;'>⏱ {timeframe_str}</span>
             </div>
         </div>
         <div style='padding: 20px 22px;'>
@@ -793,17 +793,17 @@ class ReportingService:
             </div>
         </div>
         <div style='background: #f8fafc; padding: 12px 22px; border-top: 1px solid #e2e8f0; font-size: 10px; color: #94a3b8; text-align: center;'>
-            Generated automatically by RapidAlert AI Surveillance Engine • Jetson Thor Platform
+            Generated automatically by The Sentry AI Surveillance Engine (Clove Technologies) • Jetson Thor Platform
         </div>
     </div>
 </body>
 </html>"""
 
             msg = EmailMessage()
-            msg["Subject"] = f"[RapidAlert] {shift_label} Site Intelligence Report — {date_str}"
+            msg["Subject"] = f"[The Sentry] {shift_label} Site Intelligence Report — {date_str}"
             msg["From"] = sender_email
             msg["To"] = ", ".join(recipients)
-            msg.set_content("Please review the attached RapidAlert Site Intelligence Shift Report.")
+            msg.set_content("Please review the attached Site Intelligence Shift Report from The Sentry.")
             msg.add_alternative(html_body, subtype="html")
 
             with open(pdf_path, "rb") as f:
