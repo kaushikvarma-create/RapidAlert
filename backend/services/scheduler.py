@@ -405,8 +405,8 @@ class DeadlineScheduler:
             or current_safety == "DANGER"
         )
 
-        # 1. If this was an initial trigger event (not a follow-up), ONLY schedule follow-up cycle 1 if severity is elevated!
-        if is_incident and not is_followup and alert and is_elevated:
+        # 1. If this was an initial trigger event (or a heartbeat that found a HIGH severity issue), schedule follow-up cycle 1!
+        if not is_followup and alert and is_elevated:
             evt_id = alert["id"]
             inc_id = alert.get("incident_id")
             fu_task = asyncio.create_task(

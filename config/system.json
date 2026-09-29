@@ -7,7 +7,7 @@
       "mig_profile": "2g",
       "sm_count": 12,
       "weight": 3,
-      "max_concurrent": 4,
+      "max_concurrent": 2,
       "queue_depth": 12,
       "gpu_utilization": 0.33
     },
@@ -18,7 +18,7 @@
       "mig_profile": "1g",
       "sm_count": 8,
       "weight": 2,
-      "max_concurrent": 4,
+      "max_concurrent": 1,
       "queue_depth": 12,
       "gpu_utilization": 0.33
     }
@@ -40,7 +40,7 @@
   "default_threshold": 0.034,
   "dino_major_threshold": 0.06,
   "dino_minor_threshold": 0.03,
-  "default_heartbeat_sec": 35.0,
+  "default_heartbeat_sec": 90.0,
   "semantic_interval": 0.5,
   "event_cooldown": 15.0,
   "followup_interval_sec": 10.0,

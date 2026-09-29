@@ -232,6 +232,7 @@ class _EndpointShard:
             ],
             "max_tokens":  256,
             "temperature": 0.5,
+            "repetition_penalty": 1.15,
             "chat_template_kwargs": {"enable_thinking": False},
         }
 
@@ -674,7 +675,6 @@ def _parse_response(raw: str, cam_name: str) -> dict:
             if v_markers not in ("[]", "None", "", "['']", '[""]'):
                 result["safety"] = "DANGER"
                 result["severity"] = "HIGH"
-                result["observation"] = f"[PROCEDURE CHECKLIST OVERRIDE: {v_markers}] " + result.get("observation", "")
                 
             return result
     except Exception:
@@ -700,7 +700,6 @@ def _parse_response(raw: str, cam_name: str) -> dict:
             if v_markers not in ("[]", "None", "", "['']", '[""]'):
                 result["safety"] = "DANGER"
                 result["severity"] = "HIGH"
-                result["observation"] = f"[PROCEDURE CHECKLIST OVERRIDE: {v_markers}] " + result.get("observation", "")
 
             return result
     except Exception:
