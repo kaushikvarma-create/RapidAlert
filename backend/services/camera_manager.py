@@ -103,10 +103,13 @@ class CameraThread(threading.Thread):
             WARMUP_MAX_ATTEMPTS = 30 if is_hw else 15
 
             while not self.stop_event.is_set():
-                if is_hw:
-                    ok, frame = cap.read(timeout_sec=CAMERA_READ_TIMEOUT_SEC)
-                else:
-                    ok, frame = cap.read()
+                try:
+                    if is_hw:
+                        ok, frame = cap.read(timeout_sec=CAMERA_READ_TIMEOUT_SEC)
+                    else:
+                        ok, frame = cap.read()
+                except Exception as exc:
+                    ok, frame = False, None
 
                 if ok and frame is not None:
                     self.frame_store.put(self.cam_name, frame)
@@ -185,8 +188,17 @@ class CameraManager:
             return {name: thread.connected_mode for name, thread in self._threads.items()}
 
     def get_config(self) -> list[dict]:
+        self.sync()
         with self._lock:
-            return list(self._config)
+            return [dict(c) for c in self._config]
+
+    def get_cam(self, name: str) -> Optional[dict]:
+        self.sync()
+        with self._lock:
+            for c in self._config:
+                if c.get("name") == name:
+                    return dict(c)
+        return None
 
     def sync(self) -> bool:
         """Check cameras.json for changes and apply them. Returns True if changed."""
@@ -200,7 +212,7 @@ class CameraManager:
 
         self._config_mtime = mtime
         try:
-            with open(self.config_path) as f:
+            with open(self.config_path, "r", encoding="utf-8") as f:
                 cameras: list[dict] = json.load(f)
         except Exception as e:
             error_tracker.capture_exception(

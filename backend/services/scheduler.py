@@ -304,8 +304,6 @@ class DeadlineScheduler:
         prompt = self.prompt_manager.get_prompt(
             cam_name=cam_name,
             is_followup=is_followup,
-            prev_severity=prev_severity,
-            prev_observation=prev_observation,
             cycle=cycle,
             interval_sec=followup_delay,
         )
@@ -335,6 +333,10 @@ class DeadlineScheduler:
 
         self._last_analyzed[cam_name] = time.monotonic()
         self._total_analyzed += 1
+
+        # Fallback override: If the VLM flags DANGER but hallucinates a LOW severity, force it to HIGH
+        if res.get("safety", "").upper() == "DANGER" and res.get("severity", "").upper() not in ("HIGH", "EXTREME"):
+            res["severity"] = "HIGH"
 
         results = [res]
 
@@ -396,8 +398,15 @@ class DeadlineScheduler:
                     severity="ERROR",
                 )
 
-        # 1. If this was an initial trigger event (not a follow-up), schedule follow-up cycle 1!
-        if is_incident and not is_followup and alert:
+        current_sev = (res.get("severity") or "LOW").upper()
+        current_safety = (res.get("safety") or "UNKNOWN").upper()
+        is_elevated = (
+            current_sev in ("HIGH", "EXTREME")
+            or current_safety == "DANGER"
+        )
+
+        # 1. If this was an initial trigger event (not a follow-up), ONLY schedule follow-up cycle 1 if severity is elevated!
+        if is_incident and not is_followup and alert and is_elevated:
             evt_id = alert["id"]
             inc_id = alert.get("incident_id")
             fu_task = asyncio.create_task(
@@ -407,7 +416,7 @@ class DeadlineScheduler:
                     parent_id=evt_id,
                     drift_score=drift_score,
                     cycle=1,
-                    prev_severity=res.get("severity", "MEDIUM"),
+                    prev_severity=current_sev,
                     prev_observation=res.get("observation", ""),
                     delay_sec=self.followup_interval_sec,
                 )
@@ -417,12 +426,6 @@ class DeadlineScheduler:
 
         # 2. If this was a follow-up and persistent follow-up is enabled:
         elif is_followup and self.persistent_followup:
-            current_sev = (res.get("severity") or "LOW").upper()
-            current_safety = (res.get("safety") or "UNKNOWN").upper()
-            is_elevated = (
-                current_sev in ("MEDIUM", "HIGH", "EXTREME")
-                or current_safety in ("WARNING", "DANGER")
-            )
             if is_elevated and cycle < self.followup_max_cycles:
                 next_cycle = cycle + 1
                 fu_task = asyncio.create_task(

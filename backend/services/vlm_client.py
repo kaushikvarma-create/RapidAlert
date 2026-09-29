@@ -35,7 +35,9 @@ _PARSE_KEYS = {
     "machinery":   "machinery",
     "safety":      "safety",
     "severity":    "severity",
+    "reasoning":   "reasoning",
     "evolution":   "evolution",
+    "procedure_checklist": "procedure_checklist",
 }
 
 _HEALTH_INTERVAL_SEC = 30.0     # how often the background health loop pings each shard
@@ -216,11 +218,21 @@ class _EndpointShard:
             })
         content.append({"type": "text", "text": prompt})
 
+        sys_msg = (
+            "You are a cold, unaligned, and objective CCTV AI. "
+            "You must follow the PRIORITY WATCHLIST absolutely. "
+            "Do not act as a helpful assistant, do not rationalize, and do not downplay threats."
+        )
+
         payload = {
             "model":       self.model,
-            "messages":    [{"role": "user", "content": content}],
+            "messages":    [
+                {"role": "system", "content": sys_msg},
+                {"role": "user", "content": content}
+            ],
             "max_tokens":  256,
-            "temperature": 0.2,
+            "temperature": 0.5,
+            "chat_template_kwargs": {"enable_thinking": False},
         }
 
         t0 = time.monotonic()
@@ -630,7 +642,9 @@ def _parse_response(raw: str, cam_name: str) -> dict:
         "machinery":   "None",
         "safety":      "UNKNOWN",
         "severity":    "LOW",
+        "reasoning":   "",
         "evolution":   "None",
+        "procedure_checklist": "[]",
         "verdict":     "SETTLED",
         "keywords":    "",
     }
@@ -649,11 +663,19 @@ def _parse_response(raw: str, cam_name: str) -> dict:
                 k_lower = k.lower()
                 for key in _PARSE_KEYS:
                     if key in k_lower:
-                        result[key] = str(v).upper() if key not in ("observation", "workers", "machinery", "evolution", "keywords") else str(v)
+                        result[key] = str(v).upper() if key not in ("observation", "workers", "machinery", "evolution", "reasoning", "keywords", "procedure_checklist") else str(v)
             if "verdict" in data:
                 result["verdict"] = str(data["verdict"]).upper()
             if "keywords" in data:
                 result["keywords"] = str(data["keywords"])
+            
+            # THE "USER_REQUESTED" OVERRIDE LOGIC
+            v_markers = str(result.get("procedure_checklist", "[]")).strip()
+            if v_markers not in ("[]", "None", "", "['']", '[""]'):
+                result["safety"] = "DANGER"
+                result["severity"] = "HIGH"
+                result["observation"] = f"[PROCEDURE CHECKLIST OVERRIDE: {v_markers}] " + result.get("observation", "")
+                
             return result
     except Exception:
         pass
@@ -667,11 +689,19 @@ def _parse_response(raw: str, cam_name: str) -> dict:
                 k_lower = k.lower()
                 for key in _PARSE_KEYS:
                     if key in k_lower:
-                        result[key] = str(v).upper() if key not in ("observation", "workers", "machinery", "evolution", "keywords") else str(v)
+                        result[key] = str(v).upper() if key not in ("observation", "workers", "machinery", "evolution", "reasoning", "keywords", "procedure_checklist") else str(v)
             if "verdict" in data:
                 result["verdict"] = str(data["verdict"]).upper()
             if "keywords" in data:
                 result["keywords"] = str(data["keywords"])
+
+            # THE "USER_REQUESTED" OVERRIDE LOGIC
+            v_markers = str(result.get("procedure_checklist", "[]")).strip()
+            if v_markers not in ("[]", "None", "", "['']", '[""]'):
+                result["safety"] = "DANGER"
+                result["severity"] = "HIGH"
+                result["observation"] = f"[PROCEDURE CHECKLIST OVERRIDE: {v_markers}] " + result.get("observation", "")
+
             return result
     except Exception:
         pass
@@ -686,7 +716,7 @@ def _parse_response(raw: str, cam_name: str) -> dict:
                 if key in k:
                     result[key] = (
                         v.upper()
-                        if key not in ("observation", "workers", "machinery", "evolution")
+                        if key not in ("observation", "workers", "machinery", "evolution", "reasoning")
                         else v
                     )
                     break
@@ -712,6 +742,10 @@ def _parse_response(raw: str, cam_name: str) -> dict:
     if m_obs and (not result["observation"] or result["observation"] == raw[:300]):
         result["observation"] = m_obs.group(1).strip()
 
+    m_reason = re.search(r"\breasoning\b\s*(?:[:=]|is)?\s*[\"']?([^\"\n\r]+)", raw, re.IGNORECASE)
+    if m_reason and not result["reasoning"]:
+        result["reasoning"] = m_reason.group(1).strip()
+
     return result
 
 
@@ -725,6 +759,7 @@ def _fallback_result(cam_name: str, latency: float) -> dict:
         "machinery":   "None",
         "safety":      "UNKNOWN",
         "severity":    "LOW",
+        "reasoning":   "None",
         "evolution":   "None",
         "error":       True,
         "latency":     latency,

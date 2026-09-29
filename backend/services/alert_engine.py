@@ -95,13 +95,18 @@ class AlertEngine:
             return None
 
         # Effective severity & safety:
-        # For follow-up: respect the model's objective visual evaluation (do not artificially elevate!)
+        # Respect camera-specific rules and objective model evaluations
         if is_followup:
             severity = raw_sev
             safety = raw_safety
         elif is_incident:
-            severity = raw_sev if raw_sev in severity_triggers else "MEDIUM"
-            safety = raw_safety if raw_safety in safety_triggers else "WARNING"
+            # If evaluated as normal/routine (LOW / OK), preserve it
+            if raw_sev == "LOW" and raw_safety in ("OK", "UNKNOWN"):
+                severity = "LOW"
+                safety = "OK"
+            else:
+                severity = raw_sev if raw_sev in severity_triggers else "MEDIUM"
+                safety = raw_safety if raw_safety in safety_triggers else "WARNING"
         else:
             severity = raw_sev
             safety = raw_safety

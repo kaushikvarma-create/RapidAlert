@@ -166,6 +166,9 @@ flowchart TB
   ]
   ```
 
+> [!NOTE]
+> **VLM Alignment & "Lawyer Mode" Workarounds**: Qwen-based models are aggressively alignment-tuned via RLHF to act as helpful, harmless assistants, which can interfere with strict threat assessment. For a deep dive into how RapidAlert bypasses this safety alignment using System Prompts and literal rule definitions, see [VLM Alignment Workarounds](docs/vlm_alignment_workarounds.md).
+
 ---
 
 ## 📺 Direct Hardware RTSP Streaming & Low-Latency HLS

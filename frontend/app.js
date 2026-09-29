@@ -554,7 +554,8 @@ const App = {
       const topRes = (results && results[0]) || {};
       const sev = (topRes.severity || 'LOW').toUpperCase();
       const saf = (topRes.safety || 'OK').toUpperCase();
-      if ((sev === 'LOW' || sev === 'NORMAL') && saf === 'OK') {
+      const is_elevated_res = (sev === 'HIGH' || sev === 'EXTREME' || saf === 'DANGER');
+      if (!is_elevated_res) {
         delete this.activeFollowups[cam];
       } else {
         this.activeFollowups[cam] = {
@@ -567,8 +568,10 @@ const App = {
       this._renderFollowupObservationBanner();
     } else if (is_incident) {
       const topRes = (results && results[0]) || {};
-      const sev = (topRes.severity || 'HIGH').toUpperCase();
-      if (sev === 'HIGH' || sev === 'EXTREME' || topRes.safety === 'DANGER') {
+      const sev = (topRes.severity || 'LOW').toUpperCase();
+      const saf = (topRes.safety || 'OK').toUpperCase();
+      const is_elevated_res = (sev === 'HIGH' || sev === 'EXTREME' || saf === 'DANGER');
+      if (is_elevated_res) {
         this.activeFollowups[cam] = {
           active: true,
           cycle: 1,
@@ -612,15 +615,20 @@ const App = {
       }
     }
 
-    // If alert indicates severe incident or active follow-up, track observation
-    if (alert.cam && (alert.is_incident || alert.is_followup || alert.severity === 'HIGH' || alert.severity === 'EXTREME' || alert.safety === 'DANGER')) {
-      if (!this.activeFollowups) this.activeFollowups = {};
-      this.activeFollowups[alert.cam] = {
-        active: true,
-        cycle: alert.cycle || 1,
-        severity: alert.severity || 'HIGH',
-        ts: Date.now()
-      };
+    // If alert indicates elevated severity or active follow-up, track observation
+    const is_elevated = (alert.severity === 'HIGH' || alert.severity === 'EXTREME' || alert.safety === 'DANGER');
+    if (alert.cam) {
+      if (is_elevated) {
+        if (!this.activeFollowups) this.activeFollowups = {};
+        this.activeFollowups[alert.cam] = {
+          active: true,
+          cycle: alert.cycle || 1,
+          severity: alert.severity || 'HIGH',
+          ts: Date.now()
+        };
+      } else if (alert.is_followup) {
+        if (this.activeFollowups) delete this.activeFollowups[alert.cam];
+      }
       this._renderFollowupObservationBanner();
     }
 
@@ -1570,6 +1578,7 @@ const App = {
         ['Machinery', alert.machinery && alert.machinery !== 'None' ? alert.machinery : null],
         ['Cosmos Model', alert.model || 'vrfai/Cosmos-Reason2-8B-NVFP4'],
         ['Evolution', alert.evolution && alert.evolution !== 'None' ? alert.evolution : null],
+        ['Classification Reasoning', alert.reasoning && alert.reasoning !== 'None' ? alert.reasoning : null],
       ].filter(([, v]) => v != null);
       meta.innerHTML = rows.map(([k, v]) => `<div><strong>${k}:</strong> ${this._esc(String(v))}</div>`).join('');
     }
@@ -2192,6 +2201,21 @@ const App = {
     if (masterSceneTA && masterSceneTA !== document.activeElement) masterSceneTA.value = p.master_scene_context || '';
     if (masterTA && masterTA !== document.activeElement) masterTA.value = p.master || '';
     if (followupTA && followupTA !== document.activeElement) followupTA.value = p.followup || '';
+    this._updatePromptUnsavedIndicators();
+  },
+
+  _updatePromptUnsavedIndicators() {
+    const masterTA = document.getElementById('master-prompt-ta');
+    const followupTA = document.getElementById('followup-prompt-ta');
+    const masterBadge = document.getElementById('master-unsaved-badge');
+    const followupBadge = document.getElementById('followup-unsaved-badge');
+    
+    if (masterTA && masterBadge) {
+      masterBadge.style.display = (masterTA.value !== (this.prompts.master || '')) ? 'inline-block' : 'none';
+    }
+    if (followupTA && followupBadge) {
+      followupBadge.style.display = (followupTA.value !== (this.prompts.followup || '')) ? 'inline-block' : 'none';
+    }
   },
 
   // ════════════════════════════════════════════════════════════
@@ -2215,12 +2239,29 @@ const App = {
       this._updateModalFrameView(name);
       this._updateModalLiveContent(name);
 
-      // Populate Normal Context textareas (day / night)
+      // Populate Normal Context textareas (day / night) & Incident Rules
       const camCfgCtx = cam.config || {};
-      const ctxDay   = document.getElementById('modal-cam-ctx-day');
+      const ctx = document.getElementById('modal-cam-ctx');
+      const nightToggle = document.getElementById('modal-cam-night-enabled');
       const ctxNight = document.getElementById('modal-cam-ctx-night');
-      if (ctxDay)   ctxDay.value   = camCfgCtx.normal_context_day   || '';
-      if (ctxNight) ctxNight.value = camCfgCtx.normal_context_night || '';
+      const inpSevere = document.getElementById('modal-cam-severe');
+      const inpLow = document.getElementById('modal-cam-low');
+
+      if (ctx) ctx.value = camCfgCtx.normal_context || '';
+      if (nightToggle) {
+        nightToggle.checked = !!camCfgCtx.night_context_enabled;
+        ctxNight.style.display = nightToggle.checked ? 'block' : 'none';
+      }
+      if (ctxNight) ctxNight.value = camCfgCtx.night_context || '';
+
+      const formatRuleText = (val) => {
+        if (!val) return '';
+        if (Array.isArray(val)) return val.join('\n');
+        return String(val);
+      };
+
+      if (inpSevere) inpSevere.value = formatRuleText(camCfgCtx.severe_incidents);
+      if (inpLow) inpLow.value = formatRuleText(camCfgCtx.low_incidents);
 
       // Populate Quick Tune Fields
       const camCfg = cam.config || {};
@@ -2400,6 +2441,7 @@ const App = {
         <span>Model: ${this._esc(topResult.model || 'Cosmos-Nemotron')}</span>
         ${topResult.machinery && topResult.machinery !== 'None' ? `<span>Machinery: ${this._esc(topResult.machinery)}</span>` : ''}
         ${topResult.evolution && topResult.evolution !== 'None' ? `<span>Evolution: ${this._esc(topResult.evolution)}</span>` : ''}
+        ${topResult.reasoning && topResult.reasoning !== 'None' ? `<span>Reasoning: ${this._esc(topResult.reasoning)}</span>` : ''}
         <span>Timestamp: ${topResult.ts ? new Date(topResult.ts * 1000).toLocaleString() : '—'}</span>
       `;
     }
@@ -2836,10 +2878,8 @@ const App = {
                    value="${cam.threshold !== undefined ? cam.threshold : (this.systemConfig?.default_threshold || 0.033)}" style="width: 75px; font-family: var(--font-mono);"></td>
         <td><input type="number" step="5" min="5" max="600" class="input ctx-hb" data-cam="${this._esc(cam.name)}"
                    value="${cam.heartbeat_sec !== undefined ? cam.heartbeat_sec : (this.systemConfig?.default_heartbeat_sec || 30)}" style="width: 65px; font-family: var(--font-mono);"></td>
-        <td><input type="text" class="input ctx-day" data-cam="${this._esc(cam.name)}"
-                   value="${this._esc(cam.normal_context_day || '')}" placeholder="Day context…"></td>
-        <td><input type="text" class="input ctx-night" data-cam="${this._esc(cam.name)}"
-                   value="${this._esc(cam.normal_context_night || '')}" placeholder="Night context…"></td>
+        <td><input type="text" class="input ctx" data-cam="${this._esc(cam.name)}"
+                   value="${this._esc(cam.normal_context || '')}" placeholder="Routine context…"></td>
         <td><button class="btn-danger btn-del" data-cam="${this._esc(cam.name)}">🗑</button></td>
       `;
       tbody.appendChild(tr);
@@ -2897,12 +2937,13 @@ const App = {
   async _saveModalContext() {
     const name = this.activeCamModal;
     if (!name) return;
-    const ctxDay   = document.getElementById('modal-cam-ctx-day')?.value ?? '';
+    const ctx = document.getElementById('modal-cam-ctx')?.value ?? '';
+    const nightEnabled = document.getElementById('modal-cam-night-enabled')?.checked ?? false;
     const ctxNight = document.getElementById('modal-cam-ctx-night')?.value ?? '';
     const fb = document.getElementById('modal-context-fb');
     const cam = this.cameras[name];
     if (!cam) return;
-    const cfg = { ...(cam.config || {}), name, normal_context_day: ctxDay, normal_context_night: ctxNight };
+    const cfg = { ...(cam.config || {}), name, normal_context: ctx, night_context_enabled: nightEnabled, night_context: ctxNight };
     try {
       await this._apiUpsertCamera(cfg);
       if (fb) {
@@ -2922,14 +2963,12 @@ const App = {
   async _addCamera() {
     const name     = document.getElementById('new-cam-name')?.value.trim();
     const url      = document.getElementById('new-cam-url')?.value.trim();
-    const ctxDay   = document.getElementById('new-cam-ctx-day')?.value.trim() || '';
-    const ctxNight = document.getElementById('new-cam-ctx-night')?.value.trim() || '';
+    const ctx = document.getElementById('new-cam-ctx')?.value.trim() || '';
     if (!name || !url) { this._showToast('Enter a name and RTSP URL', 'warn'); return; }
-    await this._apiUpsertCamera({ name, url, enabled: true, normal_context_day: ctxDay, normal_context_night: ctxNight });
+    await this._apiUpsertCamera({ name, url, enabled: true, normal_context: ctx });
     document.getElementById('new-cam-name').value = '';
     document.getElementById('new-cam-url').value  = '';
-    if (document.getElementById('new-cam-ctx-day')) document.getElementById('new-cam-ctx-day').value = '';
-    if (document.getElementById('new-cam-ctx-night')) document.getElementById('new-cam-ctx-night').value = '';
+    if (document.getElementById('new-cam-ctx')) document.getElementById('new-cam-ctx').value = '';
     this._showToast(`Camera "${name}" added`, 'ok');
   },
 
@@ -3770,8 +3809,7 @@ const App = {
       if (e.target.classList.contains('toggle-enabled')) cfg.enabled = e.target.checked;
       if (e.target.classList.contains('ctx-thresh'))     cfg.threshold = parseFloat(e.target.value);
       if (e.target.classList.contains('ctx-hb'))         cfg.heartbeat_sec = parseFloat(e.target.value);
-      if (e.target.classList.contains('ctx-day'))        cfg.normal_context_day = e.target.value;
-      if (e.target.classList.contains('ctx-night'))      cfg.normal_context_night = e.target.value;
+      if (e.target.classList.contains('ctx'))            cfg.normal_context = e.target.value;
       await this._apiUpsertCamera(cfg);
       this._showToast(`Updated ${cam}`, 'ok');
     });
@@ -3787,6 +3825,9 @@ const App = {
     document.getElementById('btn-save-master-scene-context')?.addEventListener('click', () => this._saveMasterSceneContext());
     document.getElementById('btn-save-master')?.addEventListener('click', () => this._saveMasterPrompt());
     document.getElementById('btn-save-followup')?.addEventListener('click', () => this._saveFollowupPrompt());
+
+    document.getElementById('master-prompt-ta')?.addEventListener('input', () => this._updatePromptUnsavedIndicators());
+    document.getElementById('followup-prompt-ta')?.addEventListener('input', () => this._updatePromptUnsavedIndicators());
 
     // Save System Config
     document.getElementById('btn-save-sys-config')?.addEventListener('click', async () => {
@@ -3830,16 +3871,33 @@ const App = {
       }
     });
 
-    // Theater Modal Save Context (Day/Night)
+    // Theater Modal Save Context & Incident Rules
+    document.getElementById('modal-cam-night-enabled')?.addEventListener('change', (e) => {
+      const ctxNight = document.getElementById('modal-cam-ctx-night');
+      if (ctxNight) ctxNight.style.display = e.target.checked ? 'block' : 'none';
+    });
+
     document.getElementById('btn-modal-save-context')?.addEventListener('click', async () => {
       const name = this.activeCamModal;
       if (!name) return;
-      const ctxDay = document.getElementById('modal-cam-ctx-day')?.value || '';
+      const ctx = document.getElementById('modal-cam-ctx')?.value || '';
+      const nightEnabled = document.getElementById('modal-cam-night-enabled')?.checked || false;
       const ctxNight = document.getElementById('modal-cam-ctx-night')?.value || '';
+      const severeText = document.getElementById('modal-cam-severe')?.value || '';
+      const lowText = document.getElementById('modal-cam-low')?.value || '';
       const fb = document.getElementById('modal-context-fb');
+
       const currentCfg = { ...(this.cameras[name]?.config || { name: name, url: '' }) };
-      currentCfg.normal_context_day = ctxDay;
-      currentCfg.normal_context_night = ctxNight;
+      currentCfg.normal_context = ctx;
+      currentCfg.night_context_enabled = nightEnabled;
+      currentCfg.night_context = ctxNight;
+      const parseRuleText = (val) => {
+        if (!val) return [];
+        return val.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+      };
+      currentCfg.severe_incidents = parseRuleText(severeText);
+      currentCfg.low_incidents = parseRuleText(lowText);
+
       if (!this.cameras[name]) this.cameras[name] = {};
       this.cameras[name].config = currentCfg;
       await this._apiUpsertCamera(currentCfg);
@@ -3848,7 +3906,7 @@ const App = {
         fb.style.color = 'var(--green)';
         setTimeout(() => { fb.textContent = ''; }, 2500);
       }
-      this._showToast(`Updated normal context for ${name}`, 'ok');
+      this._showToast(`Updated context & incident rules for ${name}`, 'ok');
     });
 
     // Theater Modal Save Drift/Heartbeat Tune

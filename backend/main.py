@@ -557,6 +557,7 @@ def _persist_cameras() -> None:
     try:
         with open(CAMERAS_CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(camera_manager.get_config(), f, indent=2)
+        camera_manager._config_mtime = os.path.getmtime(CAMERAS_CONFIG_PATH)
     except Exception as e:
         error_tracker.capture_exception(
             e,

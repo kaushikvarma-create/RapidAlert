@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Dancing+Script:wght@600;700&family=Poppins:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/style.css?v=77" />
+  <link rel="stylesheet" href="/style.css?v=78" />
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.8/dist/hls.min.js"></script>
   <script>
     (function() {
@@ -302,8 +302,7 @@
               <th>On</th>
               <th>Drift Thresh</th>
               <th>Heartbeat (s)</th>
-              <th>Day Context</th>
-              <th>Night Context</th>
+              <th>Routine Context</th>
               <th></th>
             </tr>
           </thead>
@@ -330,7 +329,7 @@
       <!-- Master Prompt -->
       <div class="prompt-section">
         <div class="prompt-section-header">
-          <h3>Master Prompt (VLM Inference Template)</h3>
+          <h3>Master Prompt (VLM Inference Template) <span id="master-unsaved-badge" class="badge badge-amber" style="display: none; margin-left: 8px;">Unsaved Changes</span></h3>
           <span class="prompt-hint">Used for all initial trigger analyses &mdash; use <code>{master_scene_context}</code> and <code>{normal_context}</code></span>
         </div>
         <textarea id="master-prompt-ta" class="prompt-ta" spellcheck="false"></textarea>
@@ -343,7 +342,7 @@
       <!-- Followup Prompt -->
       <div class="prompt-section prompt-section-alt">
         <div class="prompt-section-header">
-          <h3>Follow-Up Prompt</h3>
+          <h3>Follow-Up Prompt <span id="followup-unsaved-badge" class="badge badge-amber" style="display: none; margin-left: 8px;">Unsaved Changes</span></h3>
           <span class="prompt-hint">Used for HIGH &amp; EXTREME alert re-check cycles &mdash; use <code>{master_scene_context}</code>, <code>{normal_context}</code> and <code>{followup_context}</code></span>
         </div>
         <textarea id="followup-prompt-ta" class="prompt-ta" spellcheck="false"></textarea>
@@ -732,30 +731,58 @@
           <div class="modal-meta" id="modal-meta"></div>
         </div>
 
-        <!-- Per-Camera Normal Context Box -->
+        <!-- Unified Camera Intelligence & Rule Engine Card -->
         <div class="theater-box theater-prompt-box">
           <div class="theater-box-header">
             <div>
-              <span class="theater-box-title">🌅 Normal Scene Context</span>
-              <span class="prompt-hint-small">Injected into <code>{normal_context}</code> in the master &amp; follow-up prompts &mdash; describe what is <em>normal</em> for this camera</span>
+              <span class="theater-box-title">🎯 Camera Intelligence &amp; Watchlist Rules</span>
+              <span class="prompt-hint-small">Configure custom threat watchlists and operational routines for this specific camera feed.</span>
             </div>
           </div>
 
-          <div class="theater-context-grid">
+          <!-- Section 1: Severe Threat Watchlist -->
+          <div style="display: flex; flex-direction: column; gap: 4px;">
             <label class="theater-context-label">
-              <span>☀️ Day Context <span class="prompt-hint-small">(06:00&ndash;20:59)</span></span>
-              <textarea id="modal-cam-ctx-day" class="theater-context-ta" spellcheck="false" rows="3"
-                placeholder="e.g. 3&ndash;4 office workers at desks, normal foot traffic through entrance…"></textarea>
+              <span style="color: #ef4444; font-weight: 700; font-size: 0.82rem; display: flex; align-items: center; gap: 6px;">
+                <span>🚨</span> Severe Threat Watchlist <span class="prompt-hint-small">(Overrides ANY other metric or condition &mdash; forces HIGH / DANGER)</span>
+              </span>
             </label>
+            <textarea id="modal-cam-severe" class="theater-context-ta" spellcheck="false" rows="3" style="min-height: 70px; border-color: rgba(239, 68, 68, 0.35);"
+              placeholder="Enter one specific threat per line...&#10;e.g. Any person holding a phone&#10;e.g. Physical fighting or scuffling&#10;e.g. Person collapsed on floor"></textarea>
+          </div>
+
+          <!-- Section 2: Routine Activity & Expected Whitelist -->
+          <div style="display: flex; flex-direction: column; gap: 4px; margin-top: 4px;">
             <label class="theater-context-label">
-              <span>🌙 Night Context <span class="prompt-hint-small">(21:00&ndash;05:59)</span></span>
-              <textarea id="modal-cam-ctx-night" class="theater-context-ta" spellcheck="false" rows="3"
-                placeholder="e.g. Area should be empty, security guard rounds expected…"></textarea>
+              <span style="color: #22c55e; font-weight: 700; font-size: 0.82rem; display: flex; align-items: center; gap: 6px;">
+                <span>🟢</span> Routine Whitelist <span class="prompt-hint-small">(Normal activity — suppresses false alarms)</span>
+              </span>
+            </label>
+            <textarea id="modal-cam-low" class="theater-context-ta" spellcheck="false" rows="2" style="min-height: 55px; border-color: rgba(34, 197, 94, 0.35);"
+              placeholder="Enter one normal activity per line...&#10;e.g. Scanning badge and walking through turnstiles&#10;e.g. Carrying laptops or backpacks"></textarea>
+          </div>
+
+          <!-- Section 3: Baseline Normal Context -->
+          <div class="theater-context-grid" style="margin-top: 4px; grid-template-columns: 1fr;">
+            <label class="theater-context-label">
+              <span style="font-size: 0.76rem; color: var(--text-2);">Routine Baseline Context</span>
+              <textarea id="modal-cam-ctx" class="theater-context-ta" spellcheck="false" rows="2" style="min-height: 50px;"
+                placeholder="e.g. Active office corridor, staff walking in and out..."></textarea>
+            </label>
+            <label class="theater-context-label" style="margin-top: 6px;">
+              <span style="font-size: 0.76rem; color: var(--text-2); display: flex; align-items: center; gap: 8px;">
+                <input type="checkbox" id="modal-cam-night-enabled" style="margin: 0; cursor: pointer;">
+                Enable Night Context Override <span class="prompt-hint-small">(21:00&ndash;05:59)</span>
+              </span>
+              <textarea id="modal-cam-ctx-night" class="theater-context-ta" spellcheck="false" rows="2" style="min-height: 50px; display: none; margin-top: 6px;"
+                placeholder="e.g. Area quiet and lights dimmed, security guard rounds..."></textarea>
             </label>
           </div>
 
-          <div class="theater-prompt-actions">
-            <button class="btn-primary btn-sm" id="btn-modal-save-context">💾 Save Context</button>
+          <div class="theater-prompt-actions" style="margin-top: 6px;">
+            <button class="btn-primary btn-sm" id="btn-modal-save-context" style="width: 100%; justify-content: center; padding: 8px 14px;">
+              <span>💾 Save &amp; Hot-Reload Camera Intelligence</span>
+            </button>
             <span class="save-feedback" id="modal-context-fb"></span>
           </div>
         </div>
@@ -1323,6 +1350,6 @@
   <!-- ═══════════════════════════════════════════════════════════ TOAST -->
   <div class="toast-container" id="toast-container"></div>
 
-  <script src="/app.js?v=77"></script>
+  <script src="/app.js?v=78"></script>
 </body>
 </html>

@@ -143,64 +143,76 @@ class NvidiaStreamCapture:
         if not self.isOpened():
             return False, None
 
-        from gi.repository import Gst
-
-        # Check bus for errors or EOS
-        if self._bus:
-            msg = self._bus.pop_filtered(Gst.MessageType.ERROR | Gst.MessageType.EOS)
-            if msg:
-                if msg.type == Gst.MessageType.ERROR:
-                    err, debug = msg.parse_error()
-                    error_tracker.capture_error(
-                        message=f"Bus error: {err}, debug: {debug}",
-                        component="NvidiaIngest",
-                        effect=f"DeepStream bus error on {self.uri}; closing pipeline",
-                        severity="ERROR",
-                    )
-                self._opened = False
-                return False, None
-
-        timeout_ns = int(timeout_sec * 1_000_000_000)
-        sample = self._sink.emit("try-pull-sample", timeout_ns)
-        if sample is None:
-            return False, None
-
-        buf = sample.get_buffer()
-        caps = sample.get_caps()
-        s = caps.get_structure(0)
-        w, h = s.get_value("width"), s.get_value("height")
-
-        success, map_info = buf.map(Gst.MapFlags.READ)
-        if not success:
-            return False, None
-
         try:
-            # Memory view to numpy RGBA then BGR
-            arr = np.frombuffer(map_info.data, dtype=np.uint8).reshape((h, w, 4))
-            bgr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
-            # Validate frame sanity: drop uninitialized YUV420 buffers (which map to solid green B<25, R<25, G>90)
-            mean_b, mean_g, mean_r = cv2.mean(bgr)[:3]
-            if mean_g > 90 and mean_r < 25 and mean_b < 25:
+            from gi.repository import Gst
+
+            # Check bus for errors or EOS
+            if self._bus:
+                msg = self._bus.pop_filtered(Gst.MessageType.ERROR | Gst.MessageType.EOS)
+                if msg:
+                    if msg.type == Gst.MessageType.ERROR:
+                        err, debug = msg.parse_error()
+                        error_tracker.capture_error(
+                            message=f"Bus error: {err}, debug: {debug}",
+                            component="NvidiaIngest",
+                            effect=f"DeepStream bus error on {self.uri}; closing pipeline",
+                            severity="ERROR",
+                        )
+                    self._opened = False
+                    return False, None
+
+            timeout_ns = int(timeout_sec * 1_000_000_000)
+            sample = self._sink.emit("try-pull-sample", timeout_ns)
+            if sample is None:
                 return False, None
-            if mean_g < 3 and mean_r < 3 and mean_b < 3:
+
+            buf = sample.get_buffer()
+            if buf is None:
                 return False, None
-            return True, bgr
-        except Exception as e:
+
+            caps = sample.get_caps()
+            if caps is None:
+                return False, None
+            s = caps.get_structure(0)
+            w, h = s.get_value("width"), s.get_value("height")
+
+            success, map_info = buf.map(Gst.MapFlags.READ)
+            if not success:
+                return False, None
+
+            try:
+                # Memory view to numpy RGBA then BGR
+                arr = np.frombuffer(map_info.data, dtype=np.uint8).reshape((h, w, 4))
+                bgr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+                # Validate frame sanity: drop uninitialized YUV420 buffers (which map to solid green B<25, R<25, G>90)
+                mean_b, mean_g, mean_r = cv2.mean(bgr)[:3]
+                if mean_g > 90 and mean_r < 25 and mean_b < 25:
+                    return False, None
+                if mean_g < 3 and mean_r < 3 and mean_b < 3:
+                    return False, None
+                return True, bgr
+            finally:
+                try:
+                    buf.unmap(map_info)
+                except Exception:
+                    pass
+        except Exception as exc:
             error_tracker.capture_exception(
-                e,
+                exc,
                 component="NvidiaIngest",
-                effect=f"Failed to parse NVDEC frame buffer into image array for {self.uri}",
-                severity="ERROR",
+                effect=f"Exception reading NVDEC frame for {self.uri}",
+                severity="WARNING",
             )
             return False, None
-        finally:
-            buf.unmap(map_info)
 
     def release(self) -> None:
         self._opened = False
         if self._pipeline:
-            from gi.repository import Gst
-            self._pipeline.set_state(Gst.State.NULL)
+            try:
+                from gi.repository import Gst
+                self._pipeline.set_state(Gst.State.NULL)
+            except Exception:
+                pass
             self._pipeline = None
             self._sink = None
             self._bus = None

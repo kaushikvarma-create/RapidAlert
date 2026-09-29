@@ -4,7 +4,7 @@ Pydantic models for REST API request payloads.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Union, List
 from pydantic import BaseModel, Field
 
 
@@ -13,8 +13,11 @@ class CameraBody(BaseModel):
     name: str = Field(..., description="Unique camera identifier or stream name")
     url: str = Field("", description="RTSP, HTTP, or video file source URL")
     enabled: bool = Field(True, description="Whether this camera feed is actively ingested")
-    normal_context_day: str = Field("", description="Expected daytime activity context to reduce false positives")
-    normal_context_night: str = Field("", description="Expected nighttime activity context")
+    normal_context: str = Field("", description="Expected routine activity context to reduce false positives")
+    night_context_enabled: bool = Field(False, description="Whether to use a specific night context")
+    night_context: str = Field("", description="Expected nighttime activity context (if enabled)")
+    severe_incidents: Optional[Union[str, List[str]]] = Field("", description="Specific incidents or behaviors that MUST trigger High/Extreme severity on this camera")
+    low_incidents: Optional[Union[str, List[str]]] = Field("", description="Specific routine activities that MUST be classified as Low/OK severity on this camera")
     priority: str = Field("normal", description="Priority level: 'normal', 'high', 'critical'")
     threshold: Optional[float] = Field(None, description="Legacy DINOv2 scene drift sensitivity override")
     major_threshold: Optional[float] = Field(None, description="Per-camera DINOv2 Major Shift trigger threshold [T2]")

@@ -53,6 +53,7 @@ class StorageManager:
                     machinery    TEXT,
                     safety       TEXT,
                     severity     TEXT,
+                    reasoning    TEXT,
                     latency      REAL,
                     e2e_latency  REAL,
                     incident_id  TEXT,
@@ -96,6 +97,7 @@ class StorageManager:
                 "threat_level": "TEXT",
                 "confidence": "REAL",
                 "labels": "TEXT",
+                "reasoning": "TEXT",
             }
             for col_name, col_type in schema_additions.items():
                 if col_name not in existing_cols:
@@ -176,10 +178,10 @@ class StorageManager:
                 """
                 INSERT INTO analyses
                   (cam, ts, observation, activity, workers, machinery,
-                   safety, severity, latency, e2e_latency, incident_id,
+                   safety, severity, reasoning, latency, e2e_latency, incident_id,
                    parent_id, trigger_mode, clip_path, keywords,
                    threat_level, confidence, labels, error)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     cam,
@@ -190,6 +192,7 @@ class StorageManager:
                     result.get("machinery", "None"),
                     result.get("safety", "UNKNOWN"),
                     result.get("severity", "LOW"),
+                    result.get("reasoning", ""),
                     round(latency, 3),
                     round(e2e, 3) if e2e is not None else None,
                     inc_id,

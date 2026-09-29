@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -25,7 +26,7 @@ class PromptManager:
         prompts_path: Path = PROMPTS_CONFIG_PATH,
         cameras_config_provider: Optional[Callable[[], list[dict]]] = None,
     ):
-        self.path = prompts_path
+        self.path = Path(prompts_path)
         self._cameras_config_provider = cameras_config_provider
         
         # Load initial prompts from config file
@@ -44,8 +45,6 @@ class PromptManager:
         cam_name: str,
         hour: Optional[int] = None,
         is_followup: bool = False,
-        prev_severity: Optional[str] = None,
-        prev_observation: Optional[str] = None,
         cycle: int = 1,
         interval_sec: float = 10.0,
     ) -> str:
@@ -54,29 +53,31 @@ class PromptManager:
             hour = datetime.now().hour
 
         normal_context = self._get_cam_context(cam_name, hour)
-        ctx_str = ""
-        if normal_context:
-            ctx_str = (
-                f"NORMAL CONTEXT for this camera: {normal_context}\n"
-                "Flag any deviation from this normal context."
-            )
+        rules_str = self._get_cam_incident_rules_str(cam_name)
 
+        ctx_parts = []
+        if normal_context:
+            ctx_parts.append(
+                f"NORMAL ROUTINE CONTEXT for this camera ({cam_name}):\n{normal_context}\nFlag any deviation from this normal context."
+            )
+        if rules_str:
+            ctx_parts.append(rules_str)
+
+        ctx_str = "\n\n".join(ctx_parts)
         master_scene = self._master_scene_context.strip() if self._master_scene_context else "Standard facility environment."
 
         if is_followup:
             followup_info = (
-                f"FOLLOW-UP CONTEXT:\n"
-                f"This is follow-up check #{cycle} ({interval_sec:.0f}s after initial trigger)."
+                f"FOLLOW-UP CHECK #{cycle} ({interval_sec:.0f}s after earlier activity):\n"
+                f"Evaluate ONLY the visual evidence in the CURRENT 4 frames independently without assumption. "
+                f"Determine if any active priority event is present right now, or if the scene is normal routine / empty "
+                f"(which MUST be marked \"safety\": \"OK\", \"severity\": \"LOW\")."
             )
-            if prev_severity:
-                followup_info += f" An earlier incident had severity: {prev_severity}."
-            if prev_observation:
-                followup_info += f" Earlier observation: \"{prev_observation}\"."
-            followup_info += " Objectively determine whether this has resolved or is persisting."
 
             template = self._followup
             return (
                 template
+                .replace("{cam_name}", cam_name)
                 .replace("{master_scene_context}", master_scene)
                 .replace("{global_context}", master_scene)
                 .replace("{normal_context}", ctx_str)
@@ -86,6 +87,7 @@ class PromptManager:
         template = self._cam_overrides.get(cam_name) or self._master
         return (
             template
+            .replace("{cam_name}", cam_name)
             .replace("{master_scene_context}", master_scene)
             .replace("{global_context}", master_scene)
             .replace("{normal_context}", ctx_str)
@@ -189,23 +191,66 @@ class PromptManager:
                 severity="WARNING",
             )
 
-    def _get_cam_context(self, cam_name: str, hour: int) -> str:
+    def _get_cam_config(self, cam_name: str) -> Optional[dict]:
         if not self._cameras_config_provider:
-            return ""
+            return None
         try:
             cameras = self._cameras_config_provider()
             for c in cameras:
                 if c.get("name") == cam_name:
-                    if 6 <= hour < 21:
-                        return c.get("normal_context_day", "").strip()
-                    else:
-                        return c.get("normal_context_night", "").strip()
+                    return c
         except Exception as exc:
             error_tracker.capture_exception(
                 exc,
                 component="PromptManager",
                 camera=cam_name,
-                effect=f"Failed to retrieve normal context for {cam_name}",
+                effect=f"Failed to retrieve camera config for {cam_name}",
                 severity="WARNING",
             )
+        return None
+
+    def _get_cam_context(self, cam_name: str, hour: int) -> str:
+        cam = self._get_cam_config(cam_name)
+        if not cam:
+            return ""
+            
+        is_night = not (6 <= hour < 21)
+        if is_night and cam.get("night_context_enabled"):
+            return cam.get("night_context", "").strip()
+            
+        return cam.get("normal_context", "").strip()
+
+    def _get_cam_incident_rules_str(self, cam_name: str) -> str:
+        cam = self._get_cam_config(cam_name)
+        if not cam:
+            return ""
+
+        severe = cam.get("severe_incidents")
+        low = cam.get("low_incidents")
+
+        sections = []
+        if severe:
+            if isinstance(severe, list):
+                items = "\n".join(f"  * {s.strip()}" for s in severe if s.strip())
+            else:
+                items = "\n".join(f"  * {line.strip()}" for line in severe.strip().split("\n") if line.strip())
+            if items:
+                sections.append(
+                    f"• PRIORITY WATCHLIST for {cam_name} (Visual Verification Targets):\n{items}"
+                )
+
+        if low:
+            if isinstance(low, list):
+                items = "\n".join(f"  * {s.strip()}" for s in low if s.strip())
+            else:
+                items = "\n".join(f"  * {line.strip()}" for line in low.strip().split("\n") if line.strip())
+            if items:
+                sections.append(
+                    f"• ROUTINE WHITELIST for {cam_name} (Classify as SAFETY: OK, SEVERITY: LOW):\n{items}"
+                )
+
+        if sections:
+            return "\n\n".join(sections)
         return ""
+
+
