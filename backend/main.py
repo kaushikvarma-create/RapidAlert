@@ -529,6 +529,41 @@ async def api_upsert_camera(cam: CameraBody):
     })
     return {"status": "ok", "cameras": camera_manager.get_config()}
 
+# AI/VLM validation endpoint for camera context & watchlist overlaps/contradictions
+@app.post("/api/cameras/validate-context", dependencies=[Depends(require_admin)])
+async def api_validate_camera_context(payload: dict = Body(...)):
+    """
+    Validate non-overlapping, non-contradictory definitions among:
+    - Severe Threat Watchlist (Checklist A)
+    - Routine Whitelist (Checklist B)
+    - Routine Baseline Context
+    Compares against old camera config if name is specified.
+    """
+    name = payload.get("name", "")
+    normal = payload.get("normal_context", "")
+    night_enabled = payload.get("night_context_enabled", False)
+    night = payload.get("night_context", "") if night_enabled else ""
+    severe = payload.get("severe_text", payload.get("severe_incidents", ""))
+    low = payload.get("low_text", payload.get("low_incidents", ""))
+
+    res = await vlm_pool.validate_camera_prompts(
+        cam_name=name or "Camera",
+        severe_text=severe,
+        low_text=low,
+        normal_context=normal,
+        night_context=night,
+        night_context_enabled=night_enabled,
+    )
+    # This endpoint is admin-protected; expose the exact model response so
+    # validation behavior can be inspected instead of inferred.
+    if "_raw_vlm_response" in res:
+        res["raw_vlm_response"] = res.pop("_raw_vlm_response")
+    return res
+
+
+
+
+
 
 @app.post("/api/cameras/batch", dependencies=[Depends(require_admin)])
 async def api_batch_update_cameras(cams: List[CameraBody]):

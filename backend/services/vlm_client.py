@@ -37,7 +37,9 @@ _PARSE_KEYS = {
     "severity":    "severity",
     "reasoning":   "reasoning",
     "evolution":   "evolution",
-    "procedure_checklist": "procedure_checklist",
+    "procedure_checklist": "procedure_checklist",  # legacy — kept for backward compat
+    "priority_flags":      "priority_flags",        # new: maps to severe_incidents
+    "routine_flags":       "routine_flags",         # new: maps to low_incidents
 }
 
 _HEALTH_INTERVAL_SEC = 30.0     # how often the background health loop pings each shard
@@ -577,6 +579,244 @@ class MIGAwareVLMPool:
         ]
         return await asyncio.gather(*tasks)
 
+    async def query_text(self, prompt: str, system_msg: str = "You are an AI assistant.") -> str:
+        """Execute a text-only query against the best available VLM/LLM shard."""
+        healthy_shards = [s for s in self._shards if s.healthy]
+        shards = healthy_shards if healthy_shards else self._shards
+        if not shards:
+            return ""
+        shard = sorted(shards, key=lambda s: s.load_score())[0]
+        url = f"{shard.url}/v1/chat/completions"
+        payload = {
+            "model": shard.model,
+            "messages": [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": 512,
+            "temperature": 0.2,
+            "chat_template_kwargs": {"enable_thinking": False}
+        }
+        try:
+            async with self._session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data["choices"][0]["message"]["content"]
+        except Exception as exc:
+            error_tracker.capture_exception(
+                exc,
+                component="VLMPool",
+                effect="Failed to execute query_text on vLLM shard",
+                severity="WARNING"
+            )
+        return ""
+
+    async def validate_camera_prompts(
+        self,
+        cam_name: str,
+        severe_text: str | list,
+        low_text: str | list,
+        normal_context: str,
+        night_context: str = "",
+        night_context_enabled: bool = False,
+    ) -> dict:
+        """Audit logical consistency of one proposed camera configuration."""
+        import json
+        import re
+
+        def _str_fmt(value) -> str:
+            if isinstance(value, list):
+                return "\n".join(str(item).strip() for item in value if str(item).strip())
+            return str(value or "").strip()
+
+        def _items(value) -> list[str]:
+            text = _str_fmt(value)
+            # Camera configs historically allowed comma-separated strings; treat
+            # those as separate rules so an old config cannot hide a conflict.
+            parts = []
+            for line in text.splitlines():
+                parts.extend(line.split(","))
+            return [item.strip() for item in parts if item.strip()]
+
+        sev_s = _str_fmt(severe_text)
+        low_s = _str_fmt(low_text)
+        norm_s = _str_fmt(normal_context)
+        night_s = _str_fmt(night_context) if night_context_enabled else ""
+
+        sys_msg = (
+            "You are a strict CCTV configuration compliance auditor. "
+            "Audit only logical contradictions among the proposed camera rules. "
+            "Do not reject entries merely because they share generic words."
+        )
+
+        prompt = f"""Audit this proposed CCTV camera configuration for "{cam_name}".
+
+Your ONLY task is to identify logical contradictions among three proposed fields.
+
+FIELD MEANINGS:
+A. SEVERE THREAT WATCHLIST: conditions that are never acceptable in this monitored area. If visible, they represent a priority incident.
+B. ROUTINE WHITELIST: conditions explicitly declared normal and acceptable. If visible by themselves, they must not be treated as a severe incident.
+C. ROUTINE BASELINE CONTEXT: descriptive background about the location and ordinary scene. It is context only; it is not a whitelist and cannot override A or B.
+
+POLARITY MODEL:
+- Every condition written in A is being declared malicious, unsafe, unacceptable, or priority-worthy by the camera owner, even if the entry does not use the word "malicious".
+- Every condition written in B is being declared benign, safe, acceptable, and normal by the camera owner.
+- Every condition written in C is being declared ordinary and expected background behavior.
+- These meanings are mutually exclusive for the same condition. A condition must not be treated as malicious in A and acceptable or ordinary in B or C.
+- If the same proposition appears in more than one field with opposite meanings, that is a blocking logical contradiction.
+
+A condition cannot be both severe and acceptable. If a condition in A is described as okay, normal, acceptable, routine, benign, safe, or permitted in B or C, that is a blocking contradiction.
+
+PROPOSED SEVERE THREAT WATCHLIST:
+{sev_s or "(none)"}
+
+PROPOSED ROUTINE WHITELIST:
+{low_s or "(none)"}
+
+PROPOSED ROUTINE BASELINE:
+{norm_s or "(none)"}
+
+PROPOSED NIGHT BASELINE:
+{night_s or "(none)"}
+
+LOGICAL AUDIT RULES:
+
+1. Evaluate each complete entry as a proposition with a meaning and polarity.
+   Report a blocking contradiction when the same proposition is classified as both severe/malicious and routine/benign.
+   The contradiction is about opposite classifications, not just matching words.
+
+2. Report a blocking contradiction when a severe condition is described as okay, normal, acceptable, routine, benign, safe, or permitted anywhere in the routine whitelist or baseline. For example:
+   - Severe: "physical fighting"
+   - Routine: "Fighting is ok"
+   This MUST be invalid.
+   The words "is okay", "is ok", "normal", "acceptable", "permitted", "routine", "benign", and "safe" reverse the meaning and must not be ignored.
+   Do not require the severe entry to repeat the word "malicious": its presence in the severe field already gives it the malicious/unacceptable meaning.
+
+3. Treat equivalent wording as the same condition:
+   - "person collapsed on the floor"
+   - "collapsed person is okay"
+   These conflict because the same condition is both severe and routine.
+
+3. Read complete entries, including qualifiers such as "not", "normal", "okay", "forced", "climbing", "sleeping", and "collapsed".
+
+5. Do not flag a contradiction merely because entries share a generic word. These are distinct:
+   - "walking through a turnstile" vs "climbing over a turnstile"
+   - "carrying a parcel" vs "using force to enter"
+   - "sitting at a desk" vs "sleeping at a desk"
+   - "standing near a door" vs "kicking the door"
+
+6. A baseline contradiction exists when the baseline explicitly describes a severe condition as normal, okay, acceptable, permitted, or routine.
+
+7. Empty fields are valid. Do not rewrite or judge the policy.
+
+8. Set valid=false for any real contradiction. Set valid=true only when no severe condition is normalized by the other fields.
+
+Return ONLY valid JSON:
+{{
+  "valid": true,
+  "has_contradictions": false,
+  "summary": "One short sentence explaining the result.",
+  "conflicts": [
+    {{
+      "type": "severe_vs_routine | severe_vs_baseline | contradiction",
+      "fields": ["severe_incidents", "low_incidents"],
+      "severe_item": "Exact severe entry",
+      "related_item": "Exact routine or baseline entry",
+      "reason": "Why the entries logically conflict.",
+      "suggestion": "Specific correction.",
+      "blocking": true
+    }}
+  ]
+}}"""
+        raw_resp = await self.query_text(prompt, system_msg=sys_msg)
+
+        if raw_resp:
+            try:
+                clean = raw_resp.strip()
+                data = json.loads(clean)
+                if isinstance(data, dict) and ("valid" in data or "conflicts" in data):
+                    value = data.get("valid", True)
+                    data["valid"] = value is True or (isinstance(value, str) and value.strip().lower() == "true")
+                    data["conflicts"] = data.get("conflicts") if isinstance(data.get("conflicts"), list) else []
+                    data["warnings"] = data.get("warnings") if isinstance(data.get("warnings"), list) else []
+                    has_contradictions = data.get("has_contradictions", False)
+                    has_contradictions = has_contradictions is True or (
+                        isinstance(has_contradictions, str) and has_contradictions.strip().lower() == "true"
+                    )
+                    blocking = any(
+                        isinstance(conflict, dict) and conflict.get("blocking", True) is not False
+                        for conflict in data["conflicts"]
+                    )
+                    data["has_contradictions"] = has_contradictions or blocking
+                    if data["has_contradictions"]:
+                        data["valid"] = False
+                    data["_raw_vlm_response"] = raw_resp
+                    return data
+            except Exception:
+                pass
+
+        fallback = self._heuristic_prompt_validation(sev_s, low_s, norm_s, night_s)
+        fallback["_raw_vlm_response"] = raw_resp or ""
+        return fallback
+
+    def _heuristic_prompt_validation(
+        self,
+        sev_s: str,
+        low_s: str,
+        norm_s: str,
+        night_s: str,
+    ) -> dict:
+        import re
+
+        def norm(value: str) -> str:
+            value = re.sub(r"[^a-z0-9 ]+", " ", value.lower())
+            return re.sub(r"\s+", " ", value).strip()
+
+        def items(value: str) -> list[str]:
+            parts = []
+            for line in value.splitlines():
+                parts.extend(line.split(","))
+            return [item.strip() for item in parts if item.strip()]
+
+        sev_items, low_items = items(sev_s), items(low_s)
+        conflicts = []
+        routine_norm = {norm(item): item for item in low_items}
+        baseline_norm = norm(norm_s)
+
+        for severe in sev_items:
+            severe_n = norm(severe)
+            if not severe_n:
+                continue
+            for routine_n, routine in routine_norm.items():
+                if severe_n == routine_n or (len(severe_n) > 18 and (severe_n in routine_n or routine_n in severe_n)):
+                    conflicts.append({
+                        "type": "direct_overlap",
+                        "fields": ["severe_incidents", "low_incidents"],
+                        "new_item": severe,
+                        "related_item": routine,
+                        "reason": "The same visually observable activity appears in both the severe and routine lists.",
+                        "suggestion": "Keep the routine activity in the whitelist and rewrite the severe entry as a visually distinct escalation.",
+                        "blocking": True,
+                    })
+            if severe_n and severe_n in baseline_norm and len(severe_n) > 18:
+                conflicts.append({
+                    "type": "baseline_conflict",
+                    "fields": ["severe_incidents", "normal_context"],
+                    "new_item": severe,
+                    "related_item": norm_s,
+                    "reason": "The baseline explicitly contains the same activity as a normal condition.",
+                    "suggestion": "Clarify the baseline or describe only the escalated threat in the severe list.",
+                    "blocking": True,
+                })
+
+        return {
+            "valid": not conflicts,
+            "summary": "No blocking logical or visual contradictions detected." if not conflicts else f"Detected {len(conflicts)} blocking contradiction(s).",
+            "conflicts": conflicts,
+            "warnings": [],
+        }
+
+
     # ── Background health loop ─────────────────────────────────────────────
 
     async def _health_loop(self) -> None:
@@ -646,6 +886,8 @@ def _parse_response(raw: str, cam_name: str) -> dict:
         "reasoning":   "",
         "evolution":   "None",
         "procedure_checklist": "[]",
+        "priority_flags":      "[]",
+        "routine_flags":       "[]",
         "verdict":     "SETTLED",
         "keywords":    "",
     }
@@ -670,12 +912,22 @@ def _parse_response(raw: str, cam_name: str) -> dict:
             if "keywords" in data:
                 result["keywords"] = str(data["keywords"])
             
-            # THE "USER_REQUESTED" OVERRIDE LOGIC
-            v_markers = str(result.get("procedure_checklist", "[]")).strip()
-            if v_markers not in ("[]", "None", "", "['']", '[""]'):
-                result["safety"] = "DANGER"
+            # ── Checklist override logic ──────────────────────────────────────
+            # Priority chain: priority_flags → DANGER/HIGH
+            #                 routine_flags  → OK/LOW
+            #                 neither        → trust VLM's own safety/severity
+            pf = str(result.get("priority_flags", "[]")).strip()
+            rf = str(result.get("routine_flags",  "[]")).strip()
+            # legacy fallback: old procedure_checklist → treat as priority
+            pc = str(result.get("procedure_checklist", "[]")).strip()
+            _empty = ("[]", "None", "", "['']", '[""]')
+            if pf not in _empty or pc not in _empty:
+                result["safety"]   = "DANGER"
                 result["severity"] = "HIGH"
-                
+            elif rf not in _empty:
+                result["safety"]   = "OK"
+                result["severity"] = "LOW"
+            # else: VLM's own safety/severity pass through untouched
             return result
     except Exception:
         pass
@@ -695,12 +947,22 @@ def _parse_response(raw: str, cam_name: str) -> dict:
             if "keywords" in data:
                 result["keywords"] = str(data["keywords"])
 
-            # THE "USER_REQUESTED" OVERRIDE LOGIC
-            v_markers = str(result.get("procedure_checklist", "[]")).strip()
-            if v_markers not in ("[]", "None", "", "['']", '[""]'):
-                result["safety"] = "DANGER"
+            # ── Checklist override logic ──────────────────────────────────────
+            # Priority chain: priority_flags → DANGER/HIGH
+            #                 routine_flags  → OK/LOW
+            #                 neither        → trust VLM's own safety/severity
+            pf = str(result.get("priority_flags", "[]")).strip()
+            rf = str(result.get("routine_flags",  "[]")).strip()
+            # legacy fallback: old procedure_checklist → treat as priority
+            pc = str(result.get("procedure_checklist", "[]")).strip()
+            _empty = ("[]", "None", "", "['']", '[""]')
+            if pf not in _empty or pc not in _empty:
+                result["safety"]   = "DANGER"
                 result["severity"] = "HIGH"
-
+            elif rf not in _empty:
+                result["safety"]   = "OK"
+                result["severity"] = "LOW"
+            # else: VLM's own safety/severity pass through untouched
             return result
     except Exception:
         pass

@@ -61,21 +61,5 @@
   "max_concurrency": 10,
   "frame_width": 1280,
   "jpeg_quality": 85,
-  "dashboard_port": 7000,
-  "reporting_enabled": true,
-  "report_schedule_hours": [6, 18],
-  "report_title": "CLOVE HQ SITE INTELLIGENCE REPORT",
-  "report_sender_email": "reportsclove@gmail.com",
-  "report_sender_password": "wakl rpps mvql eznn",
-  "report_email_recipients": [
-    "pandalavacarji@gmail.com",
-    "reportsclove@gmail.com"
-  ],
-  "watchdog_alerts_enabled": true,
-  "watchdog_email_recipients": [
-    "pandalavacarji@gmail.com",
-    "reportsclove@gmail.com"
-  ],
-  "daily_digest_enabled": true,
-  "daily_digest_hour": 8
+  "dashboard_port": 7000
 }

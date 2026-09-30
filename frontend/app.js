@@ -16,6 +16,7 @@ const App = {
   audioMuted: false,
   audioCtx: null,
   activeCamModal: null,
+  modalAuditState: 'CLEAN',
   modalViewMode: 'live', // 'live' | 'event'
   selectedEventIdx: null,
   camCurrentPage: 1,
@@ -1579,6 +1580,8 @@ const App = {
         ['Cosmos Model', alert.model || 'vrfai/Cosmos-Reason2-8B-NVFP4'],
         ['Evolution', alert.evolution && alert.evolution !== 'None' ? alert.evolution : null],
         ['Classification Reasoning', alert.reasoning && alert.reasoning !== 'None' ? alert.reasoning : null],
+        ['🚨 Priority Flags (Checklist A)', alert.priority_flags && alert.priority_flags !== '[]' && alert.priority_flags !== '' ? alert.priority_flags : null],
+        ['✅ Routine Flags (Checklist B)',  alert.routine_flags  && alert.routine_flags  !== '[]' && alert.routine_flags  !== '' ? alert.routine_flags  : null],
       ].filter(([, v]) => v != null);
       meta.innerHTML = rows.map(([k, v]) => `<div><strong>${k}:</strong> ${this._esc(String(v))}</div>`).join('');
     }
@@ -2275,6 +2278,16 @@ const App = {
       if (inpMajor) inpMajor.value = camCfg.major_threshold !== undefined ? camCfg.major_threshold : (camCfg.threshold !== undefined ? camCfg.threshold : sysMajor);
       if (inpMinor) inpMinor.value = camCfg.minor_threshold !== undefined ? camCfg.minor_threshold : (camCfg.threshold !== undefined ? Math.max(0.010, camCfg.threshold * 0.5) : sysMinor);
       if (inpHb) inpHb.value = camCfg.heartbeat_sec !== undefined ? camCfg.heartbeat_sec : (this.systemConfig?.default_heartbeat_sec || 35);
+      // Compliance is deliberate: no VLM call until the user presses Check compliance.
+      this.modalAuditResult = null;
+      this.modalAuditState = 'DIRTY';
+      this._bindCamContextAuditListeners(name);
+      const auditBadge = document.getElementById('modal-cam-audit-status-badge');
+      const auditSummary = document.getElementById('modal-cam-audit-summary');
+      const auditButton = document.querySelector('#btn-modal-save-context span');
+      if (auditBadge) { auditBadge.textContent = '○ Not checked'; auditBadge.className = 'badge badge-muted'; }
+      if (auditSummary) { auditSummary.textContent = 'Review the three fields, then press Check compliance. No AI request has been made.'; auditSummary.style.color = 'var(--text-2)'; }
+      if (auditButton) auditButton.textContent = '🔍 Check compliance';;
     } catch (err) {
       console.error('Error populating cam modal:', err);
     }
@@ -2287,6 +2300,125 @@ const App = {
     modal.removeAttribute('hidden');
     modal.style.display = 'flex';
   },
+
+  _bindCamContextAuditListeners(name) {
+    const fields = ['modal-cam-severe', 'modal-cam-low', 'modal-cam-ctx', 'modal-cam-ctx-night', 'modal-cam-night-enabled'];
+    fields.forEach(id => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.oninput = () => this._onCamContextFieldChanged(name);
+      el.onchange = () => this._onCamContextFieldChanged(name);
+    });
+  },
+
+  _onCamContextFieldChanged(name) {
+    this.modalAuditState = 'DIRTY';
+    const badge = document.getElementById('modal-cam-audit-status-badge');
+    const summary = document.getElementById('modal-cam-audit-summary');
+    if (badge) {
+      badge.textContent = '● Unsaved Changes (Auditing...)';
+      badge.className = 'badge badge-amber';
+    }
+    this.modalAuditResult = null;
+    const actionButton = document.querySelector('#btn-modal-save-context span');
+    if (actionButton) actionButton.textContent = '🔍 Check compliance';
+    if (summary) summary.textContent = 'Changes detected. Press Check compliance to run one AI audit.';
+  },
+
+  async _runCamContextAudit(name, immediate = false) {
+    if (!name || name !== this.activeCamModal) return { valid: true };
+    const severeText = document.getElementById('modal-cam-severe')?.value || '';
+    const lowText = document.getElementById('modal-cam-low')?.value || '';
+    const ctx = document.getElementById('modal-cam-ctx')?.value || '';
+    const nightEnabled = document.getElementById('modal-cam-night-enabled')?.checked || false;
+    const ctxNight = document.getElementById('modal-cam-ctx-night')?.value || '';
+
+    const badge = document.getElementById('modal-cam-audit-status-badge');
+    const summary = document.getElementById('modal-cam-audit-summary');
+    const conflictsEl = document.getElementById('modal-cam-audit-conflicts');
+    const rawBox = document.getElementById('modal-cam-audit-raw-box');
+    const rawEl = document.getElementById('modal-cam-audit-raw');
+
+    this.modalAuditState = 'VALIDATING';
+    if (badge) {
+      badge.textContent = '⏳ AI Auditing Checklists...';
+      badge.className = 'badge badge-blue';
+    }
+
+    try {
+      const res = await this._authFetch('/api/cameras/validate-context', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: name,
+          severe_text: severeText,
+          low_text: lowText,
+          normal_context: ctx,
+          night_context: ctxNight,
+          night_context_enabled: nightEnabled,
+        }),
+      });
+
+      if (!res.ok) throw new Error('Validation request failed');
+      const data = await res.json();
+      this.modalAuditResult = data;
+      if (rawEl) rawEl.textContent = data.raw_vlm_response || '(No raw VLM response; heuristic fallback was used.)';
+      if (rawBox) rawBox.style.display = data.raw_vlm_response ? 'block' : 'none';
+
+      if (data.valid) {
+        this.modalAuditState = 'APPROVED';
+        if (badge) {
+          badge.textContent = '✓ Checklists Harmonized';
+          badge.className = 'badge badge-green';
+        }
+        if (summary) {
+          summary.textContent = data.summary || 'No overlapping or contradictory conditions detected across all 3 checklists.';
+          summary.style.color = 'var(--text-2)';
+        }
+        if (conflictsEl) {
+          conflictsEl.style.display = 'none';
+          conflictsEl.innerHTML = '';
+        }
+      } else {
+        this.modalAuditState = 'CONFLICT';
+        if (badge) {
+          badge.textContent = '🚨 Contradiction Detected';
+          badge.className = 'badge badge-red';
+        }
+        if (summary) {
+          summary.textContent = data.summary || 'Contradictions or overlaps detected between checklists.';
+          summary.style.color = '#ef4444';
+        }
+        if (conflictsEl) {
+          conflictsEl.style.display = 'flex';
+          const items = (data.conflicts || []).map(c => `
+            <div style="background: rgba(239, 68, 68, 0.12); border-left: 3px solid #ef4444; padding: 6px 10px; border-radius: 4px;">
+              <strong style="color: #ef4444;">⚠️ [${this._esc(c.type || (Array.isArray(c.fields) ? c.fields.join(' ↔ ') : 'Logical contradiction'))}]:</strong>
+              ${this._esc(c.reason || c.issue || '')}
+              ${c.severe_item ? `<div style="margin-top: 3px;"><strong>Severe:</strong> ${this._esc(c.severe_item)}</div>` : ''}
+              ${c.related_item ? `<div><strong>Related:</strong> ${this._esc(c.related_item)}</div>` : ''}
+              ${c.suggestion ? `<div style="margin-top: 3px; color: var(--text); opacity: 0.9;">💡 <em>Recommendation:</em> ${this._esc(c.suggestion)}</div>` : ''}
+            </div>
+          `).join('');
+          conflictsEl.innerHTML = items || `<div style="color: #ef4444;">Contradictions detected. Please review checklists before saving.</div>`;
+        }
+      }
+      return data;
+    } catch (err) {
+      this.modalAuditState = 'ERROR';
+      this.modalAuditResult = { valid: false, unavailable: true };
+      if (badge) {
+        badge.textContent = '⚠ Audit Unavailable';
+        badge.className = 'badge badge-amber';
+      }
+      if (summary) {
+        summary.textContent = 'The AI audit could not be completed. Saving is disabled until validation succeeds.';
+        summary.style.color = '#f59e0b';
+      }
+      return { valid: false, unavailable: true };
+    }
+  },
+
 
   _updateModalFrameView(name) {
     const cam = this.cameras[name];
@@ -2437,7 +2569,11 @@ const App = {
     // Meta
     const metaEl = document.getElementById('modal-meta');
     if (metaEl && topResult) {
-      metaEl.innerHTML = `
+      const _pf = topResult.priority_flags && topResult.priority_flags !== '[]' && topResult.priority_flags !== '' ? topResult.priority_flags : null;
+        const _rf = topResult.routine_flags  && topResult.routine_flags  !== '[]' && topResult.routine_flags  !== '' ? topResult.routine_flags  : null;
+        metaEl.innerHTML = `
+        ${_pf ? `<span style="color:var(--red,#ef4444);font-weight:600">🚨 Flagged: ${this._esc(_pf)}</span>` : ''}
+        ${_rf ? `<span style="opacity:0.75">✅ Routine: ${this._esc(_rf)}</span>` : ''}
         <span>Model: ${this._esc(topResult.model || 'Cosmos-Nemotron')}</span>
         ${topResult.machinery && topResult.machinery !== 'None' ? `<span>Machinery: ${this._esc(topResult.machinery)}</span>` : ''}
         ${topResult.evolution && topResult.evolution !== 'None' ? `<span>Evolution: ${this._esc(topResult.evolution)}</span>` : ''}
@@ -3887,6 +4023,30 @@ const App = {
       const lowText = document.getElementById('modal-cam-low')?.value || '';
       const fb = document.getElementById('modal-context-fb');
 
+      // First click performs the one deliberate compliance check.
+      // Saving is only available after that check has approved the unchanged fields.
+      const approved = this.modalAuditState === 'APPROVED' && this.modalAuditResult?.valid === true;
+      if (!approved) {
+        const auditRes = await this._runCamContextAudit(name, true);
+        const actionButton = document.querySelector('#btn-modal-save-context span');
+        if (auditRes?.valid === true) {
+          if (actionButton) actionButton.textContent = '💾 Save & hot-reload';
+          if (fb) {
+            fb.textContent = '✅ Compliance approved. Press Save & hot-reload.';
+            fb.style.color = 'var(--green)';
+          }
+        } else {
+          if (actionButton) actionButton.textContent = '🔍 Check compliance';
+          if (fb) {
+            fb.textContent = auditRes?.unavailable ? '⚠ Compliance check unavailable' : '❌ Resolve compliance issues first';
+            fb.style.color = 'var(--red)';
+          }
+        }
+        return;
+      }
+
+      this.modalAuditState = 'SAVING';
+      if (fb) fb.textContent = '⏳ Saving...';
       const currentCfg = { ...(this.cameras[name]?.config || { name: name, url: '' }) };
       currentCfg.normal_context = ctx;
       currentCfg.night_context_enabled = nightEnabled;
@@ -3902,10 +4062,11 @@ const App = {
       this.cameras[name].config = currentCfg;
       await this._apiUpsertCamera(currentCfg);
       if (fb) {
-        fb.textContent = '✅ Saved';
+        fb.textContent = '✅ Saved & Hot-Reloaded';
         fb.style.color = 'var(--green)';
         setTimeout(() => { fb.textContent = ''; }, 2500);
       }
+      this.modalAuditState = 'SAVED';
       this._showToast(`Updated context & incident rules for ${name}`, 'ok');
     });
 

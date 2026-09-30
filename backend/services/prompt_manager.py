@@ -1,6 +1,6 @@
 """
 PromptManager: hot-reload prompts from config/prompts.json (watches mtime every 2s).
-Supports a master prompt template with {normal_context} placeholder,
+Supports distinct scene/background, baseline, and checklist placeholders,
 and per-camera override prompts stored under "cameras": {name: str}.
 """
 from __future__ import annotations
@@ -52,19 +52,24 @@ class PromptManager:
         if hour is None:
             hour = datetime.now().hour
 
-        normal_context = self._get_cam_context(cam_name, hour)
-        rules_str = self._get_cam_incident_rules_str(cam_name)
-
-        ctx_parts = []
-        if normal_context:
-            ctx_parts.append(
-                f"NORMAL ROUTINE CONTEXT for this camera ({cam_name}):\n{normal_context}\nFlag any deviation from this normal context."
-            )
-        if rules_str:
-            ctx_parts.append(rules_str)
-
-        ctx_str = "\n\n".join(ctx_parts)
+        baseline = self._get_cam_context(cam_name, hour)
+        routine_checklist, threat_checklist = self._get_cam_checklists(cam_name)
         master_scene = self._master_scene_context.strip() if self._master_scene_context else "Standard facility environment."
+
+        baseline_block = (
+            "CAMERA BASELINE — orientation only; use it to understand the scene, not as proof of an incident:\n"
+            f"{baseline}\n" if baseline else "CAMERA BASELINE — (none provided)"
+        )
+        routine_block = (
+            "VISUAL CHECKLIST B — ROUTINE ACTIVITIES\n"
+            "If an item is visibly present, copy it into routine_flags; otherwise return []. Do not infer intent or risk.\n"
+            f"{routine_checklist or '(none provided)'}"
+        )
+        threat_block = (
+            "VISUAL CHECKLIST A — PRIORITY THREATS\n"
+            "If an item is visibly present, copy it into priority_flags; otherwise return []. Do not infer intent or risk.\n"
+            f"{threat_checklist or '(none provided)'}"
+        )
 
         if is_followup:
             followup_info = (
@@ -79,8 +84,12 @@ class PromptManager:
                 template
                 .replace("{cam_name}", cam_name)
                 .replace("{master_scene_context}", master_scene)
+                .replace("{scene_background}", master_scene)
                 .replace("{global_context}", master_scene)
-                .replace("{normal_context}", ctx_str)
+                .replace("{normal_context}", f"{baseline_block}\n\n{threat_block}\n\n{routine_block}")
+                .replace("{baseline_context}", baseline_block)
+                .replace("{routine_checklist}", routine_block)
+                .replace("{threat_checklist}", threat_block)
                 .replace("{followup_context}", followup_info)
             )
 
@@ -89,8 +98,12 @@ class PromptManager:
             template
             .replace("{cam_name}", cam_name)
             .replace("{master_scene_context}", master_scene)
+            .replace("{scene_background}", master_scene)
             .replace("{global_context}", master_scene)
-            .replace("{normal_context}", ctx_str)
+            .replace("{normal_context}", f"{baseline_block}\n\n{threat_block}\n\n{routine_block}")
+            .replace("{baseline_context}", baseline_block)
+            .replace("{routine_checklist}", routine_block)
+            .replace("{threat_checklist}", threat_block)
         )
 
     def get_followup_prompt(self, cam_name: str, hour: Optional[int] = None) -> str:
@@ -221,36 +234,26 @@ class PromptManager:
         return cam.get("normal_context", "").strip()
 
     def _get_cam_incident_rules_str(self, cam_name: str) -> str:
+        """Legacy combined representation retained for compatibility."""
+        routine, threat = self._get_cam_checklists(cam_name)
+        parts = []
+        if threat:
+            parts.append(f"VISUAL CHECKLIST A:\n{threat}")
+        if routine:
+            parts.append(f"VISUAL CHECKLIST B:\n{routine}")
+        return "\n\n".join(parts)
+
+    def _get_cam_checklists(self, cam_name: str) -> tuple[str, str]:
+        """Return (routine checklist, priority checklist) as display-ready lines."""
         cam = self._get_cam_config(cam_name)
         if not cam:
-            return ""
+            return "", ""
 
-        severe = cam.get("severe_incidents")
-        low = cam.get("low_incidents")
+        def format_items(value) -> str:
+            values = value if isinstance(value, list) else str(value or "").splitlines()
+            return "\n".join(
+                f"  * {str(item).strip()}" for item in values if str(item).strip()
+            )
 
-        sections = []
-        if severe:
-            if isinstance(severe, list):
-                items = "\n".join(f"  * {s.strip()}" for s in severe if s.strip())
-            else:
-                items = "\n".join(f"  * {line.strip()}" for line in severe.strip().split("\n") if line.strip())
-            if items:
-                sections.append(
-                    f"• PRIORITY WATCHLIST for {cam_name} (Visual Verification Targets):\n{items}"
-                )
-
-        if low:
-            if isinstance(low, list):
-                items = "\n".join(f"  * {s.strip()}" for s in low if s.strip())
-            else:
-                items = "\n".join(f"  * {line.strip()}" for line in low.strip().split("\n") if line.strip())
-            if items:
-                sections.append(
-                    f"• ROUTINE WHITELIST for {cam_name} (Classify as SAFETY: OK, SEVERITY: LOW):\n{items}"
-                )
-
-        if sections:
-            return "\n\n".join(sections)
-        return ""
-
+        return format_items(cam.get("low_incidents")), format_items(cam.get("severe_incidents"))
 

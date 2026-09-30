@@ -181,6 +181,8 @@ class AlertEngine:
             "trigger_mode": trigger_mode,
             "trigger_badge": trigger_badge,
             "observation": result.get("observation", ""),
+            "priority_flags": result.get("priority_flags", []),
+            "routine_flags": result.get("routine_flags", []),
             "activity": result.get("activity", "UNKNOWN"),
             "workers": result.get("workers", "0"),
             "machinery": result.get("machinery", "None"),
