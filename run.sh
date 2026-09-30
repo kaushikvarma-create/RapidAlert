@@ -101,7 +101,7 @@ echo -e "  ${CYAN}Hybrid VLM Surveillance Engine${NC}  —  Jetson Thor Edition"
 echo "  ─────────────────────────────────────────────────────"
 echo -e "  Ingest   : ${BOLD}NVIDIA DeepStream (NVDEC Hardware Decode)${NC}"
 echo -e "  Trigger  : ${BOLD}DINOv2 Scene Drift (CUDA Real-Time)${NC}"
-echo -e "  VLM      : ${BOLD}Cosmos Reason2 8B (${VLLM_MODEL})${NC}"
+echo -e "  VLM      : ${BOLD}${VLLM_MODEL}${NC}"
 echo -e "  Dashboard: ${BOLD}http://0.0.0.0:${DASHBOARD_PORT}${NC}"
 echo "  ─────────────────────────────────────────────────────"
 echo ""
@@ -226,7 +226,7 @@ if [[ "$AUTO_START_VLLM" == "true" ]]; then
                 --shm-size=4g \
                 -e NVIDIA_VISIBLE_DEVICES=all \
                 -e CUDA_VISIBLE_DEVICES=0 \
-                -e HF_TOKEN="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" \
+                -e HF_TOKEN="${HF_TOKEN:-}" \
                 -e HF_HOME=/data/models/huggingface \
                 -e EP_MODEL="${EP_MODEL}" \
                 -e EP_QUANTIZATION="${EP_QUANTIZATION}" \
@@ -273,7 +273,7 @@ BACKEND_MIG_UUID=$(python3 -c "
 import json
 d = json.load(open('config/system.json'))
 eps = d.get('vllm_endpoints', [])
-print(eps[0].get('mig_uuid', '') if eps else '')
+print(d.get('backend_mig_uuid') or (eps[0].get('mig_uuid', '') if eps else ''))
 " 2>/dev/null || echo "")
 
 if [[ -n "${BACKEND_MIG_UUID}" ]]; then

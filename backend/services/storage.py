@@ -57,6 +57,7 @@ class StorageManager:
                     latency      REAL,
                     e2e_latency  REAL,
                     incident_id  TEXT,
+                    event_id     TEXT,
                     parent_id    TEXT,
                     trigger_mode TEXT,
                     clip_path    TEXT,
@@ -90,6 +91,7 @@ class StorageManager:
             schema_additions = {
                 "e2e_latency": "REAL",
                 "incident_id": "TEXT",
+                "event_id": "TEXT",
                 "parent_id": "TEXT",
                 "trigger_mode": "TEXT",
                 "clip_path": "TEXT",
@@ -120,6 +122,7 @@ class StorageManager:
                 CREATE INDEX IF NOT EXISTS idx_analyses_severity       ON analyses(severity);
                 CREATE INDEX IF NOT EXISTS idx_analyses_safety         ON analyses(safety);
                 CREATE INDEX IF NOT EXISTS idx_analyses_incident       ON analyses(incident_id);
+                CREATE INDEX IF NOT EXISTS idx_analyses_event          ON analyses(event_id);
                 CREATE INDEX IF NOT EXISTS idx_analyses_trigger        ON analyses(trigger_mode);
                 CREATE INDEX IF NOT EXISTS idx_analyses_cam_ts         ON analyses(cam, ts);
 
@@ -151,6 +154,7 @@ class StorageManager:
         latency: float = 0.0,
         e2e_latency: Optional[float] = None,
         incident_id: Optional[str] = None,
+        event_id: Optional[str] = None,
         parent_id: Optional[str] = None,
         trigger_mode: Optional[str] = None,
         clip_path: Optional[str] = None,
@@ -166,6 +170,7 @@ class StorageManager:
             ts = result.get("ts") or time.time()
             e2e = e2e_latency if e2e_latency is not None else result.get("e2e_latency")
             inc_id = incident_id or result.get("incident_id")
+            e_id = event_id or result.get("event_id")
             p_id = parent_id or result.get("parent_id")
             t_mode = trigger_mode or result.get("trigger_mode")
             c_path = clip_path or result.get("clip_path")
@@ -179,9 +184,9 @@ class StorageManager:
                 INSERT INTO analyses
                   (cam, ts, observation, activity, workers, machinery,
                    safety, severity, reasoning, latency, e2e_latency, incident_id,
-                   parent_id, trigger_mode, clip_path, keywords,
+                   event_id, parent_id, trigger_mode, clip_path, keywords,
                    threat_level, confidence, labels, error)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     cam,
@@ -196,6 +201,7 @@ class StorageManager:
                     round(latency, 3),
                     round(e2e, 3) if e2e is not None else None,
                     inc_id,
+                    e_id,
                     p_id,
                     t_mode,
                     c_path,
@@ -452,6 +458,7 @@ class StorageManager:
         cam: str,
         frames: List[str | bytes],
         ts: Optional[float] = None,
+        frame_timestamps: Optional[List[float]] = None,
         max_sets: int = 3000,
     ) -> int:
         """
@@ -473,12 +480,13 @@ class StorageManager:
                 else:
                     continue
 
+                frame_ts_i = (frame_timestamps[idx] if frame_timestamps and idx < len(frame_timestamps) else frame_ts)
                 conn.execute(
                     """
                     INSERT INTO incident_frames (incident_id, event_id, cam, frame_idx, frame_data, ts)
                     VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (incident_id, event_id, cam, idx, raw_bytes, frame_ts),
+                    (incident_id, event_id, cam, idx, raw_bytes, frame_ts_i),
                 )
                 inserted += 1
             conn.commit()
@@ -514,16 +522,28 @@ class StorageManager:
                 """
                 SELECT incident_id, frame_idx, frame_data, ts, cam, event_id
                 FROM incident_frames
-                WHERE incident_id = ? OR event_id = ?
+                WHERE event_id = ?
                 ORDER BY frame_idx ASC
                 """,
-                (inc_str, inc_str),
+                (inc_str,),
             ).fetchall()
+
+            if not rows:
+                rows = conn.execute(
+                    """
+                    SELECT incident_id, frame_idx, frame_data, ts, cam, event_id
+                    FROM incident_frames
+                    WHERE incident_id = ?
+                    ORDER BY ts DESC, event_id DESC, frame_idx ASC
+                    LIMIT 4
+                    """,
+                    (inc_str,),
+                ).fetchall()
 
             # 2. Lookup via analyses row id if numeric
             if not rows and inc_str.isdigit():
                 analysis_row = conn.execute(
-                    "SELECT id, cam, ts, incident_id FROM analyses WHERE id = ?",
+                    "SELECT id, cam, ts, incident_id, event_id FROM analyses WHERE id = ?",
                     (int(inc_str),),
                 ).fetchone()
                 if analysis_row:

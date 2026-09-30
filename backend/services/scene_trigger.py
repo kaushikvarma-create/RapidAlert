@@ -269,34 +269,33 @@ class SceneTriggerEngine:
                 trigger_time = time.monotonic()
 
             # Retrieve temporal historical sequence: [-10.0, -5.0, -2.0]
-            pre_frames = self.frame_store.get_pre_trigger_frames(
+            pre_frames = self.frame_store.get_pre_trigger_frames_with_timestamps(
                 cam_name,
                 trigger_time=trigger_time,
                 offsets=[-10.0, -5.0, -2.0],
             )
             latest_entry = self.frame_store.get_latest(cam_name)
-            current_frame = latest_entry[0] if latest_entry else None
-
-            all_raw_frames = []
-            if pre_frames:
-                all_raw_frames.extend(pre_frames)
-            if current_frame is not None:
-                all_raw_frames.append(current_frame)
+            all_raw_frames = list(pre_frames)
+            if latest_entry is not None:
+                all_raw_frames.append(latest_entry)
 
             # Fallback if buffer does not have 10 seconds of history yet
             if len(all_raw_frames) < 4:
-                sampled = self.frame_store.get_temporal_snapshots_b64(
-                    cam_name, count=4, span_sec=10.0, max_w=512, quality=80
-                )
-                frames_b64 = sampled or []
-                thumbs_b64 = self.frame_store.get_temporal_snapshots_b64(
+                sampled = self.frame_store.get_temporal_snapshots_with_timestamps_b64(
+                    cam_name, count=4, span_sec=10.0, max_w=384, quality=80
+                ) or []
+                thumbs_sampled = self.frame_store.get_temporal_snapshots_with_timestamps_b64(
                     cam_name, count=4, span_sec=10.0, max_w=TEMPORAL_THUMB_WIDTH, quality=TEMPORAL_THUMB_QUALITY
                 ) or []
+                frames_b64 = [frame for frame, _ in sampled]
+                thumbs_b64 = [frame for frame, _ in thumbs_sampled]
+                frame_mono_ts = [ts for _, ts in thumbs_sampled]
             else:
-                frames_b64 = self.frame_store.encode_frames(all_raw_frames, max_w=512, quality=80)
+                frames_b64 = self.frame_store.encode_frames([frame for frame, _ in all_raw_frames], max_w=384, quality=80)
                 thumbs_b64 = self.frame_store.encode_frames(
-                    all_raw_frames, max_w=TEMPORAL_THUMB_WIDTH, quality=TEMPORAL_THUMB_QUALITY
+                    [frame for frame, _ in all_raw_frames], max_w=TEMPORAL_THUMB_WIDTH, quality=TEMPORAL_THUMB_QUALITY
                 )
+                frame_mono_ts = [ts for _, ts in all_raw_frames]
 
             # Capture high-resolution snapshot for sharp modal preview
             high_res_snap = self.frame_store.get_snapshot_b64(
@@ -319,6 +318,7 @@ class SceneTriggerEngine:
                 "tier": tier,
                 "frames_b64": frames_b64,
                 "thumbs_b64": thumbs_b64,
+                "frame_timestamps": [time.time() + (ts - time.monotonic()) for ts in frame_mono_ts],
                 "thumbnail_b64": high_res_snap,
                 "labels": labels,
                 "priority": 0,  # High priority incident

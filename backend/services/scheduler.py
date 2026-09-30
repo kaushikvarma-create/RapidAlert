@@ -16,7 +16,9 @@ is replaced by explicit worker count (easier to auto-tune).
 """
 from __future__ import annotations
 
+import ast
 import asyncio
+import re
 import time
 from typing import Callable, Optional, TYPE_CHECKING
 
@@ -250,6 +252,7 @@ class DeadlineScheduler:
                 break
 
             priority, seq, job = item
+            job["priority"] = priority
             cam = job.get("cam", "")
             try:
                 await self._analyze_job(job)
@@ -264,6 +267,77 @@ class DeadlineScheduler:
             finally:
                 self._in_flight.discard(cam)
                 self._queue.task_done()
+
+    def _apply_severity_policy(self, cam_name: str, result: dict) -> None:
+        """Apply configured-checklist precedence and conservative severity fallback."""
+        cam = self.camera_manager.get_cam(cam_name) or {}
+
+        def items(value) -> list[str]:
+            if isinstance(value, list):
+                values = value
+            else:
+                values = str(value or "").splitlines()
+            out = []
+            for value in values:
+                out.extend(str(value).split(","))
+            return [value.strip() for value in out if value.strip()]
+
+        def norm(value: str) -> str:
+            value = re.sub(r"[^a-z0-9 ]+", " ", str(value).lower())
+            value = re.sub(r"\bpeople\b|\bpersons\b", "person", value)
+            value = re.sub(r"\b(an|a|the)\b", " ", value)
+            return re.sub(r"\s+", " ", value).strip()
+
+        def values_from_result(value) -> list[str]:
+            if isinstance(value, list):
+                return [str(item).strip() for item in value if str(item).strip()]
+            text = str(value or "").strip()
+            if text in ("", "[]", "None", "['']", '[""]'):
+                return []
+            try:
+                parsed = ast.literal_eval(text)
+                if isinstance(parsed, list):
+                    return [str(item).strip() for item in parsed if str(item).strip()]
+            except (ValueError, SyntaxError):
+                pass
+            return [item.strip() for item in text.split(",") if item.strip()]
+
+        def matches(flag: str, configured: list[str]) -> bool:
+            flag_n = norm(flag)
+            return bool(flag_n) and any(
+                flag_n == item_n
+                or (len(flag_n) > 18 and (flag_n in item_n or item_n in flag_n))
+                for item_n in configured
+            )
+
+        configured_priority = [norm(item) for item in items(cam.get("severe_incidents"))]
+        configured_routine = [norm(item) for item in items(cam.get("low_incidents"))]
+        priority_flags = [flag for flag in values_from_result(result.get("priority_flags"))
+                          if matches(flag, configured_priority)]
+        routine_flags = [flag for flag in values_from_result(result.get("routine_flags"))
+                         if matches(flag, configured_routine)]
+
+        # Never let the model invent a checklist item and use it as proof.
+        result["priority_flags"] = priority_flags
+        result["routine_flags"] = routine_flags
+
+        raw_severity = str(result.get("severity") or "LOW").upper()
+        raw_safety = str(result.get("safety") or "UNKNOWN").upper()
+        if priority_flags:
+            result["severity"] = "HIGH"
+            result["safety"] = "DANGER"
+        elif routine_flags:
+            result["severity"] = "LOW"
+            result["safety"] = "OK"
+        elif raw_severity in ("HIGH", "EXTREME") or raw_safety == "DANGER":
+            result["severity"] = "HIGH" if raw_severity != "EXTREME" else "EXTREME"
+            result["safety"] = "DANGER"
+        elif raw_severity == "MEDIUM" or raw_safety == "WARNING":
+            result["severity"] = "MEDIUM"
+            result["safety"] = "WARNING"
+        else:
+            result["severity"] = "LOW"
+            result["safety"] = "OK" if raw_safety in ("OK", "UNKNOWN") else raw_safety
 
     async def _analyze_job(self, job: dict) -> None:
         cam_name = job["cam"]
@@ -281,17 +355,20 @@ class DeadlineScheduler:
         if is_incident and job.get("frames_b64"):
             frames_b64 = job["frames_b64"]
             thumbs_b64 = job.get("thumbs_b64", [])
+            frame_timestamps = job.get("frame_timestamps")
             high_res_snap = (
                 job.get("thumbnail_b64")
                 or self.frame_store.get_snapshot_b64(cam_name, max_w=HIGH_RES_FRAME_WIDTH, quality=HIGH_RES_JPEG_QUALITY)
                 or (thumbs_b64[-1] if thumbs_b64 else None)
             )
         else:
-            # Heartbeat fallback: extract 4 temporal frames across 10s
-            frames_b64 = self.frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=10.0, max_w=512)
-            thumbs_b64 = self.frame_store.get_temporal_snapshots_b64(
+            # Heartbeat fallback: extract 4 temporal frames across 10s (max_w=384 for 3s inference)
+            frames_b64 = self.frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=10.0, max_w=384)
+            timestamped_thumbs = self.frame_store.get_temporal_snapshots_with_timestamps_b64(
                 cam_name, count=4, span_sec=10.0, max_w=TEMPORAL_THUMB_WIDTH, quality=TEMPORAL_THUMB_QUALITY
-            )
+            ) or []
+            thumbs_b64 = [frame for frame, _ in timestamped_thumbs]
+            frame_timestamps = [time.time() + (ts - time.monotonic()) for _, ts in timestamped_thumbs]
             high_res_snap = (
                 self.frame_store.get_snapshot_b64(cam_name, max_w=HIGH_RES_FRAME_WIDTH, quality=HIGH_RES_JPEG_QUALITY)
                 or (thumbs_b64[-1] if thumbs_b64 else None)
@@ -309,8 +386,10 @@ class DeadlineScheduler:
         )
 
         t0 = time.monotonic()
-        res = await self.vlm_pool.analyze(cam_name, frames_b64, prompt, labels=job_labels)
+        priority = job.get("priority", 0 if is_incident else 2)
+        res = await self.vlm_pool.analyze(cam_name, frames_b64, prompt, labels=job_labels, priority=priority)
         res["model"] = DEFAULT_VLM_MODEL
+        self._apply_severity_policy(cam_name, res)
         latency = res.get("latency", time.monotonic() - t0)
 
         if is_incident:
@@ -376,6 +455,7 @@ class DeadlineScheduler:
                     latency=latency,
                     e2e_latency=e2e_latency,
                     incident_id=inc_target_id,
+                    event_id=alert.get("id") if alert else inc_target_id,
                     parent_id=alert.get("parent_id") if alert else parent_id,
                     trigger_mode=alert.get("trigger_mode") if alert else ("TRIGGER" if is_incident else ("FOLLOWUP" if is_followup else "PERIODIC")),
                     clip_path=alert.get("clip_path") if alert else None,
@@ -384,10 +464,11 @@ class DeadlineScheduler:
                 if thumbs_b64 and len(thumbs_b64) > 0:
                     self.storage.save_incident_frames(
                         incident_id=inc_target_id,
-                        event_id=alert.get("id") if alert else None,
+                        event_id=alert.get("id") if alert else inc_target_id,
                         cam=cam_name,
                         frames=thumbs_b64,
                         ts=rec_ts,
+                        frame_timestamps=frame_timestamps,
                     )
             except Exception as exc:
                 error_tracker.capture_exception(
@@ -523,10 +604,12 @@ class DeadlineScheduler:
             if not self._running or self._queue is None:
                 return
 
-            frames_b64 = self.frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=delay_sec, max_w=512)
-            thumbs_b64 = self.frame_store.get_temporal_snapshots_b64(
+            frames_b64 = self.frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=delay_sec, max_w=384)
+            timestamped_thumbs = self.frame_store.get_temporal_snapshots_with_timestamps_b64(
                 cam_name, count=4, span_sec=delay_sec, max_w=TEMPORAL_THUMB_WIDTH, quality=TEMPORAL_THUMB_QUALITY
-            )
+            ) or []
+            thumbs_b64 = [frame for frame, _ in timestamped_thumbs]
+            frame_timestamps = [time.time() + (ts - time.monotonic()) for _, ts in timestamped_thumbs]
             high_res_snap = (
                 self.frame_store.get_snapshot_b64(cam_name, max_w=HIGH_RES_FRAME_WIDTH, quality=HIGH_RES_JPEG_QUALITY)
                 or (thumbs_b64[-1] if thumbs_b64 else None)
@@ -562,6 +645,7 @@ class DeadlineScheduler:
                 "followup_delay": delay_sec,
                 "frames_b64": frames_b64,
                 "thumbs_b64": thumbs_b64,
+                "frame_timestamps": frame_timestamps,
                 "thumbnail_b64": high_res_snap,
                 "labels": followup_labels,
                 "trigger_time": time.monotonic(),

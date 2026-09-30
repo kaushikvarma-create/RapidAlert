@@ -169,13 +169,13 @@ class FrameStore:
             pass
         return None
 
-    def get_pre_trigger_frames(
+    def get_pre_trigger_frames_with_timestamps(
         self,
         cam_name: str,
         trigger_time: float,
         offsets: list[float] = [-5.0, -2.0, -0.5],
-    ) -> list[np.ndarray]:
-        """Finds frames closest to trigger_time + offset for each offset."""
+    ) -> list[tuple[np.ndarray, float]]:
+        """Find frames closest to trigger offsets and return their capture timestamps."""
         with self._lock:
             q = self._store.get(cam_name)
             if not q:
@@ -185,10 +185,17 @@ class FrameStore:
         results = []
         for offset in offsets:
             target_ts = trigger_time + offset
-            # Find item with minimal absolute timestamp difference
             closest = min(items, key=lambda item: abs(item[1] - target_ts))
-            results.append(closest[0].copy())
+            results.append((closest[0].copy(), closest[1]))
         return results
+
+    def get_pre_trigger_frames(
+        self,
+        cam_name: str,
+        trigger_time: float,
+        offsets: list[float] = [-5.0, -2.0, -0.5],
+    ) -> list[np.ndarray]:
+        return [frame for frame, _ in self.get_pre_trigger_frames_with_timestamps(cam_name, trigger_time, offsets)]
 
     def get_temporal_snapshots_b64(
         self,
@@ -229,6 +236,34 @@ class FrameStore:
             selected = [window[i] for i in indices]
 
         return [self._encode_frame(f, max_w, quality, cam_name=cam_name) for f, _ in selected]
+
+    def get_temporal_snapshots_with_timestamps_b64(
+        self,
+        cam_name: str,
+        count: int = 4,
+        span_sec: float = 10.0,
+        max_w: Optional[int] = None,
+        quality: Optional[int] = None,
+    ) -> Optional[list[tuple[str, float]]]:
+        """Return encoded temporal frames with their monotonic capture timestamps."""
+        with self._lock:
+            q = self._store.get(cam_name)
+            if not q:
+                return None
+            items = list(q)
+
+        target_start = time.monotonic() - span_sec
+        window = [item for item in items if item[1] >= target_start - 2.0] or items
+        if not window:
+            return None
+        if len(window) < count:
+            selected = [window[0]] * (count - len(window)) + list(window)
+        elif len(window) == count:
+            selected = window
+        else:
+            indices = np.linspace(0, len(window) - 1, count, dtype=int)
+            selected = [window[i] for i in indices]
+        return [(self._encode_frame(frame, max_w, quality, cam_name=cam_name), ts) for frame, ts in selected]
 
     def encode_frames(
         self,

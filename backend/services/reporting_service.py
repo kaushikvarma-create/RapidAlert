@@ -163,7 +163,7 @@ class ReportingService:
             resp = requests.post(
                 "http://localhost:8000/v1/chat/completions",
                 json={
-                    "model": "vrfai/Cosmos-Reason2-8B-NVFP4",
+                    "model": "Qwen/Qwen3.5-9B",
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.2,
                     "max_tokens": 60,
@@ -200,7 +200,7 @@ class ReportingService:
             resp = requests.post(
                 "http://localhost:8000/v1/chat/completions",
                 json={
-                    "model": "vrfai/Cosmos-Reason2-8B-NVFP4",
+                    "model": "Qwen/Qwen3.5-9B",
                     "messages": [{
                         "role": "user",
                         "content": [

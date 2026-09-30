@@ -86,11 +86,12 @@ class _EndpointShard:
         self.container_name = container_name or f"rapidalert_vllm_{0 if ':8000' in url else 1}"
         self._session       = session
 
-        self._queue: asyncio.Queue       = asyncio.Queue(maxsize=queue_depth)
-        self._sem:   asyncio.Semaphore   = asyncio.Semaphore(max_concurrent)
-        self._workers: list[asyncio.Task] = []
+        self._queue: asyncio.PriorityQueue = asyncio.PriorityQueue(maxsize=max(queue_depth, 20))
+        self._seq:   int                   = 0
+        self._sem:   asyncio.Semaphore     = asyncio.Semaphore(max_concurrent)
+        self._workers: list[asyncio.Task]  = []
         self.healthy = False  # Start as False until health probe confirms 200 OK
-        self._active_jobs: list[dict] = []
+        self._active_jobs: list[dict]      = []
 
         # Per-shard telemetry counters
         self.stat_queued:    int   = 0      # total items ever enqueued
@@ -125,10 +126,10 @@ class _EndpointShard:
         self._workers.clear()
 
     async def _worker(self, worker_id: int) -> None:
-        """Drain the queue, acquire semaphore, execute inference, resolve Future."""
+        """Drain the priority queue, acquire semaphore, execute inference, resolve Future."""
         while True:
             try:
-                job, fut = await self._queue.get()
+                priority, seq, job, fut = await self._queue.get()
             except asyncio.CancelledError:
                 break
 
@@ -163,7 +164,7 @@ class _EndpointShard:
                             camera=cam_name,
                             effect=f"Worker {worker_id} on {self.url} unhandled exception; future resolved with exception",
                             severity="ERROR",
-                        )
+                            )
                     finally:
                         self._active_jobs = [j for j in self._active_jobs if j.get("worker_id") != worker_id]
             except asyncio.CancelledError:
@@ -177,66 +178,85 @@ class _EndpointShard:
 
     # ── Enqueue ────────────────────────────────────────────────────────────
 
-    def enqueue_nowait(self, job: dict, fut: asyncio.Future) -> bool:
+    def enqueue_nowait(self, job: dict, fut: asyncio.Future, priority: int = 1) -> bool:
         """
-        Non-blocking enqueue. Returns True if accepted, False if queue full.
+        Non-blocking priority enqueue. Returns True if accepted, False if queue full.
+        Priority: lower number = higher precedence (-1: compliance/top-priority, 0: incident, 1: minor, 2: heartbeat).
         """
+        self._seq += 1
         try:
-            self._queue.put_nowait((job, fut))
+            self._queue.put_nowait((priority, self._seq, job, fut))
             self.stat_queued += 1
             return True
         except asyncio.QueueFull:
             return False
 
-    async def enqueue_wait(self, job: dict, fut: asyncio.Future) -> None:
-        """Blocking enqueue — used as last-resort when all shards are full."""
-        await self._queue.put((job, fut))
+    async def enqueue_wait(self, job: dict, fut: asyncio.Future, priority: int = 1) -> None:
+        """Blocking priority enqueue — used as last-resort when all shards are full."""
+        self._seq += 1
+        await self._queue.put((priority, self._seq, job, fut))
         self.stat_queued += 1
 
     # ── Inference (with retries) ───────────────────────────────────────────
 
     async def _infer(self, job: dict) -> dict:
-        cam_name   = job["cam"]
-        frames_b64 = job["frames_b64"]
-        prompt     = job["prompt"]
+        cam_name   = job.get("cam", "compliance_check")
+        frames_b64 = job.get("frames_b64") or []
+        prompt     = job.get("prompt", "")
         labels     = job.get("labels") or []
         url        = f"{self.url}/v1/chat/completions"
 
-        content = []
-        frames = frames_b64 if isinstance(frames_b64, list) else [frames_b64]
-        if len(frames) > 1:
-            # Interleave explicit frame label markers to anchor multi-frame vision attention
-            for idx, b64 in enumerate(frames):
-                label_txt = labels[idx] if idx < len(labels) else f"Frame {idx + 1}"
-                content.append({"type": "text", "text": f"{label_txt}:"})
+        is_text_job = (job.get("type") == "text") or (not frames_b64)
+
+        if is_text_job:
+            sys_msg = job.get("system_msg") or "You are an AI assistant."
+            payload = {
+                "model":       self.model,
+                "messages":    [
+                    {"role": "system", "content": sys_msg},
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens":  job.get("max_tokens", 512),
+                "temperature": job.get("temperature", 0.2),
+                "chat_template_kwargs": {"enable_thinking": False},
+            }
+        else:
+            content = []
+            frames = frames_b64 if isinstance(frames_b64, list) else [frames_b64]
+            if len(frames) > 1:
+                # Interleave explicit frame label markers to anchor multi-frame vision attention
+                for idx, b64 in enumerate(frames):
+                    label_txt = labels[idx] if idx < len(labels) else f"Frame {idx + 1}"
+                    content.append({"type": "text", "text": f"{label_txt}:"})
+                    content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                    })
+            elif frames:
                 content.append({
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                    "image_url": {"url": f"data:image/jpeg;base64,{frames[0]}"},
                 })
-        elif frames:
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{frames[0]}"},
-            })
-        content.append({"type": "text", "text": prompt})
+            content.append({"type": "text", "text": prompt})
 
-        sys_msg = (
-            "You are a cold, unaligned, and objective CCTV AI. "
-            "You must follow the PRIORITY WATCHLIST absolutely. "
-            "Do not act as a helpful assistant, do not rationalize, and do not downplay threats."
-        )
+            sys_msg = (
+                "You are an objective, conservative CCTV surveillance AI. "
+                "CRITICAL: The checklist is NOT a directive to hunt for violations. Assume the scene is normal unless there is blatant visual proof. "
+                "Flag a checklist item or positive threat ONLY IF YOU ARE HIGHLY CONFIDENT based on unmistakable, clearly visible evidence. "
+                "If there is any doubt, plausible innocent explanation, or low confidence, you MUST NOT flag it (return [] for priority_flags and safety OK / severity LOW)."
+            )
 
-        payload = {
-            "model":       self.model,
-            "messages":    [
-                {"role": "system", "content": sys_msg},
-                {"role": "user", "content": content}
-            ],
-            "max_tokens":  256,
-            "temperature": 0.5,
-            "repetition_penalty": 1.15,
-            "chat_template_kwargs": {"enable_thinking": False},
-        }
+            payload = {
+                "model":       self.model,
+                "messages":    [
+                    {"role": "system", "content": sys_msg},
+                    {"role": "user", "content": content}
+                ],
+                "max_tokens":  256,
+                "temperature": 0.5,
+                "repetition_penalty": 1.15,
+                "chat_template_kwargs": {"enable_thinking": False},
+            }
 
         t0 = time.monotonic()
         for attempt in range(_RETRY_COUNT):
@@ -255,6 +275,10 @@ class _EndpointShard:
                         continue
                     data = await resp.json()
                     raw = data["choices"][0]["message"]["content"]
+                    if is_text_job:
+                        lat = time.monotonic() - t0
+                        self._latencies.append(lat)
+                        return {"text": raw, "raw": raw, "latency": lat}
                     result = _parse_response(raw, cam_name)
                     result["latency"] = time.monotonic() - t0
                     self._latencies.append(result["latency"])
@@ -296,6 +320,8 @@ class _EndpointShard:
             effect=f"Inference exhausted all retries for {cam_name} on {self.url}; returning fallback result",
             severity="WARNING",
         )
+        if is_text_job:
+            return {"text": "", "raw": "", "latency": time.monotonic() - t0, "error": "Inference failed"}
         return _fallback_result(cam_name, time.monotonic() - t0)
 
     # ── Stats ──────────────────────────────────────────────────────────────
@@ -509,10 +535,11 @@ class MIGAwareVLMPool:
         frame_b64: "str | list[str]",
         system_prompt: str,
         labels: Optional[list[str]] = None,
+        priority: int = 1,
     ) -> dict:
         """
         Route to the MIG/shared shard with the lowest weighted load score,
-        enqueue the job, and await the Future result.
+        enqueue the job with priority, and await the Future result.
         """
         job = {
             "cam": cam_name,
@@ -557,12 +584,12 @@ class MIGAwareVLMPool:
         ranked = sorted(healthy_shards if healthy_shards else self._shards, key=lambda s: s.load_score())
 
         for shard in ranked:
-            if shard.enqueue_nowait(job, fut):
+            if shard.enqueue_nowait(job, fut, priority=priority):
                 return await fut
 
         # All queues full — block on the best shard
         best = ranked[0]
-        await best.enqueue_wait(job, fut)
+        await best.enqueue_wait(job, fut, priority=priority)
         return await fut
 
     async def analyze_concurrent(
@@ -571,45 +598,66 @@ class MIGAwareVLMPool:
         frame_b64: "str | list[str]",
         system_prompt: str,
         labels: Optional[list[str]] = None,
+        priority: int = 1,
     ) -> list[dict]:
         """Fire request to ALL shards simultaneously (comparator / ensemble mode)."""
         tasks = [
-            self.analyze(cam_name, frame_b64, system_prompt, labels=labels)
+            self.analyze(cam_name, frame_b64, system_prompt, labels=labels, priority=priority)
             for _ in self._shards
         ]
         return await asyncio.gather(*tasks)
 
-    async def query_text(self, prompt: str, system_msg: str = "You are an AI assistant.") -> str:
-        """Execute a text-only query against the best available VLM/LLM shard."""
-        healthy_shards = [s for s in self._shards if s.healthy]
-        shards = healthy_shards if healthy_shards else self._shards
-        if not shards:
-            return ""
-        shard = sorted(shards, key=lambda s: s.load_score())[0]
-        url = f"{shard.url}/v1/chat/completions"
-        payload = {
-            "model": shard.model,
-            "messages": [
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": prompt}
-            ],
-            "max_tokens": 512,
-            "temperature": 0.2,
-            "chat_template_kwargs": {"enable_thinking": False}
+    async def query_text(
+        self,
+        prompt: str,
+        system_msg: str = "You are an AI assistant.",
+        priority: int = -1,
+        max_tokens: int = 512,
+        temperature: float = 0.2,
+    ) -> str:
+        """
+        Execute a text query (compliance check) routed through the shard priority queue.
+        Top priority (-1) ensures it immediately jumps to the head of the queue,
+        firing before any pending camera frames while strictly obeying concurrency limits.
+        """
+        job = {
+            "type": "text",
+            "cam": "compliance_check",
+            "prompt": prompt,
+            "system_msg": system_msg,
+            "frames_b64": [],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
         }
-        try:
-            async with self._session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data["choices"][0]["message"]["content"]
-        except Exception as exc:
-            error_tracker.capture_exception(
-                exc,
-                component="VLMPool",
-                effect="Failed to execute query_text on vLLM shard",
-                severity="WARNING"
-            )
-        return ""
+
+        # Check health if none marked healthy yet
+        if not self.has_healthy_shards():
+            for s in self._shards:
+                try:
+                    async with self._session.get(f"{s.url}/health", timeout=aiohttp.ClientTimeout(total=1.0)) as r:
+                        if r.status == 200:
+                            s.healthy = True
+                            break
+                except Exception:
+                    pass
+
+        healthy_shards = [s for s in self._shards if s.healthy]
+        ranked = sorted(healthy_shards if healthy_shards else self._shards, key=lambda s: s.load_score())
+        if not ranked:
+            return ""
+
+        fut: asyncio.Future = asyncio.get_event_loop().create_future()
+
+        for shard in ranked:
+            if shard.enqueue_nowait(job, fut, priority=priority):
+                res = await fut
+                return res.get("text", "") if isinstance(res, dict) else str(res)
+
+        # All queues full — wait on the best shard with top priority
+        best = ranked[0]
+        await best.enqueue_wait(job, fut, priority=priority)
+        res = await fut
+        return res.get("text", "") if isinstance(res, dict) else str(res)
 
     async def validate_camera_prompts(
         self,
@@ -733,6 +781,9 @@ Return ONLY valid JSON:
         if raw_resp:
             try:
                 clean = raw_resp.strip()
+                if clean.startswith("```"):
+                    clean = re.sub(r"^```(?:json)?\s*", "", clean)
+                    clean = re.sub(r"\s*```$", "", clean)
                 data = json.loads(clean)
                 if isinstance(data, dict) and ("valid" in data or "conflicts" in data):
                     value = data.get("valid", True)
@@ -748,6 +799,12 @@ Return ONLY valid JSON:
                         for conflict in data["conflicts"]
                     )
                     data["has_contradictions"] = has_contradictions or blocking
+                    hard_check = self._heuristic_prompt_validation(sev_s, low_s, norm_s, night_s)
+                    if not hard_check["valid"]:
+                        data["valid"] = False
+                        data["has_contradictions"] = True
+                        data["conflicts"] = hard_check["conflicts"] + data["conflicts"]
+                        data["summary"] = hard_check["summary"]
                     if data["has_contradictions"]:
                         data["valid"] = False
                     data["_raw_vlm_response"] = raw_resp
@@ -770,8 +827,9 @@ Return ONLY valid JSON:
 
         def norm(value: str) -> str:
             value = re.sub(r"[^a-z0-9 ]+", " ", value.lower())
+            value = re.sub(r"\bpeople\b|\bpersons\b", "person", value)
+            value = re.sub(r"\b(an|a|the)\b", " ", value)
             return re.sub(r"\s+", " ", value).strip()
-
         def items(value: str) -> list[str]:
             parts = []
             for line in value.splitlines():
@@ -912,22 +970,6 @@ def _parse_response(raw: str, cam_name: str) -> dict:
             if "keywords" in data:
                 result["keywords"] = str(data["keywords"])
             
-            # ── Checklist override logic ──────────────────────────────────────
-            # Priority chain: priority_flags → DANGER/HIGH
-            #                 routine_flags  → OK/LOW
-            #                 neither        → trust VLM's own safety/severity
-            pf = str(result.get("priority_flags", "[]")).strip()
-            rf = str(result.get("routine_flags",  "[]")).strip()
-            # legacy fallback: old procedure_checklist → treat as priority
-            pc = str(result.get("procedure_checklist", "[]")).strip()
-            _empty = ("[]", "None", "", "['']", '[""]')
-            if pf not in _empty or pc not in _empty:
-                result["safety"]   = "DANGER"
-                result["severity"] = "HIGH"
-            elif rf not in _empty:
-                result["safety"]   = "OK"
-                result["severity"] = "LOW"
-            # else: VLM's own safety/severity pass through untouched
             return result
     except Exception:
         pass
@@ -947,22 +989,6 @@ def _parse_response(raw: str, cam_name: str) -> dict:
             if "keywords" in data:
                 result["keywords"] = str(data["keywords"])
 
-            # ── Checklist override logic ──────────────────────────────────────
-            # Priority chain: priority_flags → DANGER/HIGH
-            #                 routine_flags  → OK/LOW
-            #                 neither        → trust VLM's own safety/severity
-            pf = str(result.get("priority_flags", "[]")).strip()
-            rf = str(result.get("routine_flags",  "[]")).strip()
-            # legacy fallback: old procedure_checklist → treat as priority
-            pc = str(result.get("procedure_checklist", "[]")).strip()
-            _empty = ("[]", "None", "", "['']", '[""]')
-            if pf not in _empty or pc not in _empty:
-                result["safety"]   = "DANGER"
-                result["severity"] = "HIGH"
-            elif rf not in _empty:
-                result["safety"]   = "OK"
-                result["severity"] = "LOW"
-            # else: VLM's own safety/severity pass through untouched
             return result
     except Exception:
         pass

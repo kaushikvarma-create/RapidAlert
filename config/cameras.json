@@ -39,9 +39,7 @@
     "normal_context": "Basement parking zone. Employees parking cars, walking to the elevator, and getting in or out of vehicles are normal. Quiet parking lot with parked vehicles and dim lighting. Flag vehicle tampering, break-ins, theft, or loitering.",
     "night_context_enabled": false,
     "night_context": "",
-    "severe_incidents": [
-      "presence of 2 wheelers"
-    ],
+    "severe_incidents": [],
     "low_incidents": []
   },
   {
@@ -65,12 +63,10 @@
     "major_threshold": null,
     "minor_threshold": null,
     "severe_incidents": [
-      "Person using a phone or holding a phone",
-      "Person drinking from a cup or mug",
       "Person sleeping or resting their head on a desk",
       "Person exercising"
     ],
-    "low_incidents": "",
+    "low_incidents": [],
     "normal_context": "Executive admin office. Employees seated at desks, using laptops/monitors, walking through the office, and carrying items are normal. Admin office unoccupied, computers in sleep mode, lights dimmed.",
     "night_context_enabled": false,
     "night_context": ""
@@ -95,6 +91,12 @@
     "heartbeat_sec": 30.0,
     "major_threshold": null,
     "minor_threshold": null,
-    "normal_context": "Front desk reception. Staff seated at reception desk, visitors signing in, and people walking past are normal. Reception area quiet with lights dimmed. Flag unauthorized trespass, jumping over the reception counter, or theft."
+    "normal_context": "Front desk reception. Staff seated at reception desk, visitors signing in, and people walking past are normal. Reception area quiet with lights dimmed. Flag unauthorized trespass, jumping over the reception counter, or theft.",
+    "night_context_enabled": false,
+    "night_context": "",
+    "severe_incidents": [],
+    "low_incidents": [
+      "usage of phone"
+    ]
   }
 ]

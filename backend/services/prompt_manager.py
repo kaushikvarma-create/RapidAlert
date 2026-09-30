@@ -66,8 +66,11 @@ class PromptManager:
             f"{routine_checklist or '(none provided)'}"
         )
         threat_block = (
-            "VISUAL CHECKLIST A — PRIORITY THREATS\n"
-            "If an item is visibly present, copy it into priority_flags; otherwise return []. Do not infer intent or risk.\n"
+            "VISUAL CHECKLIST A — PRIORITY THREATS (ONLY FLAG IF HIGHLY CONFIDENT)\n"
+            "CRITICAL: Do NOT proactively search for or force-fit checklist items into normal scenes. "
+            "Copy an item into priority_flags ONLY IF YOU ARE HIGHLY CONFIDENT based on unmistakable, clearly visible evidence across frames. "
+            "If an action is ambiguous, ordinary workplace behavior (e.g. sitting, working, resting, looking at a phone/laptop, walking), or lacks definitive visual proof, you MUST return []. "
+            "Never guess or assume.\n"
             f"{threat_checklist or '(none provided)'}"
         )
 

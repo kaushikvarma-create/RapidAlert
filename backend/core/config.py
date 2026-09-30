@@ -30,6 +30,7 @@ SCANNER_CONFIG_PATH = CONFIG_DIR / "scanner.json"
 DATABASE_PATH = DATA_DIR / "analyses.db"
 CLIPS_DIR = DATA_DIR / "clips"
 
+
 # Ensure runtime directories exist
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 CLIPS_DIR.mkdir(parents=True, exist_ok=True)
@@ -46,7 +47,7 @@ DEFAULT_VLLM_PORT = 8000
 DEFAULT_VLLM_HOST = "http://localhost:8000"
 
 # AI Models
-DEFAULT_VLM_MODEL = "vrfai/Cosmos-Reason2-8B-NVFP4"
+DEFAULT_VLM_MODEL = "Qwen/Qwen3.5-9B"
 DEFAULT_DINOV2_MODEL = "facebook/dinov2-small"
 
 # Video Ingest & Image Resolutions
@@ -211,6 +212,8 @@ class SystemConfig(BaseModel):
     primary_model: str = DEFAULT_VLM_MODEL
     vllm_quantization: str = ""
     vllm_port_start: int = DEFAULT_VLLM_PORT
+    # Separate MIG slice reserved for backend/NVDEC so it does not compete with vLLM.
+    backend_mig_uuid: str = ""
     
     ingest_backend: str = "nvidia"
     trigger_backend: str = "dinov2"

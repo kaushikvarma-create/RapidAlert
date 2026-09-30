@@ -1577,7 +1577,7 @@ const App = {
         ['Detected At', alert.ts ? new Date(alert.ts * 1000).toLocaleString() : '—'],
         ['Workers Present', alert.workers && alert.workers !== '0' && alert.workers !== '—' ? alert.workers : null],
         ['Machinery', alert.machinery && alert.machinery !== 'None' ? alert.machinery : null],
-        ['Cosmos Model', alert.model || 'vrfai/Cosmos-Reason2-8B-NVFP4'],
+        ['Qwen Model', alert.model || 'Qwen/Qwen3.5-9B'],
         ['Evolution', alert.evolution && alert.evolution !== 'None' ? alert.evolution : null],
         ['Classification Reasoning', alert.reasoning && alert.reasoning !== 'None' ? alert.reasoning : null],
         ['🚨 Priority Flags (Checklist A)', alert.priority_flags && alert.priority_flags !== '[]' && alert.priority_flags !== '' ? alert.priority_flags : null],
@@ -2059,7 +2059,7 @@ const App = {
     if (elMode) elMode.textContent = isMig ? 'MIG Partitioned (A100)' : 'Shared GPU Shards';
     if (elCompleted) elCompleted.textContent = (data.total_inferences ?? shards.reduce((acc, s) => acc + (s.completed || 0), 0)).toLocaleString();
     if (elErrors) elErrors.textContent = (data.total_errors ?? shards.reduce((acc, s) => acc + (s.errors || 0), 0)).toLocaleString();
-    if (elModel && shards.length > 0) elModel.textContent = shards[0].model || 'vrfai/Cosmos-Reason2-8B-NVFP4';
+    if (elModel && shards.length > 0) elModel.textContent = shards[0].model || 'Qwen/Qwen3.5-9B';
 
     // Render shard cards
     const cardsWrap = document.getElementById('vlm-shards-cards');
@@ -2574,7 +2574,7 @@ const App = {
         metaEl.innerHTML = `
         ${_pf ? `<span style="color:var(--red,#ef4444);font-weight:600">🚨 Flagged: ${this._esc(_pf)}</span>` : ''}
         ${_rf ? `<span style="opacity:0.75">✅ Routine: ${this._esc(_rf)}</span>` : ''}
-        <span>Model: ${this._esc(topResult.model || 'Cosmos-Nemotron')}</span>
+        <span>Model: ${this._esc(topResult.model || 'Qwen3.5-9B')}</span>
         ${topResult.machinery && topResult.machinery !== 'None' ? `<span>Machinery: ${this._esc(topResult.machinery)}</span>` : ''}
         ${topResult.evolution && topResult.evolution !== 'None' ? `<span>Evolution: ${this._esc(topResult.evolution)}</span>` : ''}
         ${topResult.reasoning && topResult.reasoning !== 'None' ? `<span>Reasoning: ${this._esc(topResult.reasoning)}</span>` : ''}
@@ -4653,7 +4653,7 @@ const App = {
     const phEl = document.getElementById('archive-preview-placeholder');
     const tagEl = document.getElementById('archive-frame-tag');
 
-    const incId = rec.incident_id || rec.id || `INC-${rec.cam}-${rec.id}`;
+    const incId = rec.event_id || rec.incident_id || rec.id || `INC-${rec.cam}-${rec.id}`;
     if (titleEl) titleEl.textContent = `${rec.cam} Alert Set Sequence`;
     if (idEl) idEl.textContent = `${incId} • ${rec.ts ? new Date(rec.ts * 1000).toLocaleString() : ''}`;
     if (obsEl) obsEl.textContent = rec.observation || 'No visual anomalies reported.';
@@ -4679,10 +4679,16 @@ const App = {
         const data = await res.json();
         const frames = data.frames || [];
         if (frames.length > 0) {
+          const endTs = frames[frames.length - 1]?.ts;
+          const frameLabel = (f, idx) => {
+            if (typeof f.ts !== 'number' || typeof endTs !== 'number') return `Frame ${idx + 1}`;
+            const delta = f.ts - endTs;
+            return delta === 0 ? 't 0.0s' : `t ${delta.toFixed(1)}s`;
+          };
           stripEl.innerHTML = frames.map((f, idx) => `
-            <div class="archive-frame-thumb-box ${idx === frames.length - 1 ? 'active' : ''}" data-idx="${idx}" title="Frame #${idx + 1} (t-${frames.length - 1 - idx})">
+            <div class="archive-frame-thumb-box ${idx === frames.length - 1 ? 'active' : ''}" data-idx="${idx}" title="Frame #${idx + 1} (${frameLabel(f, idx)})">
               <img src="data:image/jpeg;base64,${f.b64}" alt="Frame ${idx + 1}" />
-              <span class="cam-event-thumb-badge" style="position: absolute; bottom: 3px; right: 3px; background: rgba(0,0,0,0.7); font-size: 0.65rem; padding: 1px 4px; border-radius: 3px; font-family: var(--font-mono); color: #fff;">t-${frames.length - 1 - idx}</span>
+              <span class="cam-event-thumb-badge" style="position: absolute; bottom: 3px; right: 3px; background: rgba(0,0,0,0.7); font-size: 0.65rem; padding: 1px 4px; border-radius: 3px; font-family: var(--font-mono); color: #fff;">${frameLabel(f, idx)}</span>
             </div>
           `).join('');
 
@@ -4698,7 +4704,7 @@ const App = {
               }
               if (phEl) phEl.style.display = 'none';
               if (tagEl) {
-                tagEl.textContent = `Frame #${idx + 1} (t-${frames.length - 1 - idx})`;
+                tagEl.textContent = `Frame #${idx + 1} (${frameLabel(frames[idx], idx)})`;
                 tagEl.style.display = 'inline-block';
               }
             });
@@ -4712,7 +4718,7 @@ const App = {
           }
           if (phEl) phEl.style.display = 'none';
           if (tagEl) {
-            tagEl.textContent = `Trigger Frame #${lastIdx + 1} (t-0)`;
+            tagEl.textContent = `Trigger Frame #${lastIdx + 1} (${frameLabel(frames[lastIdx], lastIdx)})`;
             tagEl.style.display = 'inline-block';
           }
           return;
