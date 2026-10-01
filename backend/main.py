@@ -162,6 +162,8 @@ scheduler = DeadlineScheduler(
     storage=storage,
     default_heartbeat_sec=sys_cfg.default_heartbeat_sec,
 )
+scheduler.incident_frames_max_sets = getattr(sys_cfg, "incident_frames_max_sets", 100000)
+scheduler.incident_frames_max_gb = getattr(sys_cfg, "incident_frames_max_gb", 11.5)
 alert_engine.set_broadcaster(ws_manager.broadcast)
 error_tracker.set_broadcaster(ws_manager.broadcast)
 error_tracker.set_watchdog_emailer(watchdog_emailer)

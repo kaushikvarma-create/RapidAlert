@@ -224,9 +224,20 @@ class _EndpointShard:
             content = []
             frames = frames_b64 if isinstance(frames_b64, list) else [frames_b64]
             if len(frames) > 1:
+                content.append({
+                    "type": "text",
+                    "text": (
+                        f"CHRONOLOGICAL CCTV FRAME SEQUENCE ({len(frames)} frames ordered from earliest past baseline at Frame 1 "
+                        f"progressing chronologically to the latest current moment at Frame {len(frames)}):"
+                    ),
+                })
                 # Interleave explicit frame label markers to anchor multi-frame vision attention
                 for idx, b64 in enumerate(frames):
-                    label_txt = labels[idx] if idx < len(labels) else f"Frame {idx + 1}"
+                    raw_label = labels[idx] if idx < len(labels) else f"t -{(len(frames) - 1 - idx) * 3:.1f}s"
+                    if raw_label.lower().startswith("frame"):
+                        label_txt = raw_label
+                    else:
+                        label_txt = f"Frame {idx + 1} of {len(frames)} [{raw_label}]"
                     content.append({"type": "text", "text": f"{label_txt}:"})
                     content.append({
                         "type": "image_url",
@@ -275,12 +286,29 @@ class _EndpointShard:
                         continue
                     data = await resp.json()
                     raw = data["choices"][0]["message"]["content"]
+                    usage = data.get("usage") or {}
+                    prompt_tokens = usage.get("prompt_tokens", 0)
+                    completion_tokens = usage.get("completion_tokens", 0)
+                    total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
+
                     if is_text_job:
                         lat = time.monotonic() - t0
                         self._latencies.append(lat)
-                        return {"text": raw, "raw": raw, "latency": lat}
+                        return {
+                            "text": raw,
+                            "raw": raw,
+                            "latency": lat,
+                            "prompt_tokens": prompt_tokens,
+                            "completion_tokens": completion_tokens,
+                            "total_tokens": total_tokens,
+                            "tokens": total_tokens,
+                        }
                     result = _parse_response(raw, cam_name)
                     result["latency"] = time.monotonic() - t0
+                    result["prompt_tokens"] = prompt_tokens
+                    result["completion_tokens"] = completion_tokens
+                    result["total_tokens"] = total_tokens
+                    result["tokens"] = total_tokens
                     self._latencies.append(result["latency"])
                     return result
 
@@ -1050,4 +1078,8 @@ def _fallback_result(cam_name: str, latency: float) -> dict:
         "evolution":   "None",
         "error":       True,
         "latency":     latency,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "tokens": 0,
     }

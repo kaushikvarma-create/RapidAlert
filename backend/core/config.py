@@ -234,6 +234,8 @@ class SystemConfig(BaseModel):
     clip_recording_enabled: bool = True
     clip_rolling_buffer_enabled: bool = True
     clip_retention_hours: float = 24.0
+    incident_frames_max_sets: int = 100000
+    incident_frames_max_gb: float = 11.5
 
     alert_severity_triggers: List[str] = Field(default_factory=lambda: list(DEFAULT_ALERT_SEVERITIES))
     alert_safety_triggers: List[str] = Field(default_factory=lambda: list(DEFAULT_ALERT_SAFETIES))

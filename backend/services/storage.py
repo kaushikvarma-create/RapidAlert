@@ -66,6 +66,9 @@ class StorageManager:
                     confidence   REAL,
                     labels       TEXT,
                     raw          TEXT,
+                    prompt_tokens INTEGER,
+                    completion_tokens INTEGER,
+                    total_tokens  INTEGER,
                     error        INTEGER DEFAULT 0
                 );
 
@@ -100,6 +103,9 @@ class StorageManager:
                 "confidence": "REAL",
                 "labels": "TEXT",
                 "reasoning": "TEXT",
+                "prompt_tokens": "INTEGER",
+                "completion_tokens": "INTEGER",
+                "total_tokens": "INTEGER",
             }
             for col_name, col_type in schema_additions.items():
                 if col_name not in existing_cols:
@@ -178,6 +184,9 @@ class StorageManager:
             t_level = threat_level or result.get("threat_level") or result.get("severity")
             conf = confidence if confidence is not None else result.get("confidence")
             lbls = labels if isinstance(labels, str) else (", ".join(labels) if isinstance(labels, list) else result.get("labels", ""))
+            p_tokens = result.get("prompt_tokens")
+            c_tokens = result.get("completion_tokens")
+            tot_tokens = result.get("total_tokens") or result.get("tokens")
 
             cur = conn.execute(
                 """
@@ -185,8 +194,9 @@ class StorageManager:
                   (cam, ts, observation, activity, workers, machinery,
                    safety, severity, reasoning, latency, e2e_latency, incident_id,
                    event_id, parent_id, trigger_mode, clip_path, keywords,
-                   threat_level, confidence, labels, error)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   threat_level, confidence, labels, error,
+                   prompt_tokens, completion_tokens, total_tokens)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     cam,
@@ -210,6 +220,9 @@ class StorageManager:
                     round(conf, 3) if conf is not None else None,
                     lbls,
                     1 if result.get("error") else 0,
+                    p_tokens,
+                    c_tokens,
+                    tot_tokens,
                 ),
             )
             conn.commit()
@@ -459,7 +472,8 @@ class StorageManager:
         frames: List[str | bytes],
         ts: Optional[float] = None,
         frame_timestamps: Optional[List[float]] = None,
-        max_sets: int = 3000,
+        max_sets: int = 100000,
+        max_gb: float = 11.5,
     ) -> int:
         """
         Stores an Alert Set (the sequence of 4 JPEG frames) as binary BLOBs
@@ -491,10 +505,10 @@ class StorageManager:
                 inserted += 1
             conn.commit()
 
-            # Trigger rolling eviction periodically (every 25 writes)
+            # Trigger rolling eviction periodically (every 50 writes)
             self._frame_write_counter += 1
-            if self._frame_write_counter % 25 == 0:
-                self.prune_incident_frames(max_sets=max_sets)
+            if self._frame_write_counter % 50 == 0:
+                self.prune_incident_frames(max_sets=max_sets, max_gb=max_gb)
         except Exception as exc:
             error_tracker.capture_exception(
                 exc,
@@ -617,8 +631,7 @@ class StorageManager:
             for f in frames:
                 if f["frame_idx"] == frame_idx:
                     return base64.b64decode(f["b64"])
-            if frames:
-                return base64.b64decode(frames[0]["b64"])
+            return None
         except Exception as exc:
             error_tracker.capture_exception(
                 exc,
@@ -628,20 +641,38 @@ class StorageManager:
             )
         return None
 
-    def prune_incident_frames(self, max_sets: int = 3000) -> int:
+    def prune_incident_frames(self, max_sets: int = 100000, max_gb: float = 11.5) -> int:
         """
         Enforces the FIFO rolling buffer of Alert Sets.
-        Deletes frames of older incidents beyond the latest max_sets.
+        Deletes frames of older incidents beyond the latest max_sets or when the DB file
+        size on disk approaches max_gb (keeping overall picture storage strictly under 12 GB).
         """
         if max_sets <= 0:
             return 0
         try:
             conn = self._conn()
-            # Find count of distinct incident sets
             count_row = conn.execute("SELECT COUNT(DISTINCT incident_id) AS total FROM incident_frames").fetchone()
             total_sets = count_row["total"] if count_row else 0
-            if total_sets <= max_sets:
+
+            # Calculate total DB disk usage
+            db_size_bytes = 0
+            if self.db_path.exists():
+                db_size_bytes += self.db_path.stat().st_size
+            wal_path = self.db_path.with_name(f"{self.db_path.name}-wal")
+            if wal_path.exists():
+                db_size_bytes += wal_path.stat().st_size
+
+            max_bytes = max_gb * 1024 * 1024 * 1024
+            if total_sets <= max_sets and db_size_bytes <= max_bytes:
                 return 0
+
+            # If disk size exceeded max_gb, reduce retention target proportionally to drop back under threshold
+            effective_target = max_sets
+            if db_size_bytes > max_bytes and total_sets > 0:
+                scale = max_bytes / max(db_size_bytes, 1)
+                effective_target = min(effective_target, max(int(total_sets * scale * 0.90), 1))
+            else:
+                effective_target = max_sets
 
             # Prune oldest sets
             cur = conn.execute(
@@ -649,18 +680,19 @@ class StorageManager:
                 DELETE FROM incident_frames
                 WHERE incident_id NOT IN (
                     SELECT incident_id FROM (
-                        SELECT DISTINCT incident_id, ts FROM incident_frames
-                        ORDER BY ts DESC
+                        SELECT incident_id, MAX(ts) AS max_ts FROM incident_frames
+                        GROUP BY incident_id
+                        ORDER BY max_ts DESC
                         LIMIT ?
                     )
                 )
                 """,
-                (max_sets,),
+                (effective_target,),
             )
             pruned_frames = cur.rowcount
             conn.commit()
             if pruned_frames > 0:
-                print(f"[Storage] 🧹 Rolling Buffer: Pruned {pruned_frames} historical frames (retaining {max_sets} latest Alert Sets)")
+                print(f"[Storage] 🧹 Rolling Buffer: Pruned {pruned_frames} historical frames (retaining {effective_target} latest Alert Sets, DB size: {db_size_bytes / (1024*1024):.1f}MB)")
             return pruned_frames
         except Exception as exc:
             error_tracker.capture_exception(

@@ -415,8 +415,8 @@
       <div class="history-table-wrap">
         <table class="cam-table" id="hist-table">
           <thead><tr>
-            <th>Time</th><th>Camera</th><th>Observation</th>
-            <th>Activity</th><th>Safety</th><th>Severity</th><th>VLM Latency</th><th>Trigger→Post</th>
+            <th style="width: 65px;">ID</th><th>Time</th><th>Camera</th><th>Observation</th>
+            <th>Activity</th><th>Safety</th><th>Severity</th><th style="width: 80px;">Tokens</th><th>VLM Latency</th><th>Trigger→Post</th>
           </tr></thead>
           <tbody id="hist-table-body"></tbody>
         </table>
@@ -707,6 +707,10 @@
           <div class="diag-stat">
             <span class="diag-label">Trigger→Post</span>
             <span class="diag-val" id="modal-stat-e2e">—</span>
+          </div>
+          <div class="diag-stat">
+            <span class="diag-label">Tokens Used</span>
+            <span class="diag-val" id="modal-stat-tokens">—</span>
           </div>
           <div class="diag-stat">
             <span class="diag-label">Safety Status</span>
@@ -1234,9 +1238,11 @@
             <table class="cam-table archive-cam-table">
               <thead>
                 <tr>
-                  <th style="width: 80px;">Time</th>
-                  <th style="width: 110px;">Camera</th>
-                  <th style="width: 65px;">Sev</th>
+                  <th style="width: 70px;">ID</th>
+                  <th style="width: 75px;">Time</th>
+                  <th style="width: 100px;">Camera</th>
+                  <th style="width: 55px;">Sev</th>
+                  <th style="width: 85px;">Tokens</th>
                   <th>AI Observation Summary</th>
                 </tr>
               </thead>
@@ -1259,7 +1265,10 @@
               <h3 id="archive-ins-title">Alert Set Visual Timeline</h3>
               <span id="archive-ins-id">Select an incident from the left to view its 4-frame trigger sequence</span>
             </div>
-            <span class="badge" id="archive-ins-badge" style="display: none;">STATUS</span>
+            <div style="display: flex; gap: 8px; align-items: center;">
+              <span class="badge" id="archive-ins-tokens" style="display: none; background: rgba(6,182,212,0.15); color: var(--cyan); border: 1px solid rgba(6,182,212,0.3); font-family: var(--font-mono); font-size: 0.72rem; font-weight: 600;">0 tok</span>
+              <span class="badge" id="archive-ins-badge" style="display: none;">STATUS</span>
+            </div>
           </div>
 
           <!-- 4-Frame Carousel / Strip -->

@@ -102,6 +102,8 @@ class DeadlineScheduler:
         self.followup_max_cycles: int = DEFAULT_FOLLOWUP_MAX_CYCLES
         self.clip_retention_hours: float = 24.0
         self.clip_rolling_buffer_enabled: bool = True
+        self.incident_frames_max_sets: int = 100000
+        self.incident_frames_max_gb: float = 11.5
         self._followup_tasks: set[asyncio.Task] = set()
 
     def get_cam_heartbeat_interval(self, cam_name: str) -> float:
@@ -469,6 +471,8 @@ class DeadlineScheduler:
                         frames=thumbs_b64,
                         ts=rec_ts,
                         frame_timestamps=frame_timestamps,
+                        max_sets=self.incident_frames_max_sets,
+                        max_gb=self.incident_frames_max_gb,
                     )
             except Exception as exc:
                 error_tracker.capture_exception(

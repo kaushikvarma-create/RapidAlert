@@ -7,7 +7,7 @@
       "mig_profile": "2g",
       "sm_count": 12,
       "weight": 3,
-      "max_concurrent": 1,
+      "max_concurrent": 2,
       "queue_depth": 12,
       "gpu_utilization": 0.2
     },
@@ -18,9 +18,9 @@
       "mig_profile": "1g",
       "sm_count": 8,
       "weight": 2,
-      "max_concurrent": 1,
+      "max_concurrent": 2,
       "queue_depth": 12,
-      "gpu_utilization": 0.2
+      "gpu_utilization": 0.25
     }
   ],
   "auto_start_vllm": true,
@@ -50,6 +50,8 @@
   "clip_recording_enabled": true,
   "clip_rolling_buffer_enabled": true,
   "clip_retention_hours": 24.0,
+  "incident_frames_max_sets": 100000,
+  "incident_frames_max_gb": 11.5,
   "alert_severity_triggers": [
     "HIGH",
     "MEDIUM"
@@ -58,8 +60,8 @@
     "DANGER",
     "WARNING"
   ],
-  "initial_concurrency": 2,
-  "max_concurrency": 2,
+  "initial_concurrency": 4,
+  "max_concurrency": 4,
   "frame_width": 1280,
   "jpeg_quality": 85,
   "dashboard_port": 7000

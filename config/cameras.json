@@ -63,8 +63,7 @@
     "major_threshold": null,
     "minor_threshold": null,
     "severe_incidents": [
-      "Person sleeping or resting their head on a desk",
-      "Person exercising"
+      "Person doing severe intensive workouts"
     ],
     "low_incidents": [],
     "normal_context": "Executive admin office. Employees seated at desks, using laptops/monitors, walking through the office, and carrying items are normal. Admin office unoccupied, computers in sleep mode, lights dimmed.",

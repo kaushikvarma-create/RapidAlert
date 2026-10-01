@@ -76,3 +76,14 @@ def test_rolling_buffer_eviction(temp_storage):
     assert stats_after["total_sets"] == 3
     # Earliest remaining should be inc_7 (ts 1700000007)
     assert stats_after["earliest_ts"] == 1700000007.0
+
+
+def test_rolling_buffer_size_guard(temp_storage):
+    dummy_bytes = [b"FRAME_DATA" * 50] * 4
+    dummy_b64 = [base64.b64encode(b).decode("utf-8") for b in dummy_bytes]
+    for i in range(10):
+        temp_storage.save_incident_frames(f"size_inc_{i}", f"evt_{i}", "CAM_1", dummy_b64, ts=1700000000.0 + i)
+
+    # Calling with max_gb=0.000001 (threshold below current DB size) triggers size-based pruning
+    deleted = temp_storage.prune_incident_frames(max_sets=1000, max_gb=0.000001)
+    assert deleted > 0

@@ -2539,6 +2539,8 @@ const App = {
     this._setText('modal-stat-drift', cam.drift !== undefined ? Number(cam.drift).toFixed(4) : '—');
     this._setText('modal-stat-latency', topResult?.latency != null ? `${Number(topResult.latency).toFixed(2)}s` : '—');
     this._setText('modal-stat-e2e', topResult?.e2e_latency != null ? `${Number(topResult.e2e_latency).toFixed(2)}s` : '--');
+    const totTok = topResult?.total_tokens ?? topResult?.tokens;
+    this._setText('modal-stat-tokens', totTok ? `${Number(totTok).toLocaleString()} tok` : '—');
     this._setText('modal-stat-safety', saf);
 
     // Scene understanding badges
@@ -3700,21 +3702,27 @@ const App = {
     if (!tbody) return;
     tbody.innerHTML = '';
     if (!rows.length) {
-      tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-3);padding:20px;">No records</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text-3);padding:20px;">No records</td></tr>';
       return;
     }
     for (const row of rows) {
       const ts = row.ts ? new Date(row.ts * 1000).toLocaleString() : '—';
       const sevCls = { HIGH: 'text-red', MEDIUM: 'text-amber', LOW: 'text-green' }[row.severity] || '';
       const safCls = { DANGER: 'text-red', WARNING: 'text-amber', OK: 'text-green' }[row.safety] || '';
+      const shortId = row.id ? `#${row.id}` : (row.event_id || '—');
+      const totalTok = row.total_tokens ?? row.tokens;
+      const tokText = totalTok ? totalTok.toLocaleString() : '—';
+      const tokTitle = (row.prompt_tokens || row.completion_tokens) ? `Prompt: ${row.prompt_tokens || 0} | Gen: ${row.completion_tokens || 0}` : 'Tokens';
       const tr = document.createElement('tr');
       tr.innerHTML = `
+        <td style="white-space:nowrap;font-size:0.7rem;font-family:var(--font-mono);font-weight:600;color:var(--text-3);" title="Common ID: ${this._esc(row.incident_id || row.event_id || String(row.id))}">${this._esc(shortId)}</td>
         <td style="white-space:nowrap;font-size:0.7rem;font-family:var(--font-mono)">${ts}</td>
         <td style="font-weight:700">${this._esc(row.cam)}</td>
         <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.72rem" title="${this._esc(row.observation||'')}">${this._esc(row.observation||'—')}</td>
         <td>${this._esc(row.activity||'—')}</td>
         <td class="${safCls}">${this._esc(row.safety||'—')}</td>
         <td class="${sevCls}">${this._esc(row.severity||'—')}</td>
+        <td style="font-family:var(--font-mono);font-size:0.7rem;color:${totalTok ? 'var(--cyan)' : 'var(--text-3)'};font-weight:600" title="${tokTitle}">${tokText}</td>
         <td style="font-family:var(--font-mono);font-size:0.7rem">${row.latency != null ? Number(row.latency).toFixed(2) + 's' : '—'}</td>
         <td style="font-family:var(--font-mono);font-size:0.7rem;color:${row.e2e_latency != null ? 'var(--cyan)' : 'var(--text-3)'};font-weight:500">${row.e2e_latency != null ? Number(row.e2e_latency).toFixed(2) + 's' : '--'}</td>
       `;
@@ -4573,7 +4581,9 @@ const App = {
     if (fromVal) sinceTs = new Date(fromVal).getTime() / 1000;
     if (toVal) untilTs = new Date(toVal).getTime() / 1000;
 
-    const params = new URLSearchParams({ limit: '150', offset: '0' });
+    const hasFilter = Boolean(searchVal || cam || sev || sinceTs || untilTs);
+    const limitCount = hasFilter ? '500' : '200';
+    const params = new URLSearchParams({ limit: limitCount, offset: '0' });
     if (searchVal) params.set('search', searchVal);
     if (cam) params.set('cam', cam);
     if (sev) {
@@ -4615,15 +4625,24 @@ const App = {
     records.forEach((rec, idx) => {
       const tr = document.createElement('tr');
       tr.className = 'archive-record-row';
+      const incId = rec.event_id || rec.incident_id || (rec.id ? `REC-${rec.id}` : '—');
+      const shortId = rec.id ? `#${rec.id}` : (rec.event_id ? rec.event_id.slice(-6) : '—');
       const timeStr = rec.ts ? new Date(rec.ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—';
       const sev = (rec.severity || 'LOW').toUpperCase();
       const sevColor = sev === 'HIGH' ? '#ef4444' : (sev === 'MEDIUM' ? '#f59e0b' : '#10b981');
       const obs = (rec.observation || 'Analysis recorded');
+      const totalTok = rec.total_tokens ?? rec.tokens;
+      const promptTok = rec.prompt_tokens;
+      const compTok = rec.completion_tokens;
+      const tokText = totalTok ? totalTok.toLocaleString() : '—';
+      const tokTitle = (promptTok || compTok) ? `Prompt: ${promptTok || 0} tok | Generated: ${compTok || 0} tok` : 'Token usage';
 
       tr.innerHTML = `
+        <td style="white-space: nowrap; font-family: var(--font-mono); font-size: 0.70rem; color: var(--text-tertiary); font-weight: 600;" title="Common ID: ${this._esc(incId)}">${this._esc(shortId)}</td>
         <td style="white-space: nowrap; font-family: var(--font-mono); font-size: 0.72rem; color: var(--text-tertiary);">${this._esc(timeStr)}</td>
         <td style="font-weight: 600; color: var(--text-primary);">${this._esc(rec.cam || '')}</td>
         <td><span class="badge" style="background: ${sevColor}20; color: ${sevColor}; font-size: 0.65rem; font-weight: 700;">${sev}</span></td>
+        <td style="white-space: nowrap; font-family: var(--font-mono); font-size: 0.72rem; font-weight: 600; color: ${totalTok ? 'var(--cyan)' : 'var(--text-tertiary)'};" title="${tokTitle}"><span class="tok-pill" style="background: rgba(6,182,212,0.12); padding: 2px 6px; border-radius: 4px; border: 1px solid rgba(6,182,212,0.25);">${tokText}</span></td>
         <td style="color: var(--text-secondary); max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${this._esc(obs)}">${this._esc(obs)}</td>
       `;
 
@@ -4648,15 +4667,30 @@ const App = {
     const idEl = document.getElementById('archive-ins-id');
     const obsEl = document.getElementById('archive-ins-obs');
     const badgeEl = document.getElementById('archive-ins-badge');
+    const tokensEl = document.getElementById('archive-ins-tokens');
     const stripEl = document.getElementById('archive-frames-strip');
     const mainImg = document.getElementById('archive-main-preview');
     const phEl = document.getElementById('archive-preview-placeholder');
     const tagEl = document.getElementById('archive-frame-tag');
 
     const incId = rec.event_id || rec.incident_id || rec.id || `INC-${rec.cam}-${rec.id}`;
+    const totalTok = rec.total_tokens ?? rec.tokens;
+    const promptTok = rec.prompt_tokens;
+    const compTok = rec.completion_tokens;
+    const tokSummary = totalTok ? ` • ⚡ ${totalTok.toLocaleString()} tokens` : '';
     if (titleEl) titleEl.textContent = `${rec.cam} Alert Set Sequence`;
-    if (idEl) idEl.textContent = `${incId} • ${rec.ts ? new Date(rec.ts * 1000).toLocaleString() : ''}`;
+    if (idEl) idEl.textContent = `${incId} • ${rec.ts ? new Date(rec.ts * 1000).toLocaleString() : ''}${tokSummary}`;
     if (obsEl) obsEl.textContent = rec.observation || 'No visual anomalies reported.';
+
+    if (tokensEl) {
+      if (totalTok) {
+        tokensEl.textContent = `⚡ ${totalTok.toLocaleString()} tok`;
+        tokensEl.title = `Prompt: ${promptTok || 0} tokens | Output: ${compTok || 0} tokens`;
+        tokensEl.style.display = 'inline-block';
+      } else {
+        tokensEl.style.display = 'none';
+      }
+    }
 
     const sev = (rec.severity || 'LOW').toUpperCase();
     if (badgeEl) {
