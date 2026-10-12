@@ -86,6 +86,18 @@ class StorageManager:
                     key   TEXT PRIMARY KEY,
                     value TEXT
                 );
+
+                CREATE TABLE IF NOT EXISTS watchdog_sanitation_log (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts          REAL NOT NULL,
+                    timestamp   TEXT NOT NULL,
+                    pid         INTEGER,
+                    name        TEXT,
+                    cmd         TEXT,
+                    rss_mb      REAL,
+                    cpu_pct     REAL,
+                    reason      TEXT
+                );
             """)
 
             # Migration: Add missing columns if database exists from earlier version
@@ -137,6 +149,7 @@ class StorageManager:
                 CREATE INDEX IF NOT EXISTS idx_incident_frames_ts      ON incident_frames(ts);
                 CREATE INDEX IF NOT EXISTS idx_incident_frames_cam     ON incident_frames(cam);
                 CREATE INDEX IF NOT EXISTS idx_incident_frames_cam_ts  ON incident_frames(cam, ts);
+                CREATE INDEX IF NOT EXISTS idx_watchdog_sanitation_ts  ON watchdog_sanitation_log(ts);
             """)
 
             # Store DB version
@@ -603,6 +616,9 @@ class StorageManager:
                     except (ValueError, IndexError):
                         pass
 
+            if rows:
+                rows = sorted(rows, key=lambda r: (r["frame_idx"] if r["frame_idx"] is not None else 0, r["ts"] or 0))
+
             return [
                 {
                     "idx": r["frame_idx"],
@@ -746,4 +762,52 @@ class StorageManager:
                 "earliest_ts": None,
                 "latest_ts": None,
             }
+
+    def record_sanitation_event(
+        self,
+        pid: int,
+        name: str,
+        cmd: str,
+        rss_mb: float,
+        cpu_pct: float,
+        reason: str,
+    ) -> None:
+        """Records a terminated stale/rogue process or cleared crash file."""
+        try:
+            now_ts = time.time()
+            now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+            conn = self._conn()
+            conn.execute(
+                """
+                INSERT INTO watchdog_sanitation_log (ts, timestamp, pid, name, cmd, rss_mb, cpu_pct, reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (now_ts, now_str, pid, name, cmd[:200], round(rss_mb, 1), round(cpu_pct, 1), reason),
+            )
+            conn.commit()
+        except Exception as exc:
+            error_tracker.capture_exception(
+                exc,
+                component="StorageManager",
+                effect="Failed to record watchdog sanitation event",
+                severity="WARNING",
+            )
+
+    def get_sanitation_events(self, since_ts: float, limit: int = 50) -> list[dict]:
+        """Retrieves recent process sanitation events since a given timestamp."""
+        try:
+            conn = self._conn()
+            rows = conn.execute(
+                """
+                SELECT ts, timestamp, pid, name, cmd, rss_mb, cpu_pct, reason
+                FROM watchdog_sanitation_log
+                WHERE ts >= ?
+                ORDER BY ts DESC
+                LIMIT ?
+                """,
+                (since_ts, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
 

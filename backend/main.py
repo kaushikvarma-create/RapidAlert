@@ -188,6 +188,7 @@ watchdog = SystemWatchdog(
     frame_store=frame_store,
     vlm_pool=vlm_pool,
     ws_manager=ws_manager,
+    storage=storage,
     watchdog_emailer=watchdog_emailer,
     interval_sec=15.0,
     broadcast_fn=ws_manager.broadcast,
@@ -1308,6 +1309,17 @@ def api_send_daily_digest():
     """Forces immediate compilation and email transmission of the 24-Hour System Health & Diagnostics Digest."""
     success = watchdog_emailer.send_daily_health_digest()
     return {"status": "ok", "dispatched": success, "message": "24-Hour System Health Digest compilation and email queued."}
+
+
+@app.post("/api/watchdog/sweep-processes")
+def api_sweep_processes():
+    """Forces an immediate process table sanitation sweep to terminate stale or rogue processes."""
+    cleaned = watchdog.audit_and_sanitize_processes(startup=False)
+    return {
+        "status": "ok",
+        "cleaned_count": len(cleaned),
+        "cleaned_processes": cleaned,
+    }
 
 
 

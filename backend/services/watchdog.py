@@ -12,12 +12,17 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import glob
 import os
 import shutil
+import signal
+import sqlite3
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Optional, Callable
 
+from backend.core.config import DATABASE_PATH
 from backend.core.error_tracker import error_tracker
 from backend.services.watchdog_emailer import WatchdogEmailer
 
@@ -29,7 +34,9 @@ class SystemWatchdog:
         frame_store,
         vlm_pool,
         ws_manager,
+        storage=None,
         watchdog_emailer: Optional[WatchdogEmailer] = None,
+        db_path: Path = DATABASE_PATH,
         interval_sec: float = 15.0,
         broadcast_fn: Optional[Callable] = None,
     ):
@@ -37,7 +44,9 @@ class SystemWatchdog:
         self.frame_store = frame_store
         self.vlm_pool = vlm_pool
         self.ws_manager = ws_manager
+        self.storage = storage
         self.emailer = watchdog_emailer
+        self.db_path = db_path
         self.interval_sec = interval_sec
         self.broadcast_fn = broadcast_fn
         self._running = False
@@ -45,12 +54,14 @@ class SystemWatchdog:
         self._start_time = time.monotonic()
         self._stale_camera_warnings: dict[str, float] = {}
         self._unhealthy_shard_warnings: dict[str, float] = {}
+        self._last_process_sweep_ts: float = 0.0
         
         # State tracking for critical alert incidents & resolutions
         self._camera_blackout_active = False
         self._vllm_cluster_down_active = False
         self._disk_critical_active = False
         self._last_digest_date: Optional[str] = None
+        self._sanitized_count_session = 0
 
     def set_emailer(self, emailer: WatchdogEmailer) -> None:
         self.emailer = emailer
@@ -59,14 +70,224 @@ class SystemWatchdog:
         if self._running:
             return
         self._running = True
+        # Run immediate startup sanitation to reap any legacy zombies or dead launchers
+        try:
+            self.audit_and_sanitize_processes(startup=True)
+        except Exception as exc:
+            print(f"[Watchdog] ⚠️ Error during startup process sanitation: {exc}")
         self._task = asyncio.create_task(self._watchdog_loop(), name="system-watchdog")
-        print("[Watchdog] 🛡️ Automated System Health Watchdog active (15s interval)")
+        print("[Watchdog] 🛡️ Automated System Health & Process Sanitation Watchdog active (15s interval)")
 
     def stop(self) -> None:
         self._running = False
         if self._task:
             self._task.cancel()
             self._task = None
+
+    def _record_sanitation(self, evt: dict) -> None:
+        """Persists process cleanup event into SQLite audit log."""
+        try:
+            if self.storage and hasattr(self.storage, "record_sanitation_event"):
+                self.storage.record_sanitation_event(
+                    pid=evt.get("pid", 0),
+                    name=evt.get("name", "unknown"),
+                    cmd=evt.get("cmd", ""),
+                    rss_mb=evt.get("rss_mb", 0.0),
+                    cpu_pct=evt.get("cpu_pct", 0.0),
+                    reason=evt.get("reason", "Stale Process"),
+                )
+            else:
+                conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS watchdog_sanitation_log (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ts REAL NOT NULL,
+                        timestamp TEXT NOT NULL,
+                        pid INTEGER,
+                        name TEXT,
+                        cmd TEXT,
+                        rss_mb REAL,
+                        cpu_pct REAL,
+                        reason TEXT
+                    );
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO watchdog_sanitation_log (ts, timestamp, pid, name, cmd, rss_mb, cpu_pct, reason)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        time.time(),
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        evt.get("pid", 0),
+                        evt.get("name", "unknown"),
+                        evt.get("cmd", "")[:200],
+                        evt.get("rss_mb", 0.0),
+                        evt.get("cpu_pct", 0.0),
+                        evt.get("reason", "Stale Process"),
+                    ),
+                )
+                conn.commit()
+                conn.close()
+            self._sanitized_count_session += 1
+        except Exception:
+            pass
+
+    def audit_and_sanitize_processes(self, startup: bool = False) -> list[dict]:
+        """
+        Inspects the Linux process table to detect, terminate, and reap:
+          1. Zombie/defunct processes (state Z)
+          2. Rogue crash reporters (apport-gtk / apport) and runaway crash dump files in /var/crash
+          3. Stale/orphaned RapidAlert backend instances (uvicorn/run.sh) from prior sessions
+          4. Orphaned multiprocessing spawn workers
+        Persists every sanitation event into watchdog_sanitation_log for executive email reporting.
+        """
+        cleaned_events: list[dict] = []
+        current_pid = os.getpid()
+        current_ppid = os.getppid()
+
+        # 1. Clean any runaway crash dumps in /var/crash
+        try:
+            for crash_file in glob.glob("/var/crash/_usr_bin_python3*") + glob.glob("/var/crash/*.crash"):
+                try:
+                    f_size_mb = os.path.getsize(crash_file) / (1024 * 1024)
+                    os.unlink(crash_file)
+                    evt = {
+                        "pid": 0,
+                        "name": os.path.basename(crash_file),
+                        "cmd": crash_file,
+                        "rss_mb": round(f_size_mb, 1),
+                        "cpu_pct": 0.0,
+                        "reason": f"Purged Runaway Crash Dump ({f_size_mb:.1f} MB)",
+                    }
+                    cleaned_events.append(evt)
+                    self._record_sanitation(evt)
+                    print(f"[Watchdog] 🧹 Removed crash dump file: {crash_file} ({f_size_mb:.1f} MB freed)")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # 2. Reaping immediate child zombies via waitpid
+        try:
+            while True:
+                wpid, status = os.waitpid(-1, os.WNOHANG)
+                if wpid <= 0:
+                    break
+                evt = {
+                    "pid": wpid,
+                    "name": "child_worker",
+                    "cmd": "child_process",
+                    "rss_mb": 0.0,
+                    "cpu_pct": 0.0,
+                    "reason": "Reaped Child Zombie Process",
+                }
+                cleaned_events.append(evt)
+                self._record_sanitation(evt)
+        except (ChildProcessError, OSError):
+            pass
+
+        # 3. Scan system /proc
+        for p_dir in glob.glob("/proc/[0-9]*"):
+            try:
+                pid = int(os.path.basename(p_dir))
+                if pid in (current_pid, current_ppid, 1):
+                    continue
+
+                # Read stat
+                with open(f"{p_dir}/stat", "r") as f:
+                    stat_content = f.read()
+                l_paren = stat_content.find("(")
+                r_paren = stat_content.rfind(")")
+                if l_paren == -1 or r_paren == -1:
+                    continue
+                comm = stat_content[l_paren + 1 : r_paren]
+                rest = stat_content[r_paren + 2 :].split()
+                state = rest[0]
+                ppid = int(rest[1])
+                rss_pages = int(rest[21]) if len(rest) > 21 else 0
+                rss_mb = (rss_pages * 4096) / (1024 * 1024)
+
+                # Read cmdline
+                try:
+                    with open(f"{p_dir}/cmdline", "rb") as f:
+                        cmdline = f.read().replace(b"\x00", b" ").decode("utf-8", errors="ignore").strip()
+                except Exception:
+                    cmdline = comm
+
+                should_kill = False
+                reason = ""
+
+                # Rule A: Rogue apport crash reporter GUI
+                if comm in ("apport-gtk", "apport") or "apport-gtk" in cmdline:
+                    should_kill = True
+                    reason = f"Rogue Apport Crash Daemon ({rss_mb:.1f} MB RAM)"
+
+                # Rule B: Stale uvicorn backend process from a prior run
+                elif ("uvicorn" in cmdline and "backend.main" in cmdline) and pid != current_pid:
+                    should_kill = True
+                    reason = "Stale Uvicorn Backend Instance"
+
+                # Rule C: Stale launcher script
+                elif ("bash ./run.sh" in cmdline or "bash run.sh" in cmdline) and pid not in (current_pid, current_ppid):
+                    should_kill = True
+                    reason = "Stale run.sh Launcher Script"
+
+                # Rule D: Orphaned multiprocessing spawn worker
+                elif "from multiprocessing.spawn import spawn_main" in cmdline and ppid in (1, 0):
+                    should_kill = True
+                    reason = "Orphaned Multiprocessing Spawn Worker"
+
+                # Rule E: Zombie process whose parent is not us
+                elif state == "Z":
+                    if ppid != 1 and os.path.exists(f"/proc/{ppid}"):
+                        try:
+                            with open(f"/proc/{ppid}/cmdline", "rb") as f:
+                                p_cmd = f.read().replace(b"\x00", b" ").decode("utf-8", errors="ignore")
+                            if "run.sh" in p_cmd or "uvicorn" in p_cmd:
+                                os.kill(ppid, signal.SIGTERM)
+                                evt = {
+                                    "pid": ppid,
+                                    "name": "stale_parent",
+                                    "cmd": p_cmd,
+                                    "rss_mb": 0.0,
+                                    "cpu_pct": 0.0,
+                                    "reason": f"Parent of Zombie {pid} Terminated ({comm})",
+                                }
+                                cleaned_events.append(evt)
+                                self._record_sanitation(evt)
+                        except Exception:
+                            pass
+
+                if should_kill:
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                        time.sleep(0.05)
+                        if os.path.exists(f"/proc/{pid}"):
+                            os.kill(pid, signal.SIGKILL)
+                        evt = {
+                            "pid": pid,
+                            "name": comm,
+                            "cmd": cmdline,
+                            "rss_mb": round(rss_mb, 1),
+                            "cpu_pct": 0.0,
+                            "reason": reason,
+                        }
+                        cleaned_events.append(evt)
+                        self._record_sanitation(evt)
+                        print(f"[Watchdog] 🛡️ Terminated rogue/stale process: PID {pid} ({comm}) — {reason}")
+                    except (ProcessLookupError, PermissionError):
+                        pass
+
+            except Exception:
+                continue
+
+        if cleaned_events:
+            print(f"[Watchdog] 🧹 Process sanitation sweep complete: {len(cleaned_events)} rogue/stale process(es) cleared.")
+
+        return cleaned_events
 
     async def _watchdog_loop(self) -> None:
         while self._running:
@@ -89,18 +310,13 @@ class SystemWatchdog:
     async def _run_health_checks(self) -> None:
         now = time.monotonic()
 
-        # ── 1. Zombie Process Cleaner (Reap any defunct child processes) ───────
-        reaped = 0
-        try:
-            while True:
-                pid, status = os.waitpid(-1, os.WNOHANG)
-                if pid <= 0:
-                    break
-                reaped += 1
-            if reaped > 0:
-                print(f"[Watchdog] 🧹 Reaped {reaped} defunct zombie process(es)")
-        except (ChildProcessError, OSError):
-            pass
+        # ── 1. Periodic Process Table Sanitation Sweep (Every 30s) ───────────
+        if now - self._last_process_sweep_ts >= 30.0:
+            self._last_process_sweep_ts = now
+            try:
+                self.audit_and_sanitize_processes(startup=False)
+            except Exception as exc:
+                print(f"[Watchdog] ⚠️ Error during process sanitation sweep: {exc}")
 
         # ── 2. Camera Stream Staleness & Blackout Checker ─────────────────────
         active_cams = self.camera_manager.get_active_cameras()

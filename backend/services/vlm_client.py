@@ -264,7 +264,7 @@ class _EndpointShard:
                     {"role": "user", "content": content}
                 ],
                 "max_tokens":  256,
-                "temperature": 0.5,
+                "temperature": 0.15,
                 "repetition_penalty": 1.15,
                 "chat_template_kwargs": {"enable_thinking": False},
             }

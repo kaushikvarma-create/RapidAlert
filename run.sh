@@ -6,6 +6,24 @@
 # ═══════════════════════════════════════════════════════════════════
 set -euo pipefail
 
+# Disable core dumps to prevent multi-gigabyte crash dumps from freezing the system on abort
+ulimit -c 0
+
+# Prevent multiple concurrent instances of run.sh from colliding
+LOCK_FILE="/tmp/rapidalert_launcher.lock"
+exec 200>"$LOCK_FILE"
+if ! flock -n 200; then
+  echo -e "\033[1;33m[Warning]\033[0m Another instance of run.sh is active. Terminating previous instance..."
+  OLD_PID=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
+  if [[ -n "$OLD_PID" ]] && kill -0 "$OLD_PID" 2>/dev/null; then
+    kill -15 "$OLD_PID" 2>/dev/null || true
+    sleep 0.5
+    kill -9 "$OLD_PID" 2>/dev/null || true
+  fi
+  flock -x 200
+fi
+echo "$$" > "$LOCK_FILE"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
@@ -42,9 +60,11 @@ if command -v python3 &>/dev/null && [[ -f config/system.json ]]; then
   AUTO_START_VLLM=$(python3 -c "import json; d=json.load(open('config/system.json')); print(str(d.get('auto_start_vllm', True)).lower())" 2>/dev/null || echo "true")
 fi
 
-# Override auto start if user passes --no-vllm
+# Override auto start if user passes --no-vllm, check for dev/reload flag
+DEV_MODE="false"
 for arg in "$@"; do
   [[ "$arg" == "--no-vllm" ]] && AUTO_START_VLLM="false"
+  [[ "$arg" == "--reload" || "$arg" == "--dev" ]] && DEV_MODE="true"
 done
 
 # If systemd background service is running, stop it to prevent conflicting port 7000 restart loop
@@ -132,6 +152,8 @@ python3 scripts/system_health_audit.py --fix || warn "System audit completed wit
 
 # ── Kill orphaned processes from previous runs ───────────────────────
 log "Cleaning up any orphaned backend processes ..."
+pkill -9 -f "apport-gtk" 2>/dev/null || true
+rm -f /var/crash/_usr_bin_python3* 2>/dev/null || true
 pkill -CONT -f "backend.main" 2>/dev/null || true
 pkill -CONT -f "uvicorn.*backend" 2>/dev/null || true
 sleep 0.1
@@ -142,6 +164,13 @@ pkill -9 -f "backend.main" 2>/dev/null || true
 pkill -9 -f "uvicorn.*backend" 2>/dev/null || true
 fuser -k "${DASHBOARD_PORT}/tcp" 2>/dev/null || true
 sleep 0.2
+
+# Check system swap memory
+SWAP_TOTAL=$(free -m | awk '/Swap:/ {print $2}')
+if [[ "${SWAP_TOTAL:-0}" -eq 0 ]]; then
+    warn "Zero swap space detected (Swap: 0B). On Jetson Thor unified memory,"
+    warn "creating a swapfile prevents kernel memory stalls under burst loads."
+fi
 ok "Process cleanup and pre-flight audit done."
 echo ""
 
@@ -298,12 +327,15 @@ echo -e "${BOLD}${GREEN}  ╚═════════════════
 echo ""
 
 # ── Run the dashboard backend in foreground with TTY protection ───────────
-python3 -m uvicorn backend.main:app \
-  --host 0.0.0.0 \
-  --port "${DASHBOARD_PORT}" \
-  --timeout-graceful-shutdown 1 \
-  --reload \
-  --log-level info &
+UVICORN_CMD=(python3 -m uvicorn backend.main:app --host 0.0.0.0 --port "${DASHBOARD_PORT}" --timeout-graceful-shutdown 2 --log-level info)
+if [[ "${DEV_MODE}" == "true" ]]; then
+    warn "Running with --reload (Development Mode). Child processes may be spawned."
+    UVICORN_CMD+=(--reload)
+else
+    ok "Running in direct production mode (single-process, zero reload zombies)."
+fi
+
+"${UVICORN_CMD[@]}" &
 UVICORN_PID=$!
 
 wait "${UVICORN_PID}" 2>/dev/null || true

@@ -111,6 +111,21 @@ class WatchdogEmailer:
                     severity = "CRITICAL"
 
                 print(f"[WatchdogEmailer] 🚨 Detected prior ungraceful shutdown ({event_type}). Dispatching alert...")
+                # Audit any rogue processes purged on boot
+                sanitation_str = "Zero rogue processes detected (Clean Boot)"
+                try:
+                    conn = self._conn()
+                    s_rows = conn.execute(
+                        "SELECT pid, name, rss_mb, reason FROM watchdog_sanitation_log WHERE ts >= ? ORDER BY ts DESC LIMIT 5",
+                        (now_ts - 600.0,)
+                    ).fetchall()
+                    if s_rows:
+                        sanitation_str = f"{len(s_rows)} stale process(es) terminated: " + ", ".join(
+                            f"{r['name']} (PID {r['pid']}: {r['reason']})" for r in s_rows[:3]
+                        )
+                except Exception:
+                    pass
+
                 self.send_critical_alert(
                     event_type=event_type,
                     title=title,
@@ -123,6 +138,7 @@ class WatchdogEmailer:
                         "Current Recovery Time": datetime.fromtimestamp(now_ts).strftime("%d %b %Y %H:%M:%S IST"),
                         "Previous Process PID": prior_state.get("pid", "Unknown"),
                         "Current Process PID": os.getpid(),
+                        "Watchdog Process Sanitation": sanitation_str,
                     },
                     severity=severity,
                     remediation=remed,
@@ -149,6 +165,21 @@ class WatchdogEmailer:
                     remed = "Service is healthy and active. No action needed."
 
                 print(f"[WatchdogEmailer] 🔄 System restart detected ({event_type}). Dispatching restart notification...")
+                # Audit any rogue processes purged on boot
+                sanitation_str = "Zero rogue processes detected (Clean Boot)"
+                try:
+                    conn = self._conn()
+                    s_rows = conn.execute(
+                        "SELECT pid, name, rss_mb, reason FROM watchdog_sanitation_log WHERE ts >= ? ORDER BY ts DESC LIMIT 5",
+                        (now_ts - 600.0,)
+                    ).fetchall()
+                    if s_rows:
+                        sanitation_str = f"{len(s_rows)} stale process(es) terminated: " + ", ".join(
+                            f"{r['name']} (PID {r['pid']}: {r['reason']})" for r in s_rows[:3]
+                        )
+                except Exception:
+                    pass
+
                 self.send_critical_alert(
                     event_type=event_type,
                     title=title,
@@ -159,6 +190,7 @@ class WatchdogEmailer:
                         "Startup Timestamp": datetime.fromtimestamp(now_ts).strftime("%d %b %Y %H:%M:%S IST"),
                         "Process PID": os.getpid(),
                         "Status": "Healthy & Streaming",
+                        "Watchdog Process Sanitation": sanitation_str,
                     },
                     severity="INFO",
                     remediation=remed,
@@ -223,6 +255,21 @@ class WatchdogEmailer:
             conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS watchdog_sanitation_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts REAL NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    pid INTEGER,
+                    name TEXT,
+                    cmd TEXT,
+                    rss_mb REAL,
+                    cpu_pct REAL,
+                    reason TEXT
+                );
+                """
+            )
             self._local.conn = conn
         return self._local.conn
 
@@ -557,6 +604,25 @@ class WatchdogEmailer:
         uptime_sec = round(time.monotonic() - self._start_time, 1)
         uptime_str = f"{int(uptime_sec // 3600)}h {int((uptime_sec % 3600) // 60)}m"
 
+        # 6. Process sanitation & background cleanup in last 24h
+        sanitation_rows = []
+        try:
+            sanitation_rows = conn.execute("""
+                SELECT pid, name, cmd, rss_mb, cpu_pct, reason, timestamp
+                FROM watchdog_sanitation_log
+                WHERE ts >= ?
+                ORDER BY ts DESC
+            """, (past_24h_ts,)).fetchall()
+        except Exception:
+            pass
+
+        total_sanitized_24h = len(sanitation_rows)
+        mem_reclaimed_24h = sum(r["rss_mb"] or 0.0 for r in sanitation_rows)
+        sanitation_samples = [
+            f"[{r['timestamp']}] PID {r['pid']} ({r['name']}): {r['reason']} ({r['rss_mb']:.1f} MB RAM)"
+            for r in sanitation_rows[:6]
+        ]
+
         return {
             "period": "Last 24 Hours",
             "date_str": datetime.now().strftime("%d %b %Y"),
@@ -577,6 +643,9 @@ class WatchdogEmailer:
             "cpu_fallback_count": cpu_count,
             "vllm_shards_healthy": f"{healthy_shards}/{len(shards)}",
             "camera_modes": modes,
+            "total_sanitized_24h": total_sanitized_24h,
+            "mem_reclaimed_24h": round(mem_reclaimed_24h, 1),
+            "sanitation_samples": sanitation_samples,
         }
 
     def send_daily_health_digest(self) -> bool:
@@ -617,6 +686,11 @@ class WatchdogEmailer:
             f"<li style='margin-bottom: 6px; font-family: monospace; font-size: 10.5px; color: #475569;'>{e}</li>"
             for e in summary["recent_errors"]
         ) or "<li style='color: #16a34a; font-weight: 600;'>✔ Zero unresolved system errors logged in the last 24 hours.</li>"
+
+        sanitation_items_html = "".join(
+            f"<li style='margin-bottom: 6px; font-family: monospace; font-size: 10.5px; color: #475569;'>{s}</li>"
+            for s in summary.get("sanitation_samples", [])
+        ) or "<li style='color: #16a34a; font-weight: 600;'>✔ Zero rogue or zombie processes detected; process table remained clean.</li>"
 
         cam_modes_html = "".join(
             f"<span style='background: #f1f5f9; border: 1px solid #cbd5e1; padding: 3px 8px; border-radius: 4px; font-size: 10px; margin: 3px; display: inline-block;'><strong>{cam}:</strong> <span style='color: {'#16a34a' if 'NVDEC' in mode else '#d97706'}; font-weight: 700;'>{mode}</span></span>"
@@ -679,6 +753,16 @@ class WatchdogEmailer:
                 </div>
                 <ul style='margin: 0; padding-left: 18px;'>
                     {err_list_html}
+                </ul>
+            </div>
+
+            <!-- Background Process Watchdog & Sanitation -->
+            <div style='margin-bottom: 18px;'>
+                <div style='font-size: 11px; font-weight: 700; color: #0f172a; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; border-bottom: 2px solid #06b6d4; padding-bottom: 4px; display: inline-block;'>
+                    🛡️ Background Process & Memory Sanitation ({summary.get('total_sanitized_24h', 0)} Cleaned • {summary.get('mem_reclaimed_24h', 0.0):.1f} MB Freed)
+                </div>
+                <ul style='margin: 0; padding-left: 18px;'>
+                    {sanitation_items_html}
                 </ul>
             </div>
 

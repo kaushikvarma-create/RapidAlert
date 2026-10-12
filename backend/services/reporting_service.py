@@ -564,6 +564,16 @@ class ReportingService:
             })
 
         # Overall Stats
+        sanitation_shift_count = 0
+        try:
+            r = conn.execute(
+                "SELECT COUNT(*) as cnt FROM watchdog_sanitation_log WHERE ts >= ? AND ts <= ?",
+                (p_start, p_end),
+            ).fetchone()
+            sanitation_shift_count = r["cnt"] if r else 0
+        except Exception:
+            pass
+
         stats = {
             "total_analyses": len(analyses_rows),
             "high_count": len(high_events),
@@ -571,6 +581,7 @@ class ReportingService:
             "peak_workers": max(peak_occ_by_cam.values()) if peak_occ_by_cam else 0,
             "active_cameras_count": sum(1 for c in all_cams if total_counts.get(c, 0) > 0),
             "total_cameras_count": len(all_cams),
+            "sanitation_count": sanitation_shift_count,
         }
 
         # Render PDF via Jinja2 + WeasyPrint
@@ -726,6 +737,13 @@ class ReportingService:
                 for h in highlights
             ) or "<li style='color: #64748b;'>Routine baseline surveillance maintained across all active camera zones.</li>"
 
+            sanitation_cnt = stats.get("sanitation_count", 0)
+            sanitation_html = (
+                f"<li style='color: #0284c7; font-weight: 500;'>🧹 Watchdog Sanitation: {sanitation_cnt} stale/rogue process(es) proactively eliminated during shift.</li>"
+                if sanitation_cnt > 0
+                else "<li style='color: #16a34a; font-weight: 500;'>🧹 Watchdog Sanitation: Zero runaway or stale processes detected; process table remained clean.</li>"
+            )
+
             safety_html = (
                 "<li style='color: #16a34a; font-weight: 600;'>✔ Zero high-severity security or perimeter breaches detected during this shift.</li>"
                 if high_cnt == 0
@@ -781,10 +799,11 @@ class ReportingService:
 
             <div style='margin-bottom: 18px;'>
                 <div style='font-size: 11px; font-weight: 700; color: #0f172a; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; border-bottom: 2px solid #10b981; padding-bottom: 4px; display: inline-block;'>
-                    🛡️ Safety Compliance Status
+                    🛡️ Safety Compliance & Host Integrity
                 </div>
                 <ul style='margin: 0; padding-left: 18px; font-size: 12px;'>
                     {safety_html}
+                    {sanitation_html}
                 </ul>
             </div>
 
