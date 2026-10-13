@@ -197,6 +197,14 @@ class VLMEndpointConfig(BaseModel):
     gpu_utilization: float = 0.95
 
 
+class NetworkConfig(BaseModel):
+    hotspot_ssid: str = "godofthunder"
+    hotspot_password: str = "Cl0vernd@123"
+    hotspot_mode: str = "auto"  # "auto", "always_on", "disabled"
+    wifi_interface: str = "wlP1p1s0"
+    ethernet_interface: str = "enP2p1s0"
+
+
 class SystemConfig(BaseModel):
     """Structured representation of config/system.json."""
     vllm_endpoints: List[VLMEndpointConfig] = Field(
@@ -245,6 +253,8 @@ class SystemConfig(BaseModel):
     frame_width: int = DEFAULT_FRAME_WIDTH
     jpeg_quality: int = DEFAULT_JPEG_QUALITY
     dashboard_port: int = DEFAULT_DASHBOARD_PORT
+
+    network: NetworkConfig = Field(default_factory=NetworkConfig)
 
 
 # ══════════════════════════════════════════════════════════════════════

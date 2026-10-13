@@ -40,6 +40,7 @@ class SystemConfigBody(BaseModel):
     clip_recording_enabled: Optional[bool] = Field(None, description="Enable automatic MP4 video clip recording on alerts")
     clip_rolling_buffer_enabled: Optional[bool] = Field(None, description="Enable rolling retention window pruner for clips")
     clip_retention_hours: Optional[float] = Field(None, description="Retention window for video clips in hours")
+    network: Optional[NetworkConfigBody] = Field(None, description="Hotspot and network failover configuration")
 
 
 class PromptBody(BaseModel):
@@ -82,3 +83,17 @@ class ChangePasswordBody(BaseModel):
     """Payload for updating admin master password."""
     old_password: str = Field(..., description="Current admin password")
     new_password: str = Field(..., description="New admin password")
+
+
+class NetworkConfigBody(BaseModel):
+    """Payload for updating Hotspot and Network preferences."""
+    hotspot_ssid: Optional[str] = Field(None, description="Hotspot SSID (e.g. godofthunder)")
+    hotspot_password: Optional[str] = Field(None, description="Hotspot WPA2 password (min 8 chars)")
+    hotspot_mode: Optional[str] = Field(None, description="Hotspot mode: 'auto', 'always_on', or 'disabled'")
+
+
+class WifiConnectBody(BaseModel):
+    """Payload for connecting to an external Wi-Fi access point."""
+    ssid: str = Field(..., description="Target Wi-Fi SSID to connect to")
+    password: Optional[str] = Field("", description="Wi-Fi WPA/WPA2 password (empty if open)")
+

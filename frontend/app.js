@@ -244,6 +244,7 @@ const App = {
       case 'cameras': return this.onCameras(msg);
       case 'prompts': return this.onPrompts(msg);
       case 'config_updated': return this.onConfigUpdated(msg);
+      case 'network_status': return this.onNetworkStatus(msg.data || msg);
       case 'system_error': return this.onSystemError(msg);
       case 'followup_status': return this.onFollowupStatus(msg);
       case 'active_streams_count': return this.onActiveStreamsCount(msg);
@@ -406,25 +407,10 @@ const App = {
     if (msg.prompts) this._applyPrompts(msg.prompts);
     if (msg.system) {
       this.systemConfig = msg.system;
-      const elMajor = document.getElementById('sys-input-dino-major');
-      const elMinor = document.getElementById('sys-input-dino-minor');
-      const elHb = document.getElementById('sys-input-hb');
-      const elCooldown = document.getElementById('sys-input-cooldown');
-      const elFollowup = document.getElementById('sys-input-followup-interval');
-      const elPersistent = document.getElementById('sys-input-persistent-followup');
-      const elClip = document.getElementById('sys-input-clip-enabled');
-      const elRolling = document.getElementById('sys-input-clip-rolling');
-      const elRetention = document.getElementById('sys-input-clip-retention');
-
-      if (elMajor) elMajor.value = msg.system.dino_major_threshold ?? 0.060;
-      if (elMinor) elMinor.value = msg.system.dino_minor_threshold ?? 0.030;
-      if (elHb) elHb.value = msg.system.default_heartbeat_sec ?? 35;
-      if (elCooldown) elCooldown.value = msg.system.event_cooldown ?? 15;
-      if (elFollowup && msg.system.followup_interval_sec != null) elFollowup.value = msg.system.followup_interval_sec;
-      if (elPersistent && msg.system.persistent_followup != null) elPersistent.checked = Boolean(msg.system.persistent_followup);
-      if (elClip && msg.system.clip_recording_enabled != null) elClip.checked = Boolean(msg.system.clip_recording_enabled);
-      if (elRolling && msg.system.clip_rolling_buffer_enabled != null) elRolling.checked = Boolean(msg.system.clip_rolling_buffer_enabled);
-      if (elRetention && msg.system.clip_retention_hours != null) elRetention.value = msg.system.clip_retention_hours;
+      this._applySysConfigFields(msg.system);
+    }
+    if (msg.network) {
+      this.onNetworkStatus(msg.network);
     }
 
     if (msg.recent_errors && Array.isArray(msg.recent_errors)) {
@@ -438,25 +424,8 @@ const App = {
   onConfigUpdated(msg) {
     if (msg.system) {
       this.systemConfig = msg.system;
-      const elMajor = document.getElementById('sys-input-dino-major');
-      const elMinor = document.getElementById('sys-input-dino-minor');
-      const elHb = document.getElementById('sys-input-hb');
-      const elCooldown = document.getElementById('sys-input-cooldown');
-      const elFollowup = document.getElementById('sys-input-followup-interval');
-      const elPersistent = document.getElementById('sys-input-persistent-followup');
-      const elClip = document.getElementById('sys-input-clip-enabled');
-      const elRolling = document.getElementById('sys-input-clip-rolling');
-      const elRetention = document.getElementById('sys-input-clip-retention');
-
-      if (elMajor) elMajor.value = msg.system.dino_major_threshold ?? 0.060;
-      if (elMinor) elMinor.value = msg.system.dino_minor_threshold ?? 0.030;
-      if (elHb) elHb.value = msg.system.default_heartbeat_sec ?? 35;
-      if (elCooldown) elCooldown.value = msg.system.event_cooldown ?? 15;
-      if (elFollowup && msg.system.followup_interval_sec != null) elFollowup.value = msg.system.followup_interval_sec;
-      if (elPersistent && msg.system.persistent_followup != null) elPersistent.checked = Boolean(msg.system.persistent_followup);
-      if (elClip && msg.system.clip_recording_enabled != null) elClip.checked = Boolean(msg.system.clip_recording_enabled);
-      if (elRolling && msg.system.clip_rolling_buffer_enabled != null) elRolling.checked = Boolean(msg.system.clip_rolling_buffer_enabled);
-      if (elRetention && msg.system.clip_retention_hours != null) elRetention.value = msg.system.clip_retention_hours;
+      this._applySysConfigFields(msg.system);
+      if (msg.system.network) this.onNetworkStatus(msg.system.network);
     }
     if (msg.cameras) {
       for (const c of msg.cameras) {
@@ -2676,19 +2645,384 @@ const App = {
       panel.removeAttribute('hidden');
       panel.style.display = 'flex';
     }
-    // Sync cam table
-    this._syncCamTable(Object.values(this.cameras).map(c => c.config));
-    // Sync master scene context
-    const masterSceneTA = document.getElementById('master-scene-context-ta');
-    if (masterSceneTA) masterSceneTA.value = this.prompts.master_scene_context || '';
-    // Sync master prompt
-    const masterTA = document.getElementById('master-prompt-ta');
-    if (masterTA) masterTA.value = this.prompts.master || '';
-    // Sync followup prompt
-    const followupTA = document.getElementById('followup-prompt-ta');
-    if (followupTA) followupTA.value = this.prompts.followup || '';
-    // Sync VLM info
-    this._fetchVLMEndpoints();
+    // Fully refresh and synchronize all settings data directly from backend
+    this._refreshAllSettingsData();
+  },
+
+  async _refreshAllSettingsData() {
+    try {
+      // 1. Fetch system config & cameras
+      const cfgRes = await fetch('/api/config');
+      if (cfgRes.ok) {
+        const cfgData = await cfgRes.json();
+        if (cfgData.system) {
+          this.systemConfig = cfgData.system;
+          this._applySysConfigFields(cfgData.system);
+        }
+        if (cfgData.cameras) {
+          for (const c of cfgData.cameras) {
+            if (this.cameras[c.name]) this.cameras[c.name].config = c;
+          }
+          this._syncCamTable(cfgData.cameras);
+        }
+      }
+
+      // 2. Fetch network status
+      await this._fetchNetworkStatus();
+
+      // 3. Fetch prompts
+      const prRes = await fetch('/api/prompts');
+      if (prRes.ok) {
+        const prData = await prRes.json();
+        this.prompts = prData;
+        const masterSceneTA = document.getElementById('master-scene-context-ta');
+        if (masterSceneTA) masterSceneTA.value = prData.master_scene_context || '';
+        const masterTA = document.getElementById('master-prompt-ta');
+        if (masterTA) masterTA.value = prData.master || '';
+        const followupTA = document.getElementById('followup-prompt-ta');
+        if (followupTA) followupTA.value = prData.followup || '';
+      }
+
+      // 4. Fetch VLM info
+      await this._fetchVLMEndpoints();
+    } catch (err) {
+      console.warn('Error refreshing settings data:', err);
+    }
+  },
+
+  _applySysConfigFields(sys) {
+    if (!sys) return;
+    const elMajor = document.getElementById('sys-input-dino-major');
+    const elMinor = document.getElementById('sys-input-dino-minor');
+    const elHb = document.getElementById('sys-input-hb');
+    const elCooldown = document.getElementById('sys-input-cooldown');
+    const elFollowup = document.getElementById('sys-input-followup-interval');
+    const elPersistent = document.getElementById('sys-input-persistent-followup');
+    const elClip = document.getElementById('sys-input-clip-enabled');
+    const elRolling = document.getElementById('sys-input-clip-rolling');
+    const elRetention = document.getElementById('sys-input-clip-retention');
+
+    if (elMajor) elMajor.value = sys.dino_major_threshold ?? 0.060;
+    if (elMinor) elMinor.value = sys.dino_minor_threshold ?? 0.030;
+    if (elHb) elHb.value = sys.default_heartbeat_sec ?? 35;
+    if (elCooldown) elCooldown.value = sys.event_cooldown ?? 15;
+    if (elFollowup && sys.followup_interval_sec != null) elFollowup.value = sys.followup_interval_sec;
+    if (elPersistent && sys.persistent_followup != null) elPersistent.checked = Boolean(sys.persistent_followup);
+    if (elClip && sys.clip_recording_enabled != null) elClip.checked = Boolean(sys.clip_recording_enabled);
+    if (elRolling && sys.clip_rolling_buffer_enabled != null) elRolling.checked = Boolean(sys.clip_rolling_buffer_enabled);
+    if (elRetention && sys.clip_retention_hours != null) elRetention.value = sys.clip_retention_hours;
+  },
+
+  async _fetchNetworkStatus() {
+    try {
+      const res = await fetch('/api/network/status');
+      if (res.ok) {
+        const data = await res.json();
+        this.onNetworkStatus(data);
+      }
+    } catch (e) {
+      console.warn('Failed to fetch network status:', e);
+    }
+  },
+
+  onNetworkStatus(data) {
+    if (!data) return;
+    this.networkStatus = data;
+
+    // Ethernet Card
+    const ethIface = document.getElementById('net-eth-iface');
+    const ethBadge = document.getElementById('net-eth-badge');
+    const ethIp = document.getElementById('net-eth-ip');
+    const ethCarrier = document.getElementById('net-eth-carrier');
+    const ethMac = document.getElementById('net-eth-mac');
+    const ethUrl = document.getElementById('net-eth-url');
+
+    if (ethIface) ethIface.textContent = `(${data.ethernet?.interface || 'enP2p1s0'})`;
+    if (ethBadge) {
+      const connected = Boolean(data.ethernet?.connected);
+      ethBadge.textContent = connected ? '🟢 Connected' : '⚪ Disconnected';
+      ethBadge.className = connected ? 'badge badge-green badge-sm' : 'badge badge-muted badge-sm';
+    }
+    if (ethIp) ethIp.textContent = data.ethernet?.ip || 'Disconnected';
+    if (ethCarrier) ethCarrier.textContent = data.ethernet?.carrier ? '1 Gbps Carrier UP' : 'No Cable Detected';
+    if (ethMac) ethMac.textContent = data.ethernet?.mac || '—';
+    if (ethUrl) {
+      if (data.ethernet?.ip) {
+        ethUrl.href = `http://${data.ethernet.ip}:${data.dashboard_port || 7000}`;
+        ethUrl.style.display = 'inline-flex';
+      } else {
+        ethUrl.style.display = 'none';
+      }
+    }
+
+    // Wi-Fi & Hotspot Card
+    const wifiIface = document.getElementById('net-wifi-iface');
+    const wifiBadge = document.getElementById('net-wifi-badge');
+    const wifiModeTag = document.getElementById('net-wifi-mode-tag');
+    const wifiIp = document.getElementById('net-wifi-ip');
+    const wifiConn = document.getElementById('net-wifi-conn');
+    const hotspotClients = document.getElementById('net-hotspot-client-info');
+    const hotspotUrl = document.getElementById('net-hotspot-url');
+
+    if (wifiIface) wifiIface.textContent = `(${data.wifi?.interface || 'wlP1p1s0'})`;
+    if (wifiBadge) {
+      if (data.hotspot?.active) {
+        wifiBadge.textContent = '⚡ Hotspot Active';
+        wifiBadge.className = 'badge badge-accent badge-sm';
+      } else if (data.wifi?.mode === 'client') {
+        wifiBadge.textContent = '📶 Client Connected';
+        wifiBadge.className = 'badge badge-green badge-sm';
+      } else {
+        wifiBadge.textContent = '⚪ Inactive';
+        wifiBadge.className = 'badge badge-muted badge-sm';
+      }
+    }
+    if (wifiModeTag) {
+      if (data.hotspot?.active) {
+        wifiModeTag.textContent = `AP Hotspot ("${data.hotspot?.ssid || 'godofthunder'}")`;
+      } else if (data.wifi?.mode === 'client') {
+        wifiModeTag.textContent = `Client Network ("${data.wifi?.connected_ssid || 'LAN'}")`;
+      } else {
+        wifiModeTag.textContent = 'Disconnected / Idle';
+      }
+    }
+    if (wifiIp) wifiIp.textContent = data.wifi?.ip || (data.hotspot?.active ? '10.42.0.1' : 'None');
+    if (wifiConn) wifiConn.textContent = data.hotspot?.active ? (data.hotspot?.ssid || 'godofthunder') : (data.wifi?.connected_ssid || 'None');
+    if (hotspotClients) {
+      hotspotClients.textContent = `${data.hotspot?.clients_connected || 0} phone/laptop clients`;
+    }
+    if (hotspotUrl) {
+      if (data.hotspot?.active) {
+        hotspotUrl.href = `http://${data.hotspot?.ip || '10.42.0.1'}:${data.dashboard_port || 7000}`;
+        hotspotUrl.style.display = 'inline-flex';
+      } else if (data.wifi?.mode === 'client' && data.wifi?.ip) {
+        hotspotUrl.href = `http://${data.wifi.ip}:${data.dashboard_port || 7000}`;
+        hotspotUrl.textContent = `http://${data.wifi.ip}:${data.dashboard_port || 7000} ↗`;
+        hotspotUrl.style.display = 'inline-flex';
+      } else {
+        hotspotUrl.style.display = 'none';
+      }
+    }
+
+    // Hotspot Settings Form Inputs
+    const hsSsidInput = document.getElementById('net-hotspot-ssid-input');
+    const hsPwdInput = document.getElementById('net-hotspot-pwd-input');
+    const hsModeSelect = document.getElementById('net-hotspot-mode-select');
+    const hsStatePill = document.getElementById('net-hotspot-state-pill');
+
+    if (hsSsidInput && data.hotspot?.ssid) hsSsidInput.value = data.hotspot.ssid;
+    if (hsPwdInput && data.hotspot?.password) hsPwdInput.value = data.hotspot.password;
+    if (hsModeSelect && data.hotspot?.mode) hsModeSelect.value = data.hotspot.mode;
+    if (hsStatePill) {
+      hsStatePill.textContent = data.hotspot?.active ? '🟢 Hotspot Active' : '⚪ Hotspot Inactive';
+      hsStatePill.className = data.hotspot?.active ? 'badge badge-green badge-sm' : 'badge badge-muted badge-sm';
+    }
+  },
+
+  async _startHotspot() {
+    try {
+      const res = await this._authFetch('/api/network/hotspot/start', { method: 'POST' });
+      const data = await res.json();
+      if (res.ok) {
+        this._showToast('⚡ Hotspot started (godofthunder)!', 'ok');
+        this.onNetworkStatus(data.network);
+      } else {
+        this._showToast(data.detail || 'Failed to start hotspot', 'error');
+      }
+    } catch (e) {
+      this._showToast(`Error: ${e.message}`, 'error');
+    }
+  },
+
+  async _stopHotspot() {
+    try {
+      const res = await this._authFetch('/api/network/hotspot/stop', { method: 'POST' });
+      const data = await res.json();
+      if (res.ok) {
+        this._showToast('Hotspot stopped', 'ok');
+        this.onNetworkStatus(data.network);
+      } else {
+        this._showToast(data.detail || 'Failed to stop hotspot', 'error');
+      }
+    } catch (e) {
+      this._showToast(`Error: ${e.message}`, 'error');
+    }
+  },
+
+  async _saveHotspotConfig() {
+    const ssid = document.getElementById('net-hotspot-ssid-input')?.value?.trim();
+    const pwd = document.getElementById('net-hotspot-pwd-input')?.value?.trim();
+    const mode = document.getElementById('net-hotspot-mode-select')?.value;
+
+    if (!ssid) return this._showToast('Hotspot SSID cannot be empty', 'error');
+    if (!pwd || pwd.length < 8) return this._showToast('Hotspot password must be at least 8 characters', 'error');
+
+    try {
+      const res = await this._authFetch('/api/network/hotspot/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          hotspot_ssid: ssid,
+          hotspot_password: pwd,
+          hotspot_mode: mode,
+        })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        this._showToast('Saved hotspot configuration!', 'ok');
+        const msg = document.getElementById('net-hotspot-status-msg');
+        if (msg) {
+          msg.textContent = '✅ Saved & applied!';
+          msg.style.display = 'inline';
+          setTimeout(() => { msg.style.display = 'none'; }, 3000);
+        }
+        if (data.network) this.onNetworkStatus(data.network);
+      } else {
+        this._showToast(data.detail || 'Failed to save configuration', 'error');
+      }
+    } catch (e) {
+      this._showToast(`Error: ${e.message}`, 'error');
+    }
+  },
+
+  async _scanWifi() {
+    const btn = document.getElementById('btn-wifi-scan-now');
+    const summary = document.getElementById('wifi-scan-summary');
+    const tbody = document.getElementById('wifi-networks-tbody');
+
+    if (btn) btn.disabled = true;
+    if (summary) summary.textContent = '⏳ Scanning nearby 2.4 GHz & 5 GHz wireless networks...';
+    if (tbody) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:20px; color:var(--text-muted);">Scanning for networks...</td></tr>';
+    }
+
+    try {
+      const res = await fetch('/api/network/wifi/scan');
+      const data = await res.json();
+      if (res.ok && data.networks) {
+        this._renderWifiList(data.networks);
+        if (summary) summary.textContent = `Found ${data.networks.length} Wi-Fi networks.`;
+      } else {
+        if (tbody) tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; color:var(--red);">Scan failed.</td></tr>';
+      }
+    } catch (e) {
+      if (tbody) tbody.innerHTML = `<tr><td colspan="5" style="text-align:center; color:var(--red);">Scan error: ${this._esc(e.message)}</td></tr>`;
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  },
+
+  _renderWifiList(networks) {
+    const tbody = document.getElementById('wifi-networks-tbody');
+    if (!tbody) return;
+    if (!networks.length) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:20px; color:var(--text-muted);">No wireless networks found.</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = '';
+    for (const ap of networks) {
+      const tr = document.createElement('tr');
+      const isConnected = ap.in_use || (this.networkStatus?.wifi?.mode === 'client' && this.networkStatus?.wifi?.connected_ssid === ap.ssid);
+      const isHotspot = ap.is_hotspot;
+
+      tr.innerHTML = `
+        <td>
+          <div style="display:flex; align-items:center; gap:6px;">
+            <strong>${this._esc(ap.ssid)}</strong>
+            ${isHotspot ? '<span class="badge badge-accent badge-sm">Hotspot</span>' : ''}
+            ${isConnected ? '<span class="badge badge-green badge-sm">Connected</span>' : ''}
+          </div>
+        </td>
+        <td>
+          <span style="font-family:var(--font-mono); font-size:0.75rem;">${ap.signal}%</span>
+          <div style="width:50px; height:4px; background:var(--border); border-radius:2px; margin-top:2px; overflow:hidden;">
+            <div style="width:${ap.signal}%; height:100%; background:${ap.signal > 60 ? 'var(--green)' : (ap.signal > 30 ? 'var(--amber)' : 'var(--red)')};"></div>
+          </div>
+        </td>
+        <td><span class="badge badge-mono badge-sm">${this._esc(ap.security || 'Open')}</span></td>
+        <td style="font-family:var(--font-mono); font-size:0.75rem;">${this._esc(ap.channel || '—')}</td>
+        <td>
+          ${isConnected
+            ? `<button class="btn-danger btn-disconnect-wifi" style="font-size:0.72rem; padding:3px 8px;">Disconnect</button>`
+            : `<button class="btn-ghost btn-select-wifi" data-ssid="${this._esc(ap.ssid)}" style="font-size:0.72rem; padding:3px 8px;">Connect</button>`
+          }
+        </td>
+      `;
+      tbody.appendChild(tr);
+    }
+  },
+
+  _promptWifiConnect(ssid) {
+    const box = document.getElementById('wifi-connect-box');
+    const targetEl = document.getElementById('wifi-target-ssid');
+    const pwdInput = document.getElementById('wifi-connect-pwd');
+    const errEl = document.getElementById('wifi-connect-err');
+
+    if (!box || !targetEl) return;
+    targetEl.textContent = ssid;
+    if (pwdInput) {
+      pwdInput.value = '';
+      pwdInput.focus();
+    }
+    if (errEl) errEl.style.display = 'none';
+    box.style.display = 'block';
+  },
+
+  async _submitWifiConnect() {
+    const ssid = document.getElementById('wifi-target-ssid')?.textContent;
+    const pwd = document.getElementById('wifi-connect-pwd')?.value || '';
+    const errEl = document.getElementById('wifi-connect-err');
+    const btn = document.getElementById('btn-wifi-confirm-connect');
+
+    if (!ssid || ssid === '—') return;
+    if (btn) btn.disabled = true;
+    if (errEl) {
+      errEl.textContent = `Connecting to ${ssid}...`;
+      errEl.style.color = 'var(--text-muted)';
+      errEl.style.display = 'block';
+    }
+
+    try {
+      const res = await this._authFetch('/api/network/wifi/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ssid, password: pwd })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        this._showToast(`Connected to Wi-Fi: ${ssid}!`, 'ok');
+        document.getElementById('wifi-connect-box').style.display = 'none';
+        if (data.network) this.onNetworkStatus(data.network);
+        this._scanWifi();
+      } else {
+        if (errEl) {
+          errEl.textContent = `Error: ${data.detail || data.message || 'Connection failed'}`;
+          errEl.style.color = 'var(--red)';
+        }
+      }
+    } catch (e) {
+      if (errEl) {
+        errEl.textContent = `Error: ${e.message}`;
+        errEl.style.color = 'var(--red)';
+      }
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  },
+
+  async _disconnectWifi() {
+    try {
+      const res = await this._authFetch('/api/network/wifi/disconnect', { method: 'POST' });
+      const data = await res.json();
+      if (res.ok) {
+        this._showToast('Disconnected from Wi-Fi', 'ok');
+        if (data.network) this.onNetworkStatus(data.network);
+        this._scanWifi();
+      }
+    } catch (e) {
+      this._showToast(`Error: ${e.message}`, 'error');
+    }
   },
 
   _updateAuthBadge(isAuth) {
@@ -3890,6 +4224,7 @@ const App = {
         btn.classList.add('active');
         document.getElementById(`stab-${btn.dataset.stab}`)?.classList.add('active');
         if (btn.dataset.stab === 'system') this._fetchVLMEndpoints();
+        if (btn.dataset.stab === 'network') this._fetchNetworkStatus();
         if (btn.dataset.stab === 'reports') {
           this._fetchReports();
           this._fetchReportingStats();
@@ -4003,6 +4338,11 @@ const App = {
           })
         });
         if (res.ok) {
+          const cfgJson = await res.json();
+          if (cfgJson.system) {
+            this.systemConfig = cfgJson.system;
+            this._applySysConfigFields(cfgJson.system);
+          }
           const ind = document.getElementById('sys-config-saved');
           if (ind) {
             ind.style.display = 'inline';
@@ -4012,6 +4352,38 @@ const App = {
         }
       } catch (err) {
         console.error('Error saving system config:', err);
+      }
+    });
+
+    // Network & Hotspot actions
+    document.getElementById('btn-hotspot-start')?.addEventListener('click', () => this._startHotspot());
+    document.getElementById('btn-hotspot-stop')?.addEventListener('click', () => this._stopHotspot());
+    document.getElementById('btn-hotspot-save-cfg')?.addEventListener('click', () => this._saveHotspotConfig());
+    document.getElementById('btn-toggle-hotspot-pwd')?.addEventListener('click', () => {
+      const input = document.getElementById('net-hotspot-pwd-input');
+      if (!input) return;
+      input.type = (input.type === 'password') ? 'text' : 'password';
+    });
+    document.getElementById('btn-wifi-scan-now')?.addEventListener('click', () => this._scanWifi());
+    document.getElementById('btn-wifi-confirm-connect')?.addEventListener('click', () => this._submitWifiConnect());
+    document.getElementById('btn-wifi-cancel-connect')?.addEventListener('click', () => {
+      const box = document.getElementById('wifi-connect-box');
+      if (box) box.style.display = 'none';
+    });
+
+    // Delegated click for Scanned Wi-Fi table (Connect / Disconnect)
+    const wifiTable = document.getElementById('wifi-networks-tbody');
+    wifiTable?.addEventListener('click', e => {
+      const connBtn = e.target.closest('.btn-select-wifi');
+      if (connBtn) {
+        const ssid = connBtn.dataset.ssid;
+        if (ssid) this._promptWifiConnect(ssid);
+        return;
+      }
+      const discBtn = e.target.closest('.btn-disconnect-wifi');
+      if (discBtn) {
+        this._disconnectWifi();
+        return;
       }
     });
 

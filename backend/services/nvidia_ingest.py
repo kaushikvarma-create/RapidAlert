@@ -20,18 +20,34 @@ _NVIDIA_AVAILABLE: Optional[bool] = None
 
 
 def _ensure_mig_device_configured() -> None:
-    """If MIG is enabled on Thor/Hopper, ensure CUDA_VISIBLE_DEVICES is set to a valid MIG UUID."""
-    if not os.environ.get("CUDA_VISIBLE_DEVICES"):
-        try:
-            out = subprocess.check_output(["nvidia-smi", "-L"], text=True, timeout=2)
-            for line in out.strip().splitlines():
+    """
+    Ensure CUDA_VISIBLE_DEVICES points to a valid GPU or active MIG instance.
+    If pointing to an inactive/stale MIG UUID (e.g. after Thor reboot), reset to '0'.
+    """
+    try:
+        out = subprocess.check_output(["nvidia-smi", "-L"], text=True, timeout=2)
+        valid_devices = [line.strip() for line in out.strip().splitlines() if line.strip()]
+        
+        current = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        if current.startswith("MIG-"):
+            if not any(current in line for line in valid_devices):
+                print(f"[NvidiaIngest] ⚠️ Stale MIG UUID {current} not found in active GPU topology; resetting CUDA_VISIBLE_DEVICES=0")
+                os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+                return
+
+        if not current:
+            mig_found = False
+            for line in valid_devices:
                 if "MIG" in line and "UUID: MIG-" in line:
                     mig_uuid = line.split("UUID: ")[1].strip().rstrip(")")
                     os.environ["CUDA_VISIBLE_DEVICES"] = mig_uuid
                     print(f"[NvidiaIngest] 🎯 Auto-configured CUDA_VISIBLE_DEVICES={mig_uuid} for MIG NVDEC decoding")
+                    mig_found = True
                     break
-        except Exception:
-            pass
+            if not mig_found:
+                os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    except Exception:
+        pass
 
 
 def is_nvidia_available() -> bool:

@@ -20,7 +20,7 @@
       "weight": 2,
       "max_concurrent": 2,
       "queue_depth": 12,
-      "gpu_utilization": 0.25
+      "gpu_utilization": 0.2
     }
   ],
   "auto_start_vllm": true,
@@ -64,5 +64,12 @@
   "max_concurrency": 4,
   "frame_width": 1280,
   "jpeg_quality": 85,
-  "dashboard_port": 7000
+  "dashboard_port": 7000,
+  "network": {
+    "hotspot_ssid": "godofthunder",
+    "hotspot_password": "Cl0vernd@123",
+    "hotspot_mode": "auto",
+    "wifi_interface": "wlP1p1s0",
+    "ethernet_interface": "enP2p1s0"
+  }
 }

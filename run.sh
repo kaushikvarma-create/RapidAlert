@@ -255,6 +255,8 @@ if [[ "$AUTO_START_VLLM" == "true" ]]; then
                 --shm-size=4g \
                 -e NVIDIA_VISIBLE_DEVICES=all \
                 -e CUDA_VISIBLE_DEVICES=0 \
+                -e NCCL_SOCKET_IFNAME=lo \
+                -e GLOO_SOCKET_IFNAME=lo \
                 -e HF_TOKEN="${HF_TOKEN:-}" \
                 -e HF_HOME=/data/models/huggingface \
                 -e EP_MODEL="${EP_MODEL}" \
@@ -305,11 +307,15 @@ eps = d.get('vllm_endpoints', [])
 print(d.get('backend_mig_uuid') or (eps[0].get('mig_uuid', '') if eps else ''))
 " 2>/dev/null || echo "")
 
-if [[ -n "${BACKEND_MIG_UUID}" ]]; then
+if [[ -n "${BACKEND_MIG_UUID}" ]] && nvidia-smi -L 2>/dev/null | grep -q "${BACKEND_MIG_UUID}"; then
     export CUDA_VISIBLE_DEVICES="${BACKEND_MIG_UUID}"
     ok "Backend pinned to MIG device: ${BACKEND_MIG_UUID}"
 else
-    warn "No mig_uuid in config — backend will use default CUDA device selection"
+    if [[ -n "${BACKEND_MIG_UUID}" ]]; then
+        warn "Configured MIG UUID '${BACKEND_MIG_UUID}' not active on host (MIG mode is currently disabled)."
+    fi
+    export CUDA_VISIBLE_DEVICES=0
+    ok "Backend using primary GPU (device 0)"
 fi
 
 LAN_IPS=$(hostname -I 2>/dev/null || echo "")

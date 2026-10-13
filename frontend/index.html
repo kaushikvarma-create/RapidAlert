@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Dancing+Script:wght@600;700&family=Poppins:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/style.css?v=78" />
+  <link rel="stylesheet" href="/style.css?v=80" />
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.8/dist/hls.min.js"></script>
   <script>
     (function() {
@@ -87,6 +87,7 @@
       </div>
     </div>
 
+    <div class="header-actions">
       <div class="vlm-shards-pill" id="vlm-shards-pill" title="⚡ Click to inspect vLLM Container &amp; MIG Shards Telemetry" role="button" tabindex="0">
         <span class="vlm-pill-dot" id="vlm-pill-dot"></span>
         <span id="vlm-mode-label" class="vlm-mode-tag">MIG</span>
@@ -266,7 +267,8 @@
     <div class="settings-tabs">
       <button class="stab active" data-stab="cameras">📷 Cameras</button>
       <button class="stab" data-stab="prompts">✏ Prompts</button>
-      <button class="stab" data-stab="scanner">🔍 Scan Network</button>
+      <button class="stab" data-stab="network">📶 Network &amp; Hotspot</button>
+      <button class="stab" data-stab="scanner">🔍 Scan Cameras</button>
       <button class="stab" data-stab="reports">📑 Reports</button>
       <button class="stab" data-stab="history">🗄 History</button>
       <button class="stab" data-stab="system">⚙ System</button>
@@ -355,6 +357,175 @@
       <!-- Context hint -->
       <div class="prompt-section-hint-block">
         <span class="prompt-hint">💡 Per-camera normal context (day &amp; night) is set per camera via the <strong>camera card</strong> or the <strong>Cameras</strong> tab.</span>
+      </div>
+    </div>
+
+    <!-- ── Network & Hotspot Tab ─────────────────────────────────── -->
+    <div class="stab-content" id="stab-network">
+      <!-- Live Interface Status Cards -->
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px;">
+        
+        <!-- Ethernet Card -->
+        <div class="net-status-card" style="background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; display: flex; flex-direction: column; gap: 10px;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span style="font-size: 1.25rem;">🔌</span>
+              <div>
+                <strong style="font-size: 0.95rem; color: var(--text);">Wired Ethernet</strong>
+                <span id="net-eth-iface" style="font-size: 0.72rem; color: var(--text-3); font-family: var(--font-mono); margin-left: 6px;">(enP2p1s0)</span>
+              </div>
+            </div>
+            <span id="net-eth-badge" class="badge badge-green badge-sm">Connected</span>
+          </div>
+          <div style="background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px; font-size: 0.8rem; display: flex; flex-direction: column; gap: 4px;">
+            <div style="display: flex; justify-content: space-between;">
+              <span style="color: var(--text-muted);">IP Address:</span>
+              <strong id="net-eth-ip" style="font-family: var(--font-mono); color: var(--accent);">—</strong>
+            </div>
+            <div style="display: flex; justify-content: space-between;">
+              <span style="color: var(--text-muted);">Physical Link:</span>
+              <span id="net-eth-carrier" style="color: var(--text);">1 Gbps Carrier UP</span>
+            </div>
+            <div style="display: flex; justify-content: space-between;">
+              <span style="color: var(--text-muted);">MAC Address:</span>
+              <span id="net-eth-mac" style="font-family: var(--font-mono); color: var(--text-3); font-size: 0.72rem;">—</span>
+            </div>
+          </div>
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-top: auto;">
+            <span style="font-size: 0.75rem; color: var(--text-muted);">Camera RTSP Ingestion Link</span>
+            <a id="net-eth-url" href="#" target="_blank" class="btn-ghost" style="font-size: 0.75rem; padding: 4px 8px; text-decoration: none;">Open LAN URL ↗</a>
+          </div>
+        </div>
+
+        <!-- Wi-Fi & Hotspot Card -->
+        <div class="net-status-card" style="background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; display: flex; flex-direction: column; gap: 10px;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span style="font-size: 1.25rem;">📡</span>
+              <div>
+                <strong style="font-size: 0.95rem; color: var(--text);">Wireless Interface</strong>
+                <span id="net-wifi-iface" style="font-size: 0.72rem; color: var(--text-3); font-family: var(--font-mono); margin-left: 6px;">(wlP1p1s0)</span>
+              </div>
+            </div>
+            <span id="net-wifi-badge" class="badge badge-accent badge-sm">⚡ Hotspot Active</span>
+          </div>
+          <div style="background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px; font-size: 0.8rem; display: flex; flex-direction: column; gap: 4px;">
+            <div style="display: flex; justify-content: space-between;">
+              <span style="color: var(--text-muted);">Current Mode:</span>
+              <strong id="net-wifi-mode-tag" style="color: var(--text);">AP Hotspot ("godofthunder")</strong>
+            </div>
+            <div style="display: flex; justify-content: space-between;">
+              <span style="color: var(--text-muted);">IP Address:</span>
+              <strong id="net-wifi-ip" style="font-family: var(--font-mono); color: var(--green);">10.42.0.1</strong>
+            </div>
+            <div style="display: flex; justify-content: space-between;">
+              <span style="color: var(--text-muted);">Active Profile:</span>
+              <span id="net-wifi-conn" style="font-family: var(--font-mono); color: var(--accent);">godofthunder</span>
+            </div>
+          </div>
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-top: auto;">
+            <span style="font-size: 0.75rem; color: var(--text-muted);" id="net-hotspot-client-info">0 phone/laptop clients</span>
+            <a id="net-hotspot-url" href="http://10.42.0.1:7000" target="_blank" class="btn-ghost" style="font-size: 0.75rem; padding: 4px 8px; text-decoration: none;">http://10.42.0.1:7000 ↗</a>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Hotspot Setup & Management Section -->
+      <div style="background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+          <h3 style="font-size: 0.95rem; display: flex; align-items: center; gap: 8px; margin: 0;">
+            <span>⚡</span> "godofthunder" Access Point Hotspot
+          </h3>
+          <span class="badge badge-blue badge-sm" id="net-hotspot-state-pill">WPA2 Protected</span>
+        </div>
+
+        <div style="background: rgba(56, 189, 248, 0.08); border-left: 3px solid var(--accent); padding: 10px 14px; border-radius: 4px; margin-bottom: 14px; font-size: 0.78rem; color: var(--text-2); line-height: 1.5;">
+          💡 <strong>Direct Technician & Field Access Protocol:</strong><br/>
+          When on Ethernet, the Wi-Fi card runs in AP Hotspot mode. Connect any smartphone or laptop to Wi-Fi SSID <strong>godofthunder</strong> using password <code>Cl0vernd@123</code>, then open <strong>http://10.42.0.1:7000</strong> to configure cameras and view alerts.
+        </div>
+
+        <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-bottom: 14px;">
+          <div>
+            <label class="field-label" for="net-hotspot-ssid-input">Hotspot SSID (Network Name)</label>
+            <input id="net-hotspot-ssid-input" type="text" class="input" value="godofthunder" placeholder="godofthunder" />
+          </div>
+          <div>
+            <label class="field-label" for="net-hotspot-pwd-input">WPA2 Password (min 8 characters)</label>
+            <div style="position: relative; display: flex; align-items: center;">
+              <input id="net-hotspot-pwd-input" type="password" class="input" value="Cl0vernd@123" placeholder="Cl0vernd@123" style="padding-right: 36px;" />
+              <button type="button" id="btn-toggle-hotspot-pwd" style="position: absolute; right: 6px; background: none; border: none; cursor: pointer; color: var(--text-muted); padding: 4px; font-size: 0.9rem;" title="Show/Hide Password">👁</button>
+            </div>
+          </div>
+          <div>
+            <label class="field-label" for="net-hotspot-mode-select">Failover & Operating Mode</label>
+            <select id="net-hotspot-mode-select" class="input select-input">
+              <option value="auto">Auto (Ethernet Aware - Recommended)</option>
+              <option value="always_on">Always On (Hotspot 24/7)</option>
+              <option value="disabled">Disabled (Client Wi-Fi only)</option>
+            </select>
+          </div>
+        </div>
+
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+          <div style="display: flex; gap: 8px;">
+            <button class="btn-primary" id="btn-hotspot-start">▶ Start Hotspot</button>
+            <button class="btn-ghost" id="btn-hotspot-stop">⏹ Stop Hotspot</button>
+            <button class="btn-primary" id="btn-hotspot-save-cfg">💾 Save Settings</button>
+          </div>
+          <span id="net-hotspot-status-msg" style="font-size: 0.75rem; color: var(--green); display: none;"></span>
+        </div>
+      </div>
+
+      <!-- Wi-Fi Scanner & Client Section (Station Mode) -->
+      <div style="background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+          <h3 style="font-size: 0.95rem; display: flex; align-items: center; gap: 8px; margin: 0;">
+            <span>🔍</span> Nearby Wi-Fi Networks (Join Client Network)
+          </h3>
+          <button class="btn-ghost" id="btn-wifi-scan-now" style="font-size: 0.78rem; padding: 4px 10px; cursor: pointer;">
+            🔄 Scan Networks
+          </button>
+        </div>
+
+        <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 10px;" id="wifi-scan-summary">
+          Click "Scan Networks" to discover surrounding access points. Connecting to an external Wi-Fi network will transition the single radio from Hotspot to Client mode.
+        </div>
+
+        <!-- Inline Connect Form (Initially Hidden) -->
+        <div id="wifi-connect-box" style="display: none; background: var(--bg); border: 1px solid var(--accent); border-radius: 6px; padding: 12px; margin-bottom: 14px;">
+          <div style="font-size: 0.85rem; font-weight: 600; margin-bottom: 8px; color: var(--accent);">
+            Connect to: <span id="wifi-target-ssid" style="color: var(--text);">—</span>
+          </div>
+          <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+            <input id="wifi-connect-pwd" type="password" placeholder="Enter Wi-Fi password..." class="input" style="flex: 1; min-width: 200px;" />
+            <button class="btn-primary" id="btn-wifi-confirm-connect">Connect</button>
+            <button class="btn-ghost" id="btn-wifi-cancel-connect">Cancel</button>
+          </div>
+          <div id="wifi-connect-err" style="color: var(--red); font-size: 0.75rem; margin-top: 6px; display: none;"></div>
+        </div>
+
+        <!-- Scanned Networks Table -->
+        <div style="max-height: 280px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px;">
+          <table class="cam-table" style="margin: 0; width: 100%;">
+            <thead>
+              <tr>
+                <th>SSID</th>
+                <th>Signal</th>
+                <th>Security</th>
+                <th>Channel</th>
+                <th style="width: 100px;">Action</th>
+              </tr>
+            </thead>
+            <tbody id="wifi-networks-tbody">
+              <tr>
+                <td colspan="5" style="text-align: center; color: var(--text-muted); padding: 24px;">
+                  Press "Scan Networks" to discover available Wi-Fi access points.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
 

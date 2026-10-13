@@ -179,14 +179,16 @@ code { font-family: var(--font-mono); font-size: 0.82em; color: var(--accent); b
   z-index: 100;
   display: flex;
   align-items: center;
-  gap: 16px;
+  justify-content: space-between;
+  gap: 12px;
   height: var(--header-h);
-  padding: 0 20px;
+  padding: 0 16px;
   background: var(--bg-sidebar);
   border-bottom: 1px solid var(--border);
   backdrop-filter: blur(20px);
   flex-shrink: 0;
-  overflow: visible;
+  overflow: hidden;
+  box-sizing: border-box;
   transition: background-color 0.3s, border-color 0.3s;
 }
 
@@ -195,6 +197,7 @@ code { font-family: var(--font-mono); font-size: 0.82em; color: var(--accent); b
   align-items: center;
   gap: 12px;
   flex-shrink: 0;
+  min-width: 0;
 }
 
 .header-logo-group {
@@ -238,7 +241,7 @@ code { font-family: var(--font-mono); font-size: 0.82em; color: var(--accent); b
 .product-name {
   font-family: 'Dancing Script', cursive;
   font-weight: 700;
-  font-size: 2.2rem;
+  font-size: 2.1rem;
   letter-spacing: 0.02em;
   color: var(--text);
   line-height: 1;
@@ -295,6 +298,8 @@ body.light-mode .brand-tag {
   gap: 6px;
   flex: 1;
   justify-content: center;
+  min-width: 0;
+  padding: 0 8px;
 }
 
 .metric-chip {
@@ -304,16 +309,17 @@ body.light-mode .brand-tag {
   background: var(--nav-hover);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  padding: 4px 12px;
-  min-width: 54px;
+  padding: 3px 10px;
+  min-width: 50px;
   cursor: default;
   transition: border-color 0.2s, background-color 0.3s;
+  flex-shrink: 0;
 }
 
 .metric-chip:hover { border-color: var(--accent); }
 
 .metric-value {
-  font-size: 0.92rem;
+  font-size: 0.88rem;
   font-weight: 700;
   font-family: var(--font-mono);
   color: var(--text);
@@ -321,7 +327,7 @@ body.light-mode .brand-tag {
 }
 
 .metric-label {
-  font-size: 0.6rem;
+  font-size: 0.58rem;
   color: var(--text-2);
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -332,8 +338,80 @@ body.light-mode .brand-tag {
 .header-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex-shrink: 0;
+  margin-left: auto;
+  z-index: 2;
+}
+
+/* ── Responsive Header Layout for Laptops, High-DPI & Smaller Devices ── */
+@media (max-width: 1400px) {
+  :root {
+    --header-h: 56px;
+  }
+  .header {
+    gap: 8px;
+    padding: 0 12px;
+  }
+  .product-name {
+    font-size: 1.7rem;
+  }
+  .clove-official-logo {
+    height: 24px;
+  }
+  .brand-tag {
+    font-size: 0.58rem;
+    padding: 2px 6px;
+  }
+  .metric-chip {
+    padding: 2px 7px;
+    min-width: 44px;
+  }
+  .metric-value {
+    font-size: 0.8rem;
+  }
+  .metric-label {
+    font-size: 0.54rem;
+  }
+  .header-actions {
+    gap: 6px;
+  }
+}
+
+@media (max-width: 1200px) {
+  .brand-tag,
+  .brand-divider {
+    display: none; /* Hide subtitle tag on compact viewports to prevent clipping */
+  }
+  .header-metrics .metric-chip:nth-child(2), /* CPU */
+  .header-metrics .metric-chip:nth-child(3) { /* RAM */
+    display: none; /* Keep GPU and infer/s, free up ~110px */
+  }
+}
+
+@media (max-width: 1024px) {
+  .header-metrics {
+    display: none; /* Top-bar metrics hidden on tablet/narrow views, still in telemetry modal */
+  }
+  .header-reports-btn .reports-label {
+    display: none; /* Show icon + badge */
+  }
+}
+
+@media (max-width: 768px) {
+  .vlm-shards-chips {
+    display: none; /* Keep MIG badge dot only */
+  }
+  .product-name {
+    font-size: 1.4rem;
+  }
+  .ws-pill span:not(.ws-dot) {
+    display: none;
+  }
+  .btn-icon {
+    width: 32px;
+    height: 32px;
+  }
 }
 
 .ws-pill {
@@ -439,15 +517,21 @@ body.light-mode .brand-tag {
   display: grid;
   grid-template-columns: 1fr 360px;
   flex: 1;
-  height: calc(100vh - 54px);
+  height: calc(100vh - var(--header-h, 56px));
   overflow: hidden;
   position: relative;
   z-index: 1;
 }
 
+@media (max-width: 1366px) {
+  .dashboard-layout {
+    grid-template-columns: 1fr 310px;
+  }
+}
+
 @media (max-width: 1080px) {
   .dashboard-layout {
-    grid-template-columns: 1fr 320px;
+    grid-template-columns: 1fr 280px;
   }
 }
 

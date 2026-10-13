@@ -67,6 +67,8 @@ from backend.schemas.requests import (
     LoginBody,
     SetupAdminBody,
     ChangePasswordBody,
+    NetworkConfigBody,
+    WifiConnectBody,
 )
 from backend.schemas.responses import (
     StandardStatusResponse,
@@ -93,6 +95,7 @@ from backend.services.scene_trigger import SceneTriggerEngine
 from backend.services.watchdog import SystemWatchdog
 from backend.services.watchdog_emailer import WatchdogEmailer
 from backend.services.mediamtx_service import mediamtx_service, get_safe_cam_slug
+from backend.services.network_service import NetworkService
 from backend.core.shutdown_logger import log_system_event
 
 
@@ -121,6 +124,11 @@ watchdog_emailer = WatchdogEmailer(
 prompt_manager = PromptManager(
     PROMPTS_CONFIG_PATH,
     cameras_config_provider=camera_manager.get_config,
+)
+network_service = NetworkService(
+    config_manager=config_manager,
+    broadcaster=ws_manager.broadcast,
+    dashboard_port=sys_cfg.dashboard_port,
 )
 
 security = HTTPBearer(auto_error=False)
@@ -221,6 +229,7 @@ async def lifespan(app: FastAPI):
     _bg_tasks.append(asyncio.create_task(prompt_manager.watch_loop()))
     _bg_tasks.append(asyncio.create_task(_config_sync_loop()))
     _bg_tasks.append(asyncio.create_task(metrics_loop(ws_manager.broadcast)))
+    await network_service.start_watchdog(interval_sec=10.0)
     
     port = config_manager.get().dashboard_port
     print(f"\n[RapidAlert] ✅ Dashboard → http://localhost:{port}\n")
@@ -234,6 +243,7 @@ async def lifespan(app: FastAPI):
     watchdog.stop()
     reporting_service.stop()
     mediamtx_service.stop()
+    network_service.stop_watchdog()
     for task in _bg_tasks:
         task.cancel()
     scene_trigger.stop()
@@ -399,6 +409,7 @@ async def websocket_endpoint(ws: WebSocket):
                 "followup": prompt_manager._followup,
                 "cameras": prompt_manager.get_cam_overrides(),
             },
+            "network": await network_service.get_status(),
             "recent_errors": error_tracker.get_recent(limit=10),
         })
 
@@ -652,6 +663,13 @@ async def api_update_system_config(body: SystemConfigBody):
         if "clip_recording_enabled" in updates:
             if hasattr(alert_engine, "clip_recorder") and alert_engine.clip_recorder:
                 alert_engine.clip_recorder.enabled = bool(cfg.clip_recording_enabled)
+        if "network" in updates and isinstance(updates["network"], dict):
+            net_u = updates["network"]
+            await network_service.update_config(
+                hotspot_ssid=net_u.get("hotspot_ssid"),
+                hotspot_password=net_u.get("hotspot_password"),
+                hotspot_mode=net_u.get("hotspot_mode"),
+            )
 
         await ws_manager.broadcast({
             "type": "config_updated",
@@ -1090,6 +1108,66 @@ async def api_scan(body: ScanBody):
     finally:
         async with _scan_lock:
             _scan_running = False
+
+
+# ══════════════════════════════════════════════════════════════
+#  REST — Network, Wi-Fi & Hotspot ("godofthunder")
+# ══════════════════════════════════════════════════════════════
+
+@app.get("/api/network/status")
+async def api_network_status():
+    """Retrieve live status for Ethernet, Wi-Fi client, and Hotspot."""
+    return await network_service.get_status()
+
+
+@app.post("/api/network/hotspot/start", dependencies=[Depends(require_admin)])
+async def api_network_hotspot_start():
+    """Manually start the godofthunder hotspot."""
+    return await network_service.start_hotspot()
+
+
+@app.post("/api/network/hotspot/stop", dependencies=[Depends(require_admin)])
+async def api_network_hotspot_stop():
+    """Manually stop the godofthunder hotspot."""
+    return await network_service.stop_hotspot()
+
+
+@app.post("/api/network/hotspot/config", dependencies=[Depends(require_admin)])
+async def api_network_hotspot_config(body: NetworkConfigBody):
+    """Update hotspot SSID, password, or failover mode."""
+    return await network_service.update_config(
+        hotspot_ssid=body.hotspot_ssid,
+        hotspot_password=body.hotspot_password,
+        hotspot_mode=body.hotspot_mode,
+    )
+
+
+@app.get("/api/network/wifi/scan")
+async def api_network_wifi_scan():
+    """Scan for surrounding Wi-Fi access points."""
+    networks = await network_service.scan_wifi()
+    return {"status": "ok", "networks": networks, "count": len(networks)}
+
+
+@app.post("/api/network/wifi/connect", dependencies=[Depends(require_admin)])
+async def api_network_wifi_connect(body: WifiConnectBody):
+    """Connect to a target Wi-Fi access point as client."""
+    res = await network_service.connect_wifi(ssid=body.ssid, password=body.password)
+    if res.get("status") == "error":
+        raise HTTPException(status_code=400, detail=res.get("message", "Failed to connect to Wi-Fi"))
+    return res
+
+
+@app.post("/api/network/wifi/disconnect", dependencies=[Depends(require_admin)])
+async def api_network_wifi_disconnect():
+    """Disconnect active client Wi-Fi connection."""
+    return await network_service.disconnect_wifi()
+
+
+@app.post("/api/network/wifi/forget", dependencies=[Depends(require_admin)])
+async def api_network_wifi_forget(body: WifiConnectBody):
+    """Forget saved Wi-Fi profile."""
+    return await network_service.forget_wifi(ssid=body.ssid)
 
 
 
