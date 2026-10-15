@@ -104,30 +104,42 @@ done
 if [[ -f "${CONFIG_FILE}" ]]; then
     echo ""
     echo "Updating ${CONFIG_FILE} with current MIG UUIDs..."
-    python3 - <<EOF
-import json
+    python3 - << 'EOF'
+import json, subprocess
 
-path = "${CONFIG_FILE}"
-with open(path, "r") as f:
-    d = json.load(f)
+path = "config/system.json"
+try:
+    with open(path, "r") as f:
+        d = json.load(f)
 
-uuids = [${MIG_UUIDS[*]/#/\"}]
-uuids = [u.strip() for u in "${MIG_UUIDS[*]}".split()]
+    output = subprocess.check_output(["nvidia-smi", "-L"], text=True)
+    uuids_2g = []
+    uuids_1g = []
+    for line in output.splitlines():
+        if "MIG" in line and "UUID:" in line:
+            parts = line.split("UUID:")
+            if len(parts) > 1:
+                u = parts[1].strip().rstrip(")")
+                if "2g" in line:
+                    uuids_2g.append(u)
+                else:
+                    uuids_1g.append(u)
 
-eps = d.get("vllm_endpoints", [])
-for i, u in enumerate(uuids):
-    if i < len(eps):
-        eps[i]["mig_uuid"] = u
-        print(f"  • Endpoint {i} (port {eps[i].get('url')}): mig_uuid -> {u}")
+    eps = d.get("vllm_endpoints", [])
+    if uuids_2g and len(eps) > 0:
+        eps[0]["mig_uuid"] = uuids_2g[0]
+        d["backend_mig_uuid"] = uuids_2g[0]
+        print(f"  • Endpoint 0 (port 8000, 12 SMs): mig_uuid -> {uuids_2g[0]}")
+    if uuids_1g and len(eps) > 1:
+        eps[1]["mig_uuid"] = uuids_1g[0]
+        print(f"  • Endpoint 1 (port 8001, 6 SMs): mig_uuid -> {uuids_1g[0]}")
 
-if uuids:
-    d["backend_mig_uuid"] = uuids[0]
-    print(f"  • Backend NVDEC: backend_mig_uuid -> {uuids[0]}")
+    with open(path, "w") as f:
+        json.dump(d, f, indent=2)
 
-with open(path, "w") as f:
-    json.dump(d, f, indent=2)
-
-print("✅ Configuration updated successfully.")
+    print("✅ Configuration updated successfully.")
+except Exception as e:
+    print(f"Warning: {e}")
 EOF
 fi
 

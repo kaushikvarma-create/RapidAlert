@@ -50,7 +50,7 @@ class CameraThread(threading.Thread):
 
     def run(self) -> None:
         nvdec_consecutive_failures = 0
-        MAX_NVDEC_RETRIES = 5
+        MAX_NVDEC_RETRIES = 2
         last_nvdec_upgrade_attempt = time.monotonic()
 
         while not self.stop_event.is_set():
@@ -100,7 +100,7 @@ class CameraThread(threading.Thread):
             got_frame = False
             failed_attempts = 0
             # Allow warm-up period: RTSP handshakes & keyframe acquisition take 1-4 seconds
-            WARMUP_MAX_ATTEMPTS = 30 if is_hw else 15
+            WARMUP_MAX_ATTEMPTS = 10 if is_hw else 10
 
             while not self.stop_event.is_set():
                 try:

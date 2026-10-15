@@ -40,32 +40,33 @@ echo "Ensuring MIG mode is enabled on GPU 0..."
 nvidia-smi -i 0 -mig 1 || true
 
 # 3. Check existing MIG instances
-COUNT=$(nvidia-smi mig -lgi 2>/dev/null | grep -c "MIG" || true)
-CI_COUNT=$(nvidia-smi mig -lci 2>/dev/null | grep -c "MIG" || true)
+HAS_2G=$(nvidia-smi mig -lgi 2>/dev/null | grep -E "2g|Profile[[:space:]]*8[23]" | grep -c "MIG" || true)
+HAS_1G=$(nvidia-smi mig -lgi 2>/dev/null | grep -E "1g|Profile[[:space:]]*78|Profile[[:space:]]*8[01]" | grep -c "MIG" || true)
 
-if [ "$COUNT" -ge 2 ] && [ "$CI_COUNT" -ge 2 ]; then
-    echo "✅ MIG instances already exist ($COUNT GI, $CI_COUNT CI found). Nothing to partition."
-elif [ "$COUNT" -ge 2 ] && [ "$CI_COUNT" -lt 2 ]; then
-    echo "GPU instances exist ($COUNT found) but missing compute instances ($CI_COUNT found). Creating missing CI..."
-    nvidia-smi mig -i 0 -gi 2 -cci 2>/dev/null || nvidia-smi mig -i 0 -cgi 78 -C 2>/dev/null || true
+if [ "$HAS_2G" -ge 1 ] && [ "$HAS_1G" -ge 1 ]; then
+    echo "✅ MIG instances already exist (2g and 1g found). Ensuring compute instances are active..."
+    nvidia-smi mig -i 0 -gi 1 -cci 2>/dev/null || true
+    nvidia-smi mig -i 0 -gi 2 -cci 2>/dev/null || true
 else
-    # Clean up any partial/broken instances
-    if [ "$COUNT" -gt 0 ]; then
-        echo "Cleaning up partial MIG instances..."
-        nvidia-smi mig -i 0 -dci 2>/dev/null || true
-        nvidia-smi mig -i 0 -dgi 2>/dev/null || true
+    if [ "$HAS_2G" -eq 0 ] && [ "$HAS_1G" -eq 0 ]; then
+        echo "Creating batch Thor slices: Profile 83 (2g.0gb+gfx) + Profile 78 (1g.0gb+me)..."
+        if ! nvidia-smi mig -i 0 -cgi 83,78 -C 2>/dev/null; then
+            nvidia-smi mig -i 0 -cgi 83,80 -C 2>/dev/null || true
+        fi
     fi
 
-    echo "Partitioning Thor: Profile 83 (2g.0gb+gfx, 12 SMs) + Profile 78 (1g.0gb+me, 6/8 SMs)..."
-    # Officially documented JetPack 7.2 order: 83 first (+gfx), then 78 (+me)
-    if nvidia-smi mig -i 0 -cgi 83,78 -C 2>/dev/null; then
-        echo "✅ Created batch MIG slices: 83,78"
-    elif nvidia-smi mig -i 0 -cgi 83,80 -C 2>/dev/null; then
-        echo "✅ Created batch MIG slices: 83,80"
-    else
-        echo "⚠️ Batch creation failed, attempting sequential creation (83 then 78)..."
-        nvidia-smi mig -i 0 -cgi 83 -C || true
-        nvidia-smi mig -i 0 -cgi 78 -C || nvidia-smi mig -i 0 -cgi 80 -C || true
+    # Check again if 2g is still missing
+    HAS_2G=$(nvidia-smi mig -lgi 2>/dev/null | grep -E "2g|Profile[[:space:]]*8[23]" | grep -c "MIG" || true)
+    if [ "$HAS_2G" -eq 0 ]; then
+        echo "Creating 2g slice (Profile 83 / 82)..."
+        nvidia-smi mig -i 0 -cgi 83 -C 2>/dev/null || nvidia-smi mig -i 0 -cgi 82 -C 2>/dev/null || true
+    fi
+
+    # Check again if 1g is still missing
+    HAS_1G=$(nvidia-smi mig -lgi 2>/dev/null | grep -E "1g|Profile[[:space:]]*78|Profile[[:space:]]*8[01]" | grep -c "MIG" || true)
+    if [ "$HAS_1G" -eq 0 ]; then
+        echo "Creating 1g slice (Profile 78 / 80)..."
+        nvidia-smi mig -i 0 -cgi 78 -C 2>/dev/null || nvidia-smi mig -i 0 -cgi 80 -C 2>/dev/null || true
     fi
 fi
 
@@ -83,28 +84,32 @@ import json, subprocess, sys
 
 try:
     output = subprocess.check_output(["nvidia-smi", "-L"], text=True)
-    uuids = []
+    uuids_2g = []
+    uuids_1g = []
     for line in output.splitlines():
-        if "MIG-" in line and "UUID:" in line:
+        if "MIG" in line and "UUID:" in line:
             parts = line.split("UUID:")
             if len(parts) > 1:
                 u = parts[1].strip().rstrip(")")
-                uuids.append(u)
+                if "2g" in line:
+                    uuids_2g.append(u)
+                else:
+                    uuids_1g.append(u)
     
-    if len(uuids) >= 2:
+    if uuids_2g and uuids_1g:
         config_path = "/home/clove/RapidAlert/config/system.json"
         with open(config_path, "r") as f:
             cfg = json.load(f)
         
         eps = cfg.get("vllm_endpoints", [])
         if len(eps) >= 2:
-            eps[0]["mig_uuid"] = uuids[0]
-            eps[1]["mig_uuid"] = uuids[1]
-        cfg["backend_mig_uuid"] = uuids[0]
+            eps[0]["mig_uuid"] = uuids_2g[0]
+            eps[1]["mig_uuid"] = uuids_1g[0]
+        cfg["backend_mig_uuid"] = uuids_2g[0]
         
         with open(config_path, "w") as f:
             json.dump(cfg, f, indent=2)
-        print(f"✅ Auto-updated system.json: Slice 0={uuids[0]}, Slice 1={uuids[1]}")
+        print(f"✅ Auto-updated system.json: Slice 0 (12SM)={uuids_2g[0]}, Slice 1 (6SM)={uuids_1g[0]}")
 except Exception as e:
     print(f"Warning: could not auto-update system.json: {e}")
 PYEOF

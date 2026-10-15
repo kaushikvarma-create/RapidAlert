@@ -36,14 +36,38 @@ def _ensure_mig_device_configured() -> None:
                 return
 
         if not current:
+            # Check if backend_mig_uuid from system.json is active
+            try:
+                import json
+                from backend.core.config import SYSTEM_CONFIG_PATH
+                if SYSTEM_CONFIG_PATH.exists():
+                    cfg = json.loads(SYSTEM_CONFIG_PATH.read_text(encoding="utf-8"))
+                    cfg_uuid = cfg.get("backend_mig_uuid")
+                    if cfg_uuid and any(cfg_uuid in line for line in valid_devices):
+                        os.environ["CUDA_VISIBLE_DEVICES"] = cfg_uuid
+                        print(f"[NvidiaIngest] 🎯 Auto-configured CUDA_VISIBLE_DEVICES={cfg_uuid} from system config for NVDEC decoding")
+                        return
+            except Exception:
+                pass
+
+            # Prefer 2g (12SM) slice which contains the NVDEC hardware decoder
             mig_found = False
             for line in valid_devices:
-                if "MIG" in line and "UUID: MIG-" in line:
+                if "MIG 2g" in line and "UUID: MIG-" in line:
                     mig_uuid = line.split("UUID: ")[1].strip().rstrip(")")
                     os.environ["CUDA_VISIBLE_DEVICES"] = mig_uuid
-                    print(f"[NvidiaIngest] 🎯 Auto-configured CUDA_VISIBLE_DEVICES={mig_uuid} for MIG NVDEC decoding")
+                    print(f"[NvidiaIngest] 🎯 Auto-configured CUDA_VISIBLE_DEVICES={mig_uuid} (2g NVDEC slice)")
                     mig_found = True
                     break
+
+            if not mig_found:
+                for line in valid_devices:
+                    if "MIG" in line and "UUID: MIG-" in line:
+                        mig_uuid = line.split("UUID: ")[1].strip().rstrip(")")
+                        os.environ["CUDA_VISIBLE_DEVICES"] = mig_uuid
+                        print(f"[NvidiaIngest] 🎯 Auto-configured CUDA_VISIBLE_DEVICES={mig_uuid} for MIG NVDEC decoding")
+                        mig_found = True
+                        break
             if not mig_found:
                 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     except Exception:

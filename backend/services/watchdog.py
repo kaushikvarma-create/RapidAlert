@@ -376,52 +376,7 @@ class SystemWatchdog:
         # ── 3. Memory Pressure & Periodic GC Sweep ─────────────────────────────
         gc.collect()
 
-        # ── 4. vLLM Shard & Cluster Outage Health Check ────────────────────────
-        shards = self.vlm_pool.get_stats()
-        unhealthy_shards = [s for s in shards if not s.get("healthy", False)]
-        
-        if unhealthy_shards:
-            if now - self._start_time > 90.0:
-                for s in unhealthy_shards:
-                    url = s.get("url", "unknown")
-                    last_warn = self._unhealthy_shard_warnings.get(url, 0.0)
-                    if now - last_warn > 120.0:
-                        self._unhealthy_shard_warnings[url] = now
-                        error_tracker.capture_error(
-                            message=f"vLLM Shard {url} is reporting unhealthy",
-                            component="SystemWatchdog",
-                            effect=f"Workload automatically re-routed away from {url}",
-                            severity="WARNING",
-                        )
-                
-                # Check for Complete Cluster Outage (0 healthy shards)
-                if len(shards) > 0 and len(unhealthy_shards) == len(shards):
-                    if not self._vllm_cluster_down_active and self.emailer:
-                        self._vllm_cluster_down_active = True
-                        self.emailer.send_critical_alert(
-                            event_type="VLLM_CLUSTER_DOWN",
-                            title="vLLM Inference Cluster Completely Offline",
-                            message="All vLLM / MIG GPU inference instances are failing health checks. Real-time vision-language analysis is stalled.",
-                            details={
-                                "Total Shards": len(shards),
-                                "Healthy Shards": "0",
-                                "Shards Affected": ", ".join(s.get("url", "unknown") for s in shards),
-                            },
-                            severity="CRITICAL",
-                            remediation="Inspect vLLM container / subprocess logs or run `./run.sh` restart.",
-                        )
-        else:
-            if self._vllm_cluster_down_active:
-                self._vllm_cluster_down_active = False
-                if self.emailer:
-                    self.emailer.send_resolution_alert(
-                        event_type="VLLM_CLUSTER_DOWN",
-                        title="vLLM Inference Shards Restored & Healthy",
-                        message=f"vLLM inference cluster is back online. All {len(shards)} shards responding to health probes.",
-                    )
-            self._unhealthy_shard_warnings.clear()
-
-        # ── 5. Docker Container Crash Audit & Self-Healing Restarts ────────────
+        # ── 4. Docker Container Crash Audit & Self-Healing Restarts ────────────
         await self._audit_and_heal_containers()
 
         # ── 5. Disk Storage Check ──────────────────────────────────────────────
@@ -519,7 +474,7 @@ class SystemWatchdog:
                 needs_restart = True
                 crash_reason = f"Container terminated abruptly (Status: {cinfo.get('status')}, Exit Code: {cinfo.get('exit_code', -1)})"
 
-            # Check D: Running in Docker, but unresponsive to HTTP health probes
+            # Check D: Running in Docker
             elif cinfo.get("running", True):
                 if is_healthy:
                     self.container_mgr.clear_unresponsive_tick(cname)
@@ -543,16 +498,9 @@ class SystemWatchdog:
                                 },
                             )
                 else:
-                    # Only flag unresponsive after warmup grace period
-                    if now - self._start_time > self.container_mgr.warmup_grace_seconds:
-                        tick = self.container_mgr.record_unresponsive_tick(cname)
-                        # Require 3 consecutive unresponsive ticks (~45s) to avoid transient probe blips
-                        if tick >= 3:
-                            needs_restart = True
-                            crash_reason = (
-                                f"vLLM Engine Health Probe Timed Out / Stalled for {tick * int(self.interval_sec)}s "
-                                f"(HTTP /health unresponsive despite Docker Status: {cinfo.get('status')})"
-                            )
+                    # Container is still initializing or serving in Docker; VLMPool handles request routing.
+                    # Do NOT prematurely kill running containers while loading weights or profiling memory.
+                    pass
 
             if needs_restart:
                 can_res, backoff_reason = self.container_mgr.can_restart(cname)
