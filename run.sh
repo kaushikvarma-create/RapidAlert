@@ -238,9 +238,13 @@ if [[ "$AUTO_START_VLLM" == "true" ]]; then
         # Collect MIG capability device nodes if MIG is enabled
         CAP_FLAGS=()
         if [[ -d /dev/nvidia-caps ]]; then
+            # Root MIG configuration capability - required by all containers
+            if [[ -e /dev/nvidia-caps/nvidia-cap1 ]]; then
+                CAP_FLAGS+=(--device /dev/nvidia-caps/nvidia-cap1)
+            fi
             GI_ID=$(( i + 1 ))
-            for cap_file in /dev/nvidia-caps/nvidia-cap${GI_ID} /dev/nvidia-caps/nvidia-cap${GI_ID}*; do
-                if [[ -e "$cap_file" ]]; then
+            for cap_file in /dev/nvidia-caps/nvidia-cap${GI_ID}*; do
+                if [[ -e "$cap_file" && "$cap_file" != "/dev/nvidia-caps/nvidia-cap1" ]]; then
                     CAP_FLAGS+=(--device "$cap_file")
                 fi
             done
@@ -255,6 +259,7 @@ if [[ "$AUTO_START_VLLM" == "true" ]]; then
                 --shm-size=4g \
                 -e NVIDIA_VISIBLE_DEVICES=all \
                 -e CUDA_VISIBLE_DEVICES=0 \
+                -e VLLM_HOST_IP=127.0.0.1 \
                 -e NCCL_SOCKET_IFNAME=lo \
                 -e GLOO_SOCKET_IFNAME=lo \
                 -e HF_TOKEN="${HF_TOKEN:-}" \

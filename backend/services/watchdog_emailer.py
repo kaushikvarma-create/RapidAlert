@@ -351,6 +351,185 @@ class WatchdogEmailer:
         ).start()
         return True
 
+    def send_container_crash_alert(
+        self,
+        container_name: str,
+        port: int,
+        crash_reason: str,
+        action_taken: str,
+        details: Optional[dict] = None,
+        container_logs: Optional[str] = None,
+        solving_tools: Optional[dict] = None,
+        cooldown_sec: float = 300.0,
+    ) -> bool:
+        """
+        Dispatches an immediate high-priority executive alert when a container crash is detected
+        and automated self-healing restart is performed.
+        Includes full container logs and copy-pasteable operator solving tools.
+        """
+        now = time.monotonic()
+        event_key = f"CONTAINER_CRASH_{container_name}"
+
+        with self._lock:
+            last_sent = self._sent_alerts.get(event_key, 0.0)
+            if now - last_sent < cooldown_sec:
+                print(f"[WatchdogEmailer] ⏳ Suppressed duplicate container alert '{event_key}' (cooldown: {int(cooldown_sec - (now - last_sent))}s remaining)")
+                return False
+            self._sent_alerts[event_key] = now
+            self._active_incidents[event_key] = True
+
+        threading.Thread(
+            target=self._send_container_crash_alert_sync,
+            args=(container_name, port, crash_reason, action_taken, details, container_logs, solving_tools),
+            daemon=True,
+            name=f"watchdog-container-crash-{container_name}"
+        ).start()
+        return True
+
+    def _send_container_crash_alert_sync(
+        self,
+        container_name: str,
+        port: int,
+        crash_reason: str,
+        action_taken: str,
+        details: Optional[dict],
+        container_logs: Optional[str],
+        solving_tools: Optional[dict],
+    ) -> None:
+        recipients = self._get_recipients()
+        if not recipients:
+            return
+
+        cfg = self._get_sys_config()
+        sender_email = cfg.get("report_sender_email", "reportsclove@gmail.com")
+        sender_password = cfg.get("report_sender_password", "wakl rpps mvql eznn")
+        if not sender_password:
+            return
+
+        ts_str = datetime.now().strftime("%d %b %Y %H:%M:%S IST")
+        uptime_sec = round(time.monotonic() - self._start_time, 1)
+        uptime_str = f"{int(uptime_sec // 3600)}h {int((uptime_sec % 3600) // 60)}m {int(uptime_sec % 60)}s"
+
+        table_rows = [
+            f"<tr><td style='padding: 6px 10px; font-weight: 700; color: #475569; width: 35%; border-bottom: 1px solid #e2e8f0;'>Container</td><td style='padding: 6px 10px; color: #0f172a; font-family: monospace; font-weight: 700; border-bottom: 1px solid #e2e8f0;'>{container_name}</td></tr>",
+            f"<tr><td style='padding: 6px 10px; font-weight: 700; color: #475569; border-bottom: 1px solid #e2e8f0;'>Service Port</td><td style='padding: 6px 10px; color: #0f172a; font-family: monospace; border-bottom: 1px solid #e2e8f0;'>http://localhost:{port}</td></tr>",
+            f"<tr><td style='padding: 6px 10px; font-weight: 700; color: #475569; border-bottom: 1px solid #e2e8f0;'>Failure Diagnosis</td><td style='padding: 6px 10px; color: #b91c1c; font-weight: 700; font-family: monospace; border-bottom: 1px solid #e2e8f0;'>{crash_reason}</td></tr>",
+            f"<tr><td style='padding: 6px 10px; font-weight: 700; color: #475569; border-bottom: 1px solid #e2e8f0;'>Self-Healing Action</td><td style='padding: 6px 10px; color: #166534; font-weight: 700; font-family: monospace; border-bottom: 1px solid #e2e8f0;'>{action_taken}</td></tr>",
+            f"<tr><td style='padding: 6px 10px; font-weight: 700; color: #475569; border-bottom: 1px solid #e2e8f0;'>System Uptime</td><td style='padding: 6px 10px; color: #0f172a; font-family: monospace; border-bottom: 1px solid #e2e8f0;'>{uptime_str}</td></tr>",
+        ]
+        if details:
+            for k, v in details.items():
+                table_rows.append(
+                    f"<tr><td style='padding: 6px 10px; font-weight: 700; color: #475569; border-bottom: 1px solid #e2e8f0;'>{k}</td>"
+                    f"<td style='padding: 6px 10px; color: #0f172a; font-family: monospace; border-bottom: 1px solid #e2e8f0;'>{v}</td></tr>"
+                )
+        details_html = "".join(table_rows)
+
+        # Solving tools card
+        tools_html = ""
+        if solving_tools:
+            tools_items = "".join(
+                f"<div style='margin-bottom: 8px;'>"
+                f"<div style='font-size: 11px; font-weight: 700; color: #9a3412;'>🔧 {tool_name}</div>"
+                f"<div style='background: #1e293b; color: #38bdf8; font-family: monospace; font-size: 10.5px; padding: 6px 10px; border-radius: 4px; margin-top: 2px; user-select: all;'>{cmd}</div>"
+                f"</div>"
+                for tool_name, cmd in solving_tools.items()
+            )
+            tools_html = f"""
+            <div style='margin-top: 16px; background: #fff7ed; border-left: 4px solid #ea580c; border: 1px solid #fed7aa; border-left-width: 4px; padding: 12px 14px; border-radius: 6px;'>
+                <div style='font-size: 12px; font-weight: 800; color: #9a3412; text-transform: uppercase; margin-bottom: 8px;'>
+                    🛠️ Diagnostic & Solving Tools for Operators
+                </div>
+                {tools_items}
+            </div>
+            """
+
+        # Container logs card
+        logs_html = ""
+        if container_logs:
+            trimmed_logs = container_logs[-2500:]  # Last 2500 chars
+            logs_html = f"""
+            <div style='margin-top: 16px;'>
+                <div style='display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;'>
+                    <span style='font-size: 11px; font-weight: 800; color: #b91c1c; text-transform: uppercase;'>
+                        📋 Captured Container Diagnostics & Trace (docker logs --tail 40 {container_name})
+                    </span>
+                </div>
+                <pre style='background: #09090b; color: #f87171; padding: 12px; border-radius: 6px; font-size: 10px; line-height: 1.4; overflow-x: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; border: 1px solid #27272a; max-height: 320px;'>{trimmed_logs}</pre>
+            </div>
+            """
+
+        html_body = f"""<!DOCTYPE html>
+<html>
+<head><meta charset='utf-8'></head>
+<body style='margin: 0; padding: 20px 0; background-color: #0f172a; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;'>
+    <div style='max-width: 640px; margin: 0 auto; background-color: #ffffff; border-radius: 10px; overflow: hidden; border: 1px solid #dc2626;'>
+        <!-- Header -->
+        <div style='background: linear-gradient(135deg, #7f1d1d 0%, #991b1b 50%, #450a0a 100%); padding: 22px 24px; color: #ffffff;'>
+            <div style='display: flex; justify-content: space-between; align-items: center;'>
+                <span style='font-size: 10px; font-weight: 800; background: #fee2e2; color: #991b1b; padding: 3px 8px; border-radius: 4px; letter-spacing: 0.5px;'>🚨 CONTAINER CRASH & AUTO-RECOVERY</span>
+                <span style='font-size: 11px; color: #fca5a5;'>{ts_str}</span>
+            </div>
+            <h1 style='margin: 10px 0 4px 0; font-size: 19px; font-weight: 800; color: #ffffff;'>vLLM Container Crash & Self-Healing: {container_name}</h1>
+            <div style='font-size: 12px; color: #fecaca;'>Target Port: <strong>{port}</strong> • Platform: NVIDIA Thor MIG Cluster</div>
+        </div>
+
+        <!-- Body -->
+        <div style='padding: 22px 24px;'>
+            <div style='font-size: 13px; color: #1e293b; line-height: 1.5; margin-bottom: 16px;'>
+                The Sentry background watchdog detected an unexpected crash or unresponsiveness in vLLM inference container <strong>{container_name}</strong>.
+                The automated self-healing supervisor executed immediate remediation: <strong>{action_taken}</strong>.
+            </div>
+
+            <!-- Details Table -->
+            <table width='100%' cellspacing='0' cellpadding='0' style='background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 11.5px; border-collapse: collapse;'>
+                {details_html}
+            </table>
+
+            {tools_html}
+            {logs_html}
+
+            <div style='margin-top: 20px; text-align: center;'>
+                <a href='http://localhost:7000' style='background: #0f172a; color: #ffffff; text-decoration: none; padding: 10px 20px; border-radius: 6px; font-size: 12px; font-weight: 700; display: inline-block;'>
+                    🖥️ Open The Sentry Dashboard
+                </a>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div style='background: #f8fafc; padding: 12px 24px; border-top: 1px solid #e2e8f0; font-size: 10px; color: #94a3b8; text-align: center;'>
+            Automated Watchdog Alert & Container Self-Healing Engine • Clove Technologies
+        </div>
+    </div>
+</body>
+</html>"""
+
+        msg = EmailMessage()
+        msg["Subject"] = f"🚨 [THE SENTRY CRITICAL] Container {container_name} Crash Detected & Auto-Restarted — {ts_str}"
+        msg["From"] = sender_email
+        msg["To"] = ", ".join(recipients)
+        msg.set_content(
+            f"The Sentry Alert: Container {container_name} Crash Detected\n"
+            f"Time: {ts_str}\n"
+            f"Failure: {crash_reason}\n"
+            f"Action: {action_taken}\n"
+            f"Port: {port}\n"
+            f"Uptime: {uptime_str}\n\n"
+            f"Review dashboard at http://localhost:7000"
+        )
+        msg.add_alternative(html_body, subtype="html")
+
+        try:
+            with smtplib.SMTP("smtp.gmail.com", 587, timeout=25) as smtp:
+                smtp.ehlo()
+                smtp.starttls()
+                smtp.ehlo()
+                smtp.login(sender_email, sender_password)
+                smtp.send_message(msg)
+            print(f"[WatchdogEmailer] 📨 Container crash alert email dispatched successfully to: {recipients}")
+        except Exception as exc:
+            print(f"[WatchdogEmailer] ❌ Failed to dispatch container crash email: {exc}")
+
     def _send_critical_alert_sync(
         self,
         event_type: str,
@@ -623,6 +802,17 @@ class WatchdogEmailer:
             for r in sanitation_rows[:6]
         ]
 
+        # 7. Container crashes & self-healing restarts in last 24h
+        container_recovery_rows = [
+            r for r in sanitation_rows
+            if "Container" in (r["reason"] or "") or "rapidalert_vllm" in (r["name"] or "")
+        ]
+        total_container_restarts_24h = len(container_recovery_rows)
+        container_recovery_samples = [
+            f"[{r['timestamp']}] {r['name']}: {r['reason']}"
+            for r in container_recovery_rows[:5]
+        ]
+
         return {
             "period": "Last 24 Hours",
             "date_str": datetime.now().strftime("%d %b %Y"),
@@ -646,6 +836,8 @@ class WatchdogEmailer:
             "total_sanitized_24h": total_sanitized_24h,
             "mem_reclaimed_24h": round(mem_reclaimed_24h, 1),
             "sanitation_samples": sanitation_samples,
+            "total_container_restarts_24h": total_container_restarts_24h,
+            "container_recovery_samples": container_recovery_samples,
         }
 
     def send_daily_health_digest(self) -> bool:
@@ -691,6 +883,11 @@ class WatchdogEmailer:
             f"<li style='margin-bottom: 6px; font-family: monospace; font-size: 10.5px; color: #475569;'>{s}</li>"
             for s in summary.get("sanitation_samples", [])
         ) or "<li style='color: #16a34a; font-weight: 600;'>✔ Zero rogue or zombie processes detected; process table remained clean.</li>"
+
+        container_items_html = "".join(
+            f"<li style='margin-bottom: 6px; font-family: monospace; font-size: 10.5px; color: #475569;'>{s}</li>"
+            for s in summary.get("container_recovery_samples", [])
+        ) or "<li style='color: #16a34a; font-weight: 600;'>✔ Zero container crashes detected; all vLLM shards maintained continuous runtime.</li>"
 
         cam_modes_html = "".join(
             f"<span style='background: #f1f5f9; border: 1px solid #cbd5e1; padding: 3px 8px; border-radius: 4px; font-size: 10px; margin: 3px; display: inline-block;'><strong>{cam}:</strong> <span style='color: {'#16a34a' if 'NVDEC' in mode else '#d97706'}; font-weight: 700;'>{mode}</span></span>"
@@ -763,6 +960,16 @@ class WatchdogEmailer:
                 </div>
                 <ul style='margin: 0; padding-left: 18px;'>
                     {sanitation_items_html}
+                </ul>
+            </div>
+
+            <!-- Docker Container & Inference Shard Reliability -->
+            <div style='margin-bottom: 18px;'>
+                <div style='font-size: 11px; font-weight: 700; color: #0f172a; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; border-bottom: 2px solid #8b5cf6; padding-bottom: 4px; display: inline-block;'>
+                    🐳 Docker Container & Inference Shard Reliability ({summary.get('total_container_restarts_24h', 0)} Self-Healing Restarts)
+                </div>
+                <ul style='margin: 0; padding-left: 18px;'>
+                    {container_items_html}
                 </ul>
             </div>
 

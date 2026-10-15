@@ -196,6 +196,7 @@ class DeadlineScheduler:
         # Tier-1 (Followup) and Tier-2 (Major Shift): Priority 0
         # Tier-3 (Minor Shift / Monitoring): Priority 1
         priority = 0 if tier <= 2 else 1
+        incident["priority"] = priority
         await self._queue.put((priority, self._next_seq(), incident))
         tag = "Major" if tier == 2 else ("Minor" if tier == 3 else "Follow-Up")
         print(f"[Scheduler] 📥 Queued {tag} incident for {cam_name} (Tier-{tier}, Priority {priority})")

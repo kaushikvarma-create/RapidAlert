@@ -41,8 +41,13 @@ nvidia-smi -i 0 -mig 1 || true
 
 # 3. Check existing MIG instances
 COUNT=$(nvidia-smi mig -lgi 2>/dev/null | grep -c "MIG" || true)
-if [ "$COUNT" -ge 2 ]; then
-    echo "✅ MIG instances already exist ($COUNT found). Nothing to partition."
+CI_COUNT=$(nvidia-smi mig -lci 2>/dev/null | grep -c "MIG" || true)
+
+if [ "$COUNT" -ge 2 ] && [ "$CI_COUNT" -ge 2 ]; then
+    echo "✅ MIG instances already exist ($COUNT GI, $CI_COUNT CI found). Nothing to partition."
+elif [ "$COUNT" -ge 2 ] && [ "$CI_COUNT" -lt 2 ]; then
+    echo "GPU instances exist ($COUNT found) but missing compute instances ($CI_COUNT found). Creating missing CI..."
+    nvidia-smi mig -i 0 -gi 2 -cci 2>/dev/null || nvidia-smi mig -i 0 -cgi 78 -C 2>/dev/null || true
 else
     # Clean up any partial/broken instances
     if [ "$COUNT" -gt 0 ]; then

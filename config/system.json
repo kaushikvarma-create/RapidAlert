@@ -16,7 +16,7 @@
       "model": "cyankiwi/Qwen3.5-9B-AWQ-4bit",
       "mig_uuid": "MIG-dc038e02-d9bc-54a6-9de6-452fa2b5830f",
       "mig_profile": "1g",
-      "sm_count": 8,
+      "sm_count": 6,
       "weight": 2,
       "max_concurrent": 2,
       "queue_depth": 12,

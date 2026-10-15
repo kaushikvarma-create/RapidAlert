@@ -94,6 +94,7 @@ from backend.services.metrics_monitor import metrics_loop
 from backend.services.scene_trigger import SceneTriggerEngine
 from backend.services.watchdog import SystemWatchdog
 from backend.services.watchdog_emailer import WatchdogEmailer
+from backend.services.container_manager import container_manager
 from backend.services.mediamtx_service import mediamtx_service, get_safe_cam_slug
 from backend.services.network_service import NetworkService
 from backend.core.shutdown_logger import log_system_event
@@ -198,6 +199,7 @@ watchdog = SystemWatchdog(
     ws_manager=ws_manager,
     storage=storage,
     watchdog_emailer=watchdog_emailer,
+    container_mgr=container_manager,
     interval_sec=15.0,
     broadcast_fn=ws_manager.broadcast,
 )
@@ -1237,7 +1239,15 @@ async def get_vlm_containers():
         "shards": enriched,
         "total_inferences": sum(s.get("completed", 0) for s in shards_stats),
         "total_errors": sum(s.get("errors", 0) for s in shards_stats),
+        "container_watchdog": container_manager.get_stats(),
     }
+
+
+@app.post("/api/vlm/containers/restart/{container_name}")
+async def api_restart_vlm_container(container_name: str, auth_user: dict = Depends(require_admin)):
+    """Admin-triggered manual container bounce and auto-recovery."""
+    success, msg = await container_manager.restart_container(container_name)
+    return {"status": "ok" if success else "error", "message": msg, "restarted": success}
 
 
 @app.post("/api/vlm/probe")
@@ -1397,6 +1407,17 @@ def api_sweep_processes():
         "status": "ok",
         "cleaned_count": len(cleaned),
         "cleaned_processes": cleaned,
+    }
+
+
+@app.post("/api/watchdog/audit-containers", dependencies=[Depends(require_admin)])
+async def api_audit_containers():
+    """Forces an immediate container crash audit, log capture, and self-healing restart."""
+    await watchdog._audit_and_heal_containers()
+    return {
+        "status": "ok",
+        "summary": watchdog.get_summary(),
+        "container_watchdog": container_manager.get_stats(),
     }
 
 

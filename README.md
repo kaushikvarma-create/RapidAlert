@@ -40,10 +40,15 @@ RapidAlert is an enterprise-grade, edge-native surveillance and reasoning platfo
    - [RAM Budgeting & KV Cache Sizing](#ram-budgeting--kv-cache-sizing)
    - [Dynamic GPU Activity Calculation (NVML Power Curve)](#dynamic-gpu-activity-calculation-nvml-power-curve)
 7. [NVIDIA Thor MIG Partitioning Deepdive](#-nvidia-thor-mig-partitioning-deepdive)
-   - [Hardware Slices (Profile 83 + Profile 78)](#hardware-slices-profile-83--profile-78)
-   - [Container Device Interface (CDI) & Device Capabilities](#container-device-interface-cdi--device-capabilities)
+   - [Supported MIG Profiles on NVIDIA Thor (Official JetPack 7.2 Matrix)](#supported-mig-profiles-on-nvidia-thor-official-jetpack-72-matrix)
+   - [Optimal Dual-MIG Production Pairing (Profile 83 + Profile 78)](#optimal-dual-mig-production-pairing-profile-83--profile-78)
+   - [Automated Partitioning Script (`scripts/create-thor-mig.sh`)](#automated-partitioning-script-scriptscreate-thor-migsh)
+   - [Container Device Interface (CDI) & Device Capabilities (`/dev/nvidia-caps`)](#container-device-interface-cdi--device-capabilities-devnvidia-caps)
 8. [Autonomous Scheduler & Follow-Up Lifecycle](#-autonomous-scheduler--follow-up-lifecycle)
 9. [Automated Health Watchdog & Real-Time Alerting](#-automated-health-watchdog--real-time-alerting)
+   - [Automated Container Crash Watchdog & Self-Healing Engine](#automated-container-crash-watchdog--self-healing-engine)
+   - [Crash-Loop Backoff & Anti-Thrashing Guardrails](#crash-loop-backoff--anti-thrashing-guardrails)
+   - [Operator Diagnostic Solving Tools & Incident Emails](#operator-diagnostic-solving-tools--incident-emails)
    - [Real-Time Critical Incident Alerting Criteria](#real-time-critical-incident-alerting-criteria)
    - [Hardware Sentinel & Power Outage / Crash Recovery](#hardware-sentinel--power-outage--crash-recovery)
    - [System Restarts & Thor Hardware Reboot Notifications](#system-restarts--thor-hardware-reboot-notifications)
@@ -256,17 +261,157 @@ Trigger Event (Tier 2 / Tier 3 / Follow-Up)
 
 ---
 
+## ⚡ NVIDIA Thor Hardware & Unified Memory Architecture
+
+### Unified Memory Dynamics
+On NVIDIA Jetson AGX Thor, CPU host memory and GPU video memory share a single contiguous physical address space (**128 GB 256-bit LPDDR5X Unified Memory** delivering >200 GB/s bandwidth).
+* **Zero-Copy Ingestion**: Frame buffers decoded by hardware NVDEC are mapped directly into CUDA tensors and DINOv2 feature vectors without CPU-to-GPU PCIe memory copying.
+* **Shared Silicon Ceiling**: Every vLLM PagedAttention KV-cache block, OS buffer, and desktop frame buffer directly draws from physical LPDDR5X system RAM.
+
+### RAM Budgeting & KV Cache Sizing
+To prevent Out-Of-Memory (OOM) kernel panics on Jetson Thor's 122.8 GiB usable space, memory budgets are strictly compartmentalized:
+```
+Total Usable LPDDR5X Memory: 122.8 GiB (128 GB Physical)
+├── vLLM Instance 0 (Port 8000, 12 SMs) ── 0.33 util ── 40.5 GiB (7.35 GB NVFP4 Weights + 33.15 GB KV Cache)
+├── vLLM Instance 1 (Port 8001,  8 SMs) ── 0.30 util ── 36.8 GiB (7.35 GB NVFP4 Weights + 29.45 GB KV Cache)
+├── RapidAlert Backend (uvicorn / DINOv2) ────────────── 21.0 GiB (Feature Extractor + 7× NVMM Ring Buffers)
+├── Desktop, GNOME Shell, Xorg & System Services ──────── 8.0 GiB (Display & Windowing Subsystems)
+└── Uncommitted Safety Headroom ───────────────────────── 16.5 GiB (Burst Concurrency Buffer & OOM Shield)
+```
+
+### Dynamic GPU Activity Calculation (NVML Power Curve)
+Under Jetson Thor MIG mode, traditional static driver utilization queries return discrete sub-partition metrics. RapidAlert implements an **NVML Dynamic Power-Curve Engine** (`backend/services/metrics_monitor.py`):
+$$\text{Activity } (\%) = \min\left(100, \max\left(0, \frac{\text{Power}_{\text{NVML}} - P_{\text{idle}}}{P_{\text{max}} - P_{\text{idle}}} \times 100\right)\right)$$
+* $P_{\text{idle}} = 18.0\text{ W}$ (Baseline idle platform power).
+* $P_{\text{max}} = 120.0\text{ W}$ (Full compute saturation under Dual-MIG parallel inference).
+
+---
+
+## 🧩 NVIDIA Thor MIG Partitioning Deepdive
+
+### Supported MIG Profiles on NVIDIA Thor (Official JetPack 7.2 Matrix)
+
+NVIDIA Jetson AGX Thor features **20 physical Streaming Multiprocessors (SMs)** on Blackwell Tegra silicon, partitioned across a 3-slice hardware architecture. The system supports seven distinct MIG profiles:
+
+| Profile ID | Profile Name | Slices | Compute SMs | Graphics Engine | Media Engine | Description & Target Workload |
+| :---: | :--- | :---: | :---: | :---: | :---: | :--- |
+| **78** | `MIG 1g.0gb+me` | 1 | 6 SMs | No | **Yes** (NVENC, NVDEC, OFA, JPEG) | 1-slice configuration with engine/media tasks. Dedicated to media-intensive compute workloads (RapidAlert Shard 1). |
+| **80** | `MIG 1g.0gb` | 1 | 6 SMs | No | No | 1-slice plain compute instance. Pure CUDA computation without display or dedicated hardware media engines. |
+| **81** | `MIG 1g.0gb+gfx` | 1 | 6 SMs | **Yes** (3D GFX) | No | 1-slice compute instance with 3D graphics support for embedded displays or lightweight rendering. |
+| **82** | `MIG 2g.0gb` | 2 | 12 SMs | No | No | 2-slice plain compute instance. High-throughput headless CUDA compute without graphics or dedicated media engines. |
+| **83** | `MIG 2g.0gb+gfx` | 2 | 12 SMs | **Yes** (3D GFX + Display) | No | 2-slice compute with graphics support. Binds Xorg/Wayland, desktop display, and primary compute (RapidAlert Shard 0). |
+| **0** | `MIG 3g.0gb` | 3 | 20 SMs | No | No | 3-slice full plain compute instance. Consumes 100% of physical silicon for unified headless massive-scale compute. |
+| **32** | `MIG 3g.0gb+gfx` | 3 | 20 SMs | **Yes** (3D GFX + Display) | No | 3-slice full compute instance with graphics support. Full silicon utilization with desktop display and graphics output. |
+
+### Optimal Dual-MIG Production Pairing (Profile 83 + Profile 78)
+On NVIDIA Jetson AGX Thor, the production workload is sharded into two hardware-isolated slices totaling all 20 SMs:
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       NVIDIA AGX THOR SILICON (20 SMs)                      │
+├──────────────────────────────────────────────┬──────────────────────────────┤
+│       Profile 83: MIG 2g.0gb+gfx (12 SMs)    │ Profile 78: MIG 1g.0gb+me (8 SMs) │
+├──────────────────────────────────────────────┼──────────────────────────────┤
+│ • 12 CUDA Streaming Multiprocessors         │ • 6 Active CUDA Compute SMs  │
+│ • 3D Graphics & Vulkan/OpenGL Engine         │ • 2 Hardware Media Controllers│
+│ • Display Engine / Xorg / Desktop Attached   │ • 1× NVDEC (Hardware 4K Dec) │
+│ • vLLM Instance 0 (Port 8000)                │ • 1× NVENC (Hardware 4K Enc) │
+│ • RapidAlert Backend (DINOv2 + NVMM)        │ • 1× OFA (Optical Flow Accel)│
+│                                              │ • 1× JPEG Hardware Decoder   │
+│                                              │ • vLLM Instance 1 (Port 8001)│
+└──────────────────────────────────────────────┴──────────────────────────────┘
+```
+* **Slice 0 (Profile 83 / `2g.0gb+gfx`)**: 12 SMs compute + Display/Graphics. Houses desktop windowing, DINOv2 real-time feature extraction, and `rapidalert_vllm_0` on port 8000 (`weight=3`).
+* **Slice 1 (Profile 78 / `1g.0gb+me`)**: 6 SMs compute + 2 dedicated media controllers. Houses `rapidalert_vllm_1` on port 8001 (`weight=2`) with hardware-accelerated video ingestion.
+* **Automatic Fallback**: If Profile 78 is unavailable, the system safely falls back to Profile 83 + Profile 80 (`1g.0gb`).
+
+### Automated Partitioning Script (`scripts/create-thor-mig.sh`)
+RapidAlert provisions and verifies MIG partitions automatically on boot:
+* Verifies driver availability and persistence mode (`nvidia-smi -pm 1`).
+* Enables MIG mode on GPU 0 (`nvidia-smi -i 0 -mig 1`).
+* Verifies both GPU Instances (`COUNT >= 2`) and Compute Instances (`CI_COUNT >= 2`), repairing missing compute instances dynamically.
+* Executes batch slice creation: `nvidia-smi mig -i 0 -cgi 83,78 -C`.
+* Sets permissions on capability devices: `chmod 666 /dev/nvidia-caps/nvidia-cap*`.
+* Auto-syncs discovered MIG UUIDs directly into `config/system.json`.
+
+### Container Device Interface (CDI) & Device Capabilities (`/dev/nvidia-caps`)
+On JetPack 7.2 CDI mode, Docker containers cannot access GPUs via standard desktop flags. Instead, direct **MIG Capability Nodes** must be mounted:
+* **Universal Root Configuration Node (`nvidia-cap1`)**: **Mandatory for ALL containers** running under MIG. Omitting `/dev/nvidia-caps/nvidia-cap1` causes `cudaErrorNoDevice` or initialization failure.
+* **Global Monitor Node (`nvidia-cap2`)**: Global telemetry monitoring capability.
+* **Instance 0 (GI 1 / Slice 0)**: Mounts `nvidia-cap1`, `nvidia-cap12`, and `nvidia-cap13`.
+* **Instance 1 (GI 2 / Slice 1)**: Mounts `nvidia-cap1`, `nvidia-cap21`, and `nvidia-cap22`.
+
+---
+
+## 🔄 Autonomous Scheduler & Follow-Up Lifecycle
+
+RapidAlert's scheduler (`backend/services/scheduler.py`) unifies real-time event routing with autonomous hazard tracking:
+
+### Event-Driven Priority Assignment
+* **Priority 0 (Critical)**: Active incident follow-ups or major visual drift exceeding `dino_major_threshold` (0.033).
+* **Priority 1 (Standard)**: Minor scene shifts exceeding `dino_minor_threshold` (0.0165).
+* **Priority 3 (Background)**: Periodic ambient heartbeats (35-second cadence).
+
+### Autonomous Follow-Up Loop (High/Danger Persistence)
+When Cosmos Reason2 classifies an incident as **`HIGH`** or **`DANGER`**:
+1. An autonomous follow-up loop is instantiated for that camera stream.
+2. Re-evaluates the camera every **10 seconds** (configurable via `followup_interval_sec`) for up to **6 consecutive cycles** (`followup_max_cycles`).
+3. Follow-up requests enter Tier A at **Priority 0**, preempting routine background analyses until the safety hazard has officially resolved or concluded.
+
+---
+
 ## 🛡️ Automated Health Watchdog & Real-Time Alerting
 
-RapidAlert runs an autonomous health monitor (`backend/services/watchdog.py`) alongside an asynchronous email dispatch engine (`backend/services/watchdog_emailer.py`).
+RapidAlert runs an autonomous health sentinel (`backend/services/watchdog.py`) alongside a dedicated container supervisor (`backend/services/container_manager.py`) and zero-lag async email dispatcher (`backend/services/watchdog_emailer.py`).
+
+### Automated Container Crash Watchdog & Self-Healing Engine
+Every **15 seconds**, the watchdog audits all running vLLM inference containers:
+* **Defect Inspection**: Inspects `docker inspect` for `State.Status` (`running`, `exited`, `dead`), non-zero exit codes (e.g. exit 137 = OOM, exit 139 = SIGSEGV), and HTTP `/health` probe responsiveness.
+* **Automated Self-Healing**:
+  * Tries an in-place `docker restart` with a 10-second grace period.
+  * If the container is missing or corrupted, recreates the container with full Thor CDI capabilities (`/dev/nvidia-caps/nvidia-cap1`, `nvidia-cap${GI}*`, `--runtime nvidia`, `--network host`).
+* **Audit Logging**: Every remediation event is written to SQLite table `watchdog_sanitation_log`.
+* **Resolution Verification**: Probes container health until HTTP 200 is confirmed, then clears active fault tracking and dispatches a green `[RESOLVED]` notice.
+
+### Crash-Loop Backoff & Anti-Thrashing Guardrails
+To prevent perpetual restart storms during catastrophic model weight corruption or unrecoverable CUDA faults:
+* Restarts are tracked within a sliding 10-minute window (`cooldown_seconds = 600`).
+* **Rate-Limit Guardrail**: **Maximum 3 restarts** per 10-minute window.
+* If limit is breached, auto-restart halts, the container is flagged `BACKOFF_EXCEEDED`, and an emergency alert is dispatched to administrators for manual intervention.
+
+### Operator Diagnostic Solving Tools & Incident Emails
+When an inference container crashes or stalls, `WatchdogEmailer.send_container_crash_alert()` dispatches a comprehensive HTML diagnostic report containing:
+1. **Defect Breakdown**: Container name, exit code, failure category (`OOM Killed`, `Process Crashed`, `Endpoint Unresponsive`).
+2. **Host Resource Snapshot**: Free physical RAM, swap usage, disk availability, and Jetson Thor GPU wattage.
+3. **Trailing Monospace Container Logs**: The last 40 lines of container `stdout`/`stderr`.
+4. **Actionable Copy-Paste Operator Solving Tools**:
+   ```bash
+   # 1. View live trailing container logs
+   docker logs --tail 100 -f rapidalert_vllm_0
+
+   # 2. Inspect container lifecycle state
+   docker inspect rapidalert_vllm_0 | jq '.[0].State'
+
+   # 3. Perform manual container restart
+   docker restart rapidalert_vllm_0
+
+   # 4. Probe inference endpoint health
+   curl -s http://localhost:8000/health
+
+   # 5. Verify Jetson Thor MIG partition status
+   nvidia-smi mig -lgi
+
+   # 6. Trigger immediate Watchdog audit via REST
+   curl -X POST http://localhost:7000/api/watchdog/audit-containers
+   ```
 
 ### Real-Time Critical Incident Alerting Criteria
 Immediate critical incident emails are dispatched via Gmail SMTP (`reportsclove@gmail.com`) upon detection of:
 1. **`SYSTEM_RESTART` / Crash Recovery**: System reboots or unexpected crash recoveries detected on startup.
-2. **`CAMERA_BLACKOUT`**: More than 50% or all camera feeds disconnected/frozen for $>30\text{ seconds}$.
-3. **`VLLM_CLUSTER_DOWN`**: All partitioned MIG inference shards offline or failing HTTP health checks.
-4. **`STORAGE_CRITICAL`**: Disk free space falls below $5\%$ or SQLite database corruption occurs.
-5. **`FATAL_EXCEPTION`**: Unhandled critical exceptions in core video ingestion or analysis loops.
+2. **`CONTAINER_CRASH`**: vLLM container crash, OOM kill, or unresponsive endpoint with automated healing action.
+3. **`CAMERA_BLACKOUT`**: More than 50% or all camera feeds disconnected/frozen for $>30\text{ seconds}$.
+4. **`VLLM_CLUSTER_DOWN`**: All partitioned MIG inference shards offline or failing HTTP health checks.
+5. **`STORAGE_CRITICAL`**: Disk free space falls below $5\%$ or SQLite database corruption occurs.
+6. **`FATAL_EXCEPTION`**: Unhandled critical exceptions in core video ingestion or analysis loops.
 
 ### Anti-Spam Throttling & Resolution Notices
 * **Cooldown Deduplication**: A 10-minute cooldown window per active fault category prevents duplicate alert storms during sustained outages.
@@ -354,8 +499,11 @@ RapidAlert generates executive shift intelligence reports (`backend/services/rep
 | `POST` | `/api/reports/generate`| Generate custom shift report on-demand | No |
 | `GET` | `/api/reports/stats` | Reporting schedule, buffer status, and next run time | No |
 | `GET` | `/api/watchdog/status` | Health watchdog telemetry and 24h diagnostic snapshot | No |
+| `POST` | `/api/watchdog/audit-containers` | Trigger manual watchdog container health audit & auto-healing | Yes (Admin) |
 | `POST` | `/api/watchdog/test-alert` | Dispatch a test critical incident alert email | Yes (Admin) |
 | `POST` | `/api/watchdog/send-daily-digest` | Force compile & dispatch 24h health digest | Yes (Admin) |
+| `GET` | `/api/vlm/containers` | Live status, exit codes, OOM flags, and resource stats of vLLM containers | No |
+| `POST` | `/api/vlm/containers/restart/{name}` | Operator manual container restart (bypassing backoff limit) | Yes (Admin) |
 | `POST` | `/api/cameras` | Add or update IP camera configuration | Yes (Admin) |
 | `DELETE` | `/api/cameras/{name}` | Remove camera stream | Yes (Admin) |
 | `POST` | `/api/auth/login` | Authenticate admin session and issue bearer token | No |

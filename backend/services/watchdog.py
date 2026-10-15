@@ -24,6 +24,7 @@ from typing import Optional, Callable
 
 from backend.core.config import DATABASE_PATH
 from backend.core.error_tracker import error_tracker
+from backend.services.container_manager import ContainerManager, container_manager
 from backend.services.watchdog_emailer import WatchdogEmailer
 
 
@@ -36,6 +37,7 @@ class SystemWatchdog:
         ws_manager,
         storage=None,
         watchdog_emailer: Optional[WatchdogEmailer] = None,
+        container_mgr: Optional[ContainerManager] = None,
         db_path: Path = DATABASE_PATH,
         interval_sec: float = 15.0,
         broadcast_fn: Optional[Callable] = None,
@@ -46,6 +48,7 @@ class SystemWatchdog:
         self.ws_manager = ws_manager
         self.storage = storage
         self.emailer = watchdog_emailer
+        self.container_mgr = container_mgr or container_manager
         self.db_path = db_path
         self.interval_sec = interval_sec
         self.broadcast_fn = broadcast_fn
@@ -60,6 +63,8 @@ class SystemWatchdog:
         self._camera_blackout_active = False
         self._vllm_cluster_down_active = False
         self._disk_critical_active = False
+        self._container_crashes_active: dict[str, bool] = {}
+        self._container_restarts_session = 0
         self._last_digest_date: Optional[str] = None
         self._sanitized_count_session = 0
 
@@ -416,6 +421,9 @@ class SystemWatchdog:
                     )
             self._unhealthy_shard_warnings.clear()
 
+        # ── 5. Docker Container Crash Audit & Self-Healing Restarts ────────────
+        await self._audit_and_heal_containers()
+
         # ── 5. Disk Storage Check ──────────────────────────────────────────────
         try:
             total, used, free = shutil.disk_usage("/")
@@ -465,6 +473,155 @@ class SystemWatchdog:
             print(f"[Watchdog] ⏰ Triggering scheduled 24-Hour System Health & Diagnostics Digest (Target: {target_hour:02d}:00 IST)...")
             self.emailer.send_daily_health_digest()
 
+    async def _audit_and_heal_containers(self) -> None:
+        """
+        Audits all configured vLLM inference containers:
+          1. Detects crashed, dead, stopped, or OOM-killed Docker containers.
+          2. Detects unresponsive containers whose /health probe fails continuously.
+          3. Triggers automated container restart with crash-loop backoff protection.
+          4. Dispatches executive watchdog email alerts with full container logs & solving tools.
+          5. Sends green resolution alerts once the container recovers and passes health checks.
+        """
+        now = time.monotonic()
+        shards = self.vlm_pool.get_stats() if self.vlm_pool else []
+        sys_cfg = self.container_mgr._get_sys_config()
+        configured_endpoints = sys_cfg.get("vllm_endpoints", [])
+
+        for idx, ep_cfg in enumerate(configured_endpoints):
+            port = int(ep_cfg.get("url", f":{8000 + idx}").split(":")[-1])
+            cname = ep_cfg.get("container_name") or f"rapidalert_vllm_{idx}"
+            mig_uuid = ep_cfg.get("mig_uuid", "Shared")
+            sm_count = ep_cfg.get("sm_count", 0)
+
+            # Match shard stats
+            matching_shard = next((s for s in shards if str(port) in str(s.get("url", ""))), None)
+            is_healthy = matching_shard.get("healthy", False) if matching_shard else False
+
+            # Inspect Docker container state
+            cinfo = await self.container_mgr.inspect_container(cname)
+
+            needs_restart = False
+            crash_reason = ""
+
+            # Check A: Missing container
+            if not cinfo.get("exists", False):
+                if now - self._start_time > 45.0:
+                    needs_restart = True
+                    crash_reason = f"Container '{cname}' is missing or deleted from Docker"
+
+            # Check B: OOM Killed
+            elif cinfo.get("oom_killed", False):
+                needs_restart = True
+                crash_reason = f"Linux Kernel OOM Killed (Out of Memory, Exit Code {cinfo.get('exit_code', -1)})"
+
+            # Check C: Dead or exited
+            elif not cinfo.get("running", False) or cinfo.get("status") in ("exited", "dead"):
+                needs_restart = True
+                crash_reason = f"Container terminated abruptly (Status: {cinfo.get('status')}, Exit Code: {cinfo.get('exit_code', -1)})"
+
+            # Check D: Running in Docker, but unresponsive to HTTP health probes
+            elif cinfo.get("running", True):
+                if is_healthy:
+                    self.container_mgr.clear_unresponsive_tick(cname)
+                    # If this container had an active crash alert, resolve it
+                    if self._container_crashes_active.get(cname, False):
+                        self._container_crashes_active[cname] = False
+                        if self.emailer:
+                            self.emailer.send_resolution_alert(
+                                event_type=f"CONTAINER_CRASH_{cname}",
+                                title=f"Container {cname} Restored & Healthy on Port {port}",
+                                message=(
+                                    f"vLLM inference container '{cname}' on port {port} has completed model warmup "
+                                    f"and is healthy. Shard load-balancer routing has been restored."
+                                ),
+                                details={
+                                    "Container Name": cname,
+                                    "Endpoint Port": port,
+                                    "MIG Hardware Slice": f"{mig_uuid} ({sm_count} SMs)",
+                                    "Model Loaded": ep_cfg.get("model", "unknown"),
+                                    "Container Status": cinfo.get("status", "running"),
+                                },
+                            )
+                else:
+                    # Only flag unresponsive after warmup grace period
+                    if now - self._start_time > self.container_mgr.warmup_grace_seconds:
+                        tick = self.container_mgr.record_unresponsive_tick(cname)
+                        # Require 3 consecutive unresponsive ticks (~45s) to avoid transient probe blips
+                        if tick >= 3:
+                            needs_restart = True
+                            crash_reason = (
+                                f"vLLM Engine Health Probe Timed Out / Stalled for {tick * int(self.interval_sec)}s "
+                                f"(HTTP /health unresponsive despite Docker Status: {cinfo.get('status')})"
+                            )
+
+            if needs_restart:
+                can_res, backoff_reason = self.container_mgr.can_restart(cname)
+                if can_res:
+                    # 1. Capture crash diagnostics & tail logs BEFORE restarting
+                    logs = await self.container_mgr.get_container_logs(cname, lines=40)
+                    hw = self.container_mgr.get_hardware_telemetry()
+                    tools = self.container_mgr.get_solving_tools_guide(cname, port)
+
+                    # 2. Execute self-healing restart
+                    if cinfo.get("exists", False):
+                        ok_restart, act_msg = await self.container_mgr.restart_container(cname)
+                    else:
+                        ok_restart, act_msg = await self.container_mgr.launch_container_from_config(idx, ep_cfg)
+
+                    self._container_restarts_session += 1
+
+                    # 3. Record in SQLite audit log
+                    self._record_sanitation({
+                        "pid": cinfo.get("pid", 0),
+                        "name": cname,
+                        "cmd": f"docker restart {cname}",
+                        "rss_mb": 0.0,
+                        "cpu_pct": 0.0,
+                        "reason": f"Container Auto-Restart: {crash_reason}",
+                    })
+
+                    # 4. Capture in error tracker
+                    error_tracker.capture_error(
+                        message=f"Watchdog auto-restarted vLLM container {cname} ({crash_reason})",
+                        component="ContainerWatchdog",
+                        effect=act_msg,
+                        severity="CRITICAL",
+                    )
+
+                    # 5. Dispatch Watchdog Email with diagnostics and solving tools
+                    if self.emailer:
+                        self._container_crashes_active[cname] = True
+                        details = {
+                            "MIG Hardware Slice": f"{mig_uuid} ({sm_count} SMs)",
+                            "Model Configured": ep_cfg.get("model", "unknown"),
+                            "Container Exit Code": cinfo.get("exit_code", -1),
+                            "OOM Killed Flag": str(cinfo.get("oom_killed", False)),
+                            "Host Memory": hw.get("ram_status", "unknown"),
+                            "Host Swap": hw.get("swap_status", "unknown"),
+                            "Host GPU Telemetry": hw.get("gpu_status", "unknown"),
+                        }
+                        self.emailer.send_container_crash_alert(
+                            container_name=cname,
+                            port=port,
+                            crash_reason=crash_reason,
+                            action_taken=act_msg,
+                            details=details,
+                            container_logs=logs,
+                            solving_tools=tools,
+                            cooldown_sec=300.0,
+                        )
+                else:
+                    # In crash-loop backoff: log warning and suppress repeated restarts
+                    last_warn = self._unhealthy_shard_warnings.get(f"{cname}_backoff", 0.0)
+                    if now - last_warn > 180.0:
+                        self._unhealthy_shard_warnings[f"{cname}_backoff"] = now
+                        error_tracker.capture_error(
+                            message=f"Container {cname} is in crash-loop backoff: {backoff_reason}",
+                            component="ContainerWatchdog",
+                            effect="Auto-restart temporarily paused to prevent tight loop",
+                            severity="CRITICAL",
+                        )
+
     def get_summary(self) -> dict:
         uptime_sec = round(time.monotonic() - self._start_time, 1)
         active_cams = len(self.camera_manager.get_active_cameras())
@@ -479,4 +636,6 @@ class SystemWatchdog:
             "camera_blackout": self._camera_blackout_active,
             "vllm_cluster_down": self._vllm_cluster_down_active,
             "disk_critical": self._disk_critical_active,
+            "container_restarts_session": self._container_restarts_session,
+            "container_watchdog": self.container_mgr.get_stats(),
         }
