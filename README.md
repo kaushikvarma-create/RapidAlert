@@ -293,15 +293,15 @@ $$\text{Activity } (\%) = \min\left(100, \max\left(0, \frac{\text{Power}_{\text{
 
 NVIDIA Jetson AGX Thor features **20 physical Streaming Multiprocessors (SMs)** on Blackwell Tegra silicon, partitioned across a 3-slice hardware architecture. The system supports seven distinct MIG profiles:
 
-| Profile ID | Profile Name | Slices | Compute SMs | Graphics Engine | Media Engine | Description & Target Workload |
-| :---: | :--- | :---: | :---: | :---: | :---: | :--- |
-| **78** | `MIG 1g.0gb+me` | 1 | 6 SMs | No | **Yes** (NVENC, NVDEC, OFA, JPEG) | 1-slice configuration with engine/media tasks. Dedicated to media-intensive compute workloads (RapidAlert Shard 1). |
-| **80** | `MIG 1g.0gb` | 1 | 6 SMs | No | No | 1-slice plain compute instance. Pure CUDA computation without display or dedicated hardware media engines. |
-| **81** | `MIG 1g.0gb+gfx` | 1 | 6 SMs | **Yes** (3D GFX) | No | 1-slice compute instance with 3D graphics support for embedded displays or lightweight rendering. |
-| **82** | `MIG 2g.0gb` | 2 | 12 SMs | No | No | 2-slice plain compute instance. High-throughput headless CUDA compute without graphics or dedicated media engines. |
-| **83** | `MIG 2g.0gb+gfx` | 2 | 12 SMs | **Yes** (3D GFX + Display) | No | 2-slice compute with graphics support. Binds Xorg/Wayland, desktop display, and primary compute (RapidAlert Shard 0). |
-| **0** | `MIG 3g.0gb` | 3 | 20 SMs | No | No | 3-slice full plain compute instance. Consumes 100% of physical silicon for unified headless massive-scale compute. |
-| **32** | `MIG 3g.0gb+gfx` | 3 | 20 SMs | **Yes** (3D GFX + Display) | No | 3-slice full compute instance with graphics support. Full silicon utilization with desktop display and graphics output. |
+| Deployment Status | Profile ID | Profile Name | Slices | Compute SMs | Graphics Engine | Media Engine | Description & Target Workload |
+| :---: | :---: | :--- | :---: | :---: | :---: | :---: | :--- |
+| 🟢 **Active (Shard 1)** | **78** | `MIG 1g.0gb+me` | 1 | 6 SMs | No | **Yes** (NVENC/DEC/OFA/JPEG) | 1-slice configuration with engine/media tasks. Dedicated video reasoning (**vLLM Shard 1**, Port 8001). |
+| 🔄 *Fallback (Shard 1)* | **80** | `MIG 1g.0gb` | 1 | 6 SMs | No | No | 1-slice plain compute instance (automated fallback if Profile 78 is locked). |
+| ⚪ *Supported* | **81** | `MIG 1g.0gb+gfx` | 1 | 6 SMs | **Yes** (3D GFX) | No | 1-slice compute instance with 3D graphics support for embedded displays. |
+| ⚪ *Supported* | **82** | `MIG 2g.0gb` | 2 | 12 SMs | No | No | 2-slice plain compute instance. Headless high-throughput CUDA compute. |
+| 🟢 **Active (Shard 0)** | **83** | `MIG 2g.0gb+gfx` | 2 | 12 SMs | **Yes** (3D GFX + Display) | No | Display/desktop, DINOv2 feature extraction & primary VLM reasoning (**vLLM Shard 0**, Port 8000). |
+| ⚪ *Supported* | **0** | `MIG 3g.0gb` | 3 | 20 SMs | No | No | 3-slice full plain compute instance. Headless massive-scale unified compute (100% silicon). |
+| ⚪ *Supported* | **32** | `MIG 3g.0gb+gfx` | 3 | 20 SMs | **Yes** (3D GFX + Display) | No | 3-slice full compute instance with graphics support. Full silicon utilization with desktop display. |
 
 ### Optimal Dual-MIG Production Pairing (Profile 83 + Profile 78)
 On NVIDIA Jetson AGX Thor, the production workload is sharded into two hardware-isolated slices totaling all 20 SMs:
