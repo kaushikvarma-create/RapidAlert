@@ -24,6 +24,9 @@
     }
   ],
   "auto_start_vllm": true,
+  "maintenance_restart_enabled": true,
+  "maintenance_restart_interval_days": 6,
+  "maintenance_stagger_delay_sec": 3600,
   "vllm_model": "cyankiwi/Qwen3.5-9B-AWQ-4bit",
   "vllm_port": 8000,
   "vllm_max_seqs": 4,

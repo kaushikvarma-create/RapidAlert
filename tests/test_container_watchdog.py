@@ -209,6 +209,117 @@ class TestWatchdogContainerSelfHealing(unittest.IsolatedAsyncioTestCase):
         emailer.send_resolution_alert.assert_called_once()
         self.assertIn("rapidalert_vllm_1", emailer.send_resolution_alert.call_args[1]["title"])
 
+    async def test_watchdog_never_kills_running_or_inspect_timeout_container(self):
+        """Validates that running containers and inspect_timeouts are never killed or restarted by watchdog."""
+        camera_manager = MagicMock()
+        frame_store = MagicMock()
+        ws_manager = MagicMock()
+        storage = MagicMock()
+        vlm_pool = MagicMock()
+        # Shard is reported temporarily unhealthy or busy
+        vlm_pool.get_stats.return_value = [
+            {"url": "http://localhost:8000", "healthy": False},
+        ]
+        emailer = MagicMock()
+        container_mgr = MagicMock()
+        container_mgr._get_sys_config.return_value = {
+            "vllm_endpoints": [
+                {"url": "http://localhost:8000", "container_name": "rapidalert_vllm_0", "mig_uuid": "MIG-0", "sm_count": 12},
+            ]
+        }
+        # Docker says container is running, or inspect_timeout occurred
+        container_mgr.inspect_container = AsyncMock(return_value={
+            "exists": True, "running": True, "status": "inspect_timeout", "oom_killed": False, "exit_code": 0, "uptime_sec": 3600.0
+        })
+        container_mgr.restart_container = AsyncMock()
+
+        watchdog = SystemWatchdog(
+            camera_manager=camera_manager,
+            frame_store=frame_store,
+            vlm_pool=vlm_pool,
+            ws_manager=ws_manager,
+            storage=storage,
+            watchdog_emailer=emailer,
+            container_mgr=container_mgr,
+        )
+
+        await watchdog._audit_and_heal_containers()
+
+        # Under no circumstance should restart_container be called on running/timeout container!
+        container_mgr.restart_container.assert_not_called()
+
+    async def test_staggered_6_day_maintenance_cycle(self):
+        """Validates 6-day maintenance recycle, single-container-at-a-time, and 1-hour stagger lock."""
+        camera_manager = MagicMock()
+        frame_store = MagicMock()
+        ws_manager = MagicMock()
+        storage = MagicMock()
+        vlm_pool = MagicMock()
+        # Both shards currently healthy
+        vlm_pool.get_stats.return_value = [
+            {"url": "http://localhost:8000", "healthy": True},
+            {"url": "http://localhost:8001", "healthy": True},
+        ]
+        emailer = MagicMock()
+        container_mgr = MagicMock()
+        container_mgr._get_sys_config.return_value = {
+            "maintenance_restart_enabled": True,
+            "maintenance_restart_interval_days": 6,
+            "maintenance_stagger_delay_sec": 3600,
+            "vllm_endpoints": [
+                {"url": "http://localhost:8000", "container_name": "rapidalert_vllm_0", "mig_uuid": "MIG-0", "sm_count": 12},
+                {"url": "http://localhost:8001", "container_name": "rapidalert_vllm_1", "mig_uuid": "MIG-1", "sm_count": 6},
+            ]
+        }
+        # Both have 6.1 days of uptime (6.1 * 86400 = 527040s)
+        async def mock_inspect(name):
+            return {
+                "exists": True, "running": True, "status": "running", "oom_killed": False,
+                "exit_code": 0, "uptime_sec": 527040.0, "started_at": "2026-10-10T00:00:00Z"
+            }
+
+        container_mgr.inspect_container = AsyncMock(side_effect=mock_inspect)
+        container_mgr.restart_container = AsyncMock(return_value=(True, "Restarted OK"))
+
+        watchdog = SystemWatchdog(
+            camera_manager=camera_manager,
+            frame_store=frame_store,
+            vlm_pool=vlm_pool,
+            ws_manager=ws_manager,
+            storage=storage,
+            watchdog_emailer=emailer,
+            container_mgr=container_mgr,
+        )
+
+        # 1. First cycle: Only ONE container (rapidalert_vllm_0) should be restarted for maintenance
+        await watchdog._audit_and_heal_containers()
+        container_mgr.restart_container.assert_awaited_once_with("rapidalert_vllm_0", timeout_sec=15)
+        self.assertEqual(watchdog._maintenance_in_progress, "rapidalert_vllm_0")
+        emailer.send_critical_alert.assert_called_once()
+        self.assertIn("MAINTENANCE_rapidalert_vllm_0", emailer.send_critical_alert.call_args[1]["event_type"])
+
+        # 2. Second cycle (container 0 recovers and becomes healthy)
+        container_mgr.restart_container.reset_mock()
+        emailer.send_critical_alert.reset_mock()
+        await watchdog._audit_and_heal_containers()
+
+        # Maintenance completed for 0; stagger lock engaged
+        self.assertIsNone(watchdog._maintenance_in_progress)
+        self.assertIn("rapidalert_vllm_0", watchdog._maintenance_healthy_since)
+
+        # 3. Third cycle (simulating 10 minutes later: container 1 is still locked because < 1 hour has elapsed)
+        container_mgr.restart_container.reset_mock()
+        await watchdog._audit_and_heal_containers()
+        # Container 1 should NOT be restarted yet
+        container_mgr.restart_container.assert_not_called()
+
+        # 4. Fourth cycle (fast forward 3605s past the 1-hour stagger delay)
+        watchdog._maintenance_healthy_since["rapidalert_vllm_0"] -= 3605.0
+        await watchdog._audit_and_heal_containers()
+        # Now container 1 can safely undergo maintenance!
+        container_mgr.restart_container.assert_awaited_once_with("rapidalert_vllm_1", timeout_sec=15)
+        self.assertEqual(watchdog._maintenance_in_progress, "rapidalert_vllm_1")
+
 
 if __name__ == "__main__":
     unittest.main()

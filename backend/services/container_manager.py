@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import time
 from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 
@@ -49,6 +50,19 @@ class ContainerManager:
             pass
         return {}
 
+    @staticmethod
+    def parse_uptime_seconds(started_at_str: str) -> float:
+        """Parses Docker ISO 8601 State.StartedAt into elapsed uptime seconds."""
+        if not started_at_str or started_at_str.startswith("0001-01-01"):
+            return 0.0
+        try:
+            clean_ts = started_at_str.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(clean_ts)
+            now_utc = datetime.now(timezone.utc)
+            return max(0.0, (now_utc - dt).total_seconds())
+        except Exception:
+            return 0.0
+
     async def inspect_container(self, name: str) -> dict:
         """
         Inspects container state via `docker inspect`.
@@ -60,9 +74,10 @@ class ContainerManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=3.0)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
             if proc.returncode == 0 and stdout:
                 state = json.loads(stdout.decode().strip())
+                started_at = state.get("StartedAt", "")
                 return {
                     "exists": True,
                     "name": name,
@@ -72,9 +87,10 @@ class ContainerManager:
                     "oom_killed": state.get("OOMKilled", False),
                     "dead": state.get("Dead", False),
                     "error": state.get("Error", ""),
-                    "started_at": state.get("StartedAt", ""),
+                    "started_at": started_at,
                     "finished_at": state.get("FinishedAt", ""),
                     "pid": state.get("Pid", 0),
+                    "uptime_sec": self.parse_uptime_seconds(started_at),
                 }
             else:
                 return {
@@ -86,17 +102,21 @@ class ContainerManager:
                     "oom_killed": False,
                     "dead": False,
                     "error": stderr.decode().strip() or "Container does not exist",
+                    "uptime_sec": 0.0,
                 }
         except asyncio.TimeoutError:
+            # Heavy host load or slow CLI inspect.
+            # CRITICAL: Treat as still running so watchdog NEVER restarts a healthy container on CLI lag!
             return {
                 "exists": True,
                 "name": name,
-                "running": False,
+                "running": True,
                 "status": "inspect_timeout",
-                "exit_code": -1,
+                "exit_code": 0,
                 "oom_killed": False,
                 "dead": False,
-                "error": "docker inspect timed out after 3.0s",
+                "error": "docker inspect timed out after 10.0s (assumed running)",
+                "uptime_sec": 0.0,
             }
         except Exception as exc:
             return {
@@ -108,6 +128,7 @@ class ContainerManager:
                 "oom_killed": False,
                 "dead": False,
                 "error": str(exc),
+                "uptime_sec": 0.0,
             }
 
     async def get_container_logs(self, name: str, lines: int = 40) -> str:

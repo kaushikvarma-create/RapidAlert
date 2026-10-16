@@ -430,113 +430,167 @@ class SystemWatchdog:
 
     async def _audit_and_heal_containers(self) -> None:
         """
-        Audits all configured vLLM inference containers:
-          1. Detects crashed, dead, stopped, or OOM-killed Docker containers.
-          2. Detects unresponsive containers whose /health probe fails continuously.
-          3. Triggers automated container restart with crash-loop backoff protection.
-          4. Dispatches executive watchdog email alerts with full container logs & solving tools.
-          5. Sends green resolution alerts once the container recovers and passes health checks.
+        Supervises vLLM Docker containers according to strict enterprise rules:
+          1. NO WATCHDOG-TRIGGERED KILLING OF RUNNING CONTAINERS:
+             Watchdog CANNOT terminate or restart running containers based on high latency,
+             transient probe timeouts, or inspect lag.
+          2. CRASH-ONLY AUTO-RECOVERY:
+             Restarts occur ONLY if the container crashed/exited on its own (status in ("exited", "dead"),
+             oom_killed==True, or container deleted from Docker).
+          3. STAGGERED 6-DAY MAINTENANCE RECYCLE:
+             When system runs continuously for 6 days, containers undergo a planned, staggered
+             maintenance recycle (one container at a time).
+             Crucially, the alternate container CANNOT be recycled until at least 1 HOUR after
+             the first container is verified fully UP, model-loaded, and healthy!
         """
         now = time.monotonic()
         shards = self.vlm_pool.get_stats() if self.vlm_pool else []
         sys_cfg = self.container_mgr._get_sys_config()
         configured_endpoints = sys_cfg.get("vllm_endpoints", [])
 
+        # Maintenance parameters (default: 6 days cycle, 1 hour stagger delay)
+        maintenance_enabled = sys_cfg.get("maintenance_restart_enabled", True)
+        maintenance_interval_sec = float(sys_cfg.get("maintenance_restart_interval_days", 6)) * 86400.0
+        stagger_delay_sec = float(sys_cfg.get("maintenance_stagger_delay_sec", 3600.0))  # 1 hour
+
+        # First pass: gather states for all endpoints
+        endpoint_states = []
         for idx, ep_cfg in enumerate(configured_endpoints):
             port = int(ep_cfg.get("url", f":{8000 + idx}").split(":")[-1])
             cname = ep_cfg.get("container_name") or f"rapidalert_vllm_{idx}"
-            mig_uuid = ep_cfg.get("mig_uuid", "Shared")
-            sm_count = ep_cfg.get("sm_count", 0)
-
-            # Match shard stats
             matching_shard = next((s for s in shards if str(port) in str(s.get("url", ""))), None)
             is_healthy = matching_shard.get("healthy", False) if matching_shard else False
-
-            # Inspect Docker container state
             cinfo = await self.container_mgr.inspect_container(cname)
+            endpoint_states.append({
+                "idx": idx,
+                "ep_cfg": ep_cfg,
+                "port": port,
+                "cname": cname,
+                "mig_uuid": ep_cfg.get("mig_uuid", "Shared"),
+                "sm_count": ep_cfg.get("sm_count", 0),
+                "is_healthy": is_healthy,
+                "cinfo": cinfo,
+            })
+
+        # Track recovery of any container that was in maintenance
+        for ep in endpoint_states:
+            cname = ep["cname"]
+            is_healthy = ep["is_healthy"]
+            cinfo = ep["cinfo"]
+
+            # If this container was undergoing maintenance and is now healthy, record timestamp
+            if getattr(self, "_maintenance_in_progress", None) == cname and is_healthy:
+                self._maintenance_in_progress = None
+                if not hasattr(self, "_maintenance_healthy_since"):
+                    self._maintenance_healthy_since = {}
+                self._maintenance_healthy_since[cname] = now
+                msg = (
+                    f"Container '{cname}' completed 6-day maintenance recycle and is verified healthy on port {ep['port']}. "
+                    f"Stagger lock active: alternate container cannot be maintained for at least {int(stagger_delay_sec // 60)} minutes."
+                )
+                print(f"[Maintenance] ✅ {msg}")
+                error_tracker.capture_error(
+                    message=msg,
+                    component="ContainerMaintenance",
+                    effect="Shard healthy & serving; stagger lock engaged",
+                    severity="INFO",
+                )
+                if self.emailer:
+                    self.emailer.send_resolution_alert(
+                        event_type=f"MAINTENANCE_{cname}",
+                        title=f"Container {cname} Maintenance Recycle Complete",
+                        message=msg,
+                        details={
+                            "Container Name": cname,
+                            "Port": ep["port"],
+                            "MIG Hardware Slice": f"{ep['mig_uuid']} ({ep['sm_count']} SMs)",
+                            "Model": ep["ep_cfg"].get("model", "unknown"),
+                            "Stagger Window": f"Alternate container locked for {int(stagger_delay_sec // 60)} minutes",
+                        },
+                    )
+
+            # Clear crash alert if healthy
+            if is_healthy and self._container_crashes_active.get(cname, False):
+                self._container_crashes_active[cname] = False
+                if self.emailer:
+                    self.emailer.send_resolution_alert(
+                        event_type=f"CONTAINER_CRASH_{cname}",
+                        title=f"Container {cname} Restored & Healthy on Port {ep['port']}",
+                        message=f"vLLM inference container '{cname}' on port {ep['port']} has recovered and is healthy.",
+                        details={
+                            "Container Name": cname,
+                            "Endpoint Port": ep["port"],
+                            "Container Status": cinfo.get("status", "running"),
+                        },
+                    )
+
+        # ─── PART 1: CRASH-ONLY SELF-HEALING ─────────────────────────────────
+        # STRICT RULE: Watchdog CANNOT kill or restart a running container.
+        # Only if the container is confirmed dead/stopped on its own (OOM, exited, missing).
+        for ep in endpoint_states:
+            idx = ep["idx"]
+            ep_cfg = ep["ep_cfg"]
+            cname = ep["cname"]
+            port = ep["port"]
+            cinfo = ep["cinfo"]
+            mig_uuid = ep["mig_uuid"]
+            sm_count = ep["sm_count"]
 
             needs_restart = False
             crash_reason = ""
 
-            # Check A: Missing container
+            # If inspect timed out or transient state, DO NOT TOUCH!
+            if cinfo.get("status") == "inspect_timeout":
+                continue
+
+            # Case A: Missing from Docker completely
             if not cinfo.get("exists", False):
                 if now - self._start_time > 45.0:
                     needs_restart = True
-                    crash_reason = f"Container '{cname}' is missing or deleted from Docker"
+                    crash_reason = f"Container '{cname}' does not exist in Docker engine"
 
-            # Check B: OOM Killed
+            # Case B: Linux Kernel OOM Killed
             elif cinfo.get("oom_killed", False):
                 needs_restart = True
                 crash_reason = f"Linux Kernel OOM Killed (Out of Memory, Exit Code {cinfo.get('exit_code', -1)})"
 
-            # Check C: Dead or exited
-            elif not cinfo.get("running", False) or cinfo.get("status") in ("exited", "dead"):
+            # Case C: Container exited or died on its own
+            elif not cinfo.get("running", False) and cinfo.get("status") in ("exited", "dead"):
                 needs_restart = True
-                crash_reason = f"Container terminated abruptly (Status: {cinfo.get('status')}, Exit Code: {cinfo.get('exit_code', -1)})"
+                crash_reason = f"Container crashed / exited itself (Status: {cinfo.get('status')}, Exit Code: {cinfo.get('exit_code', -1)})"
 
-            # Check D: Running in Docker
+            # Case D: Running in Docker
             elif cinfo.get("running", True):
-                if is_healthy:
-                    self.container_mgr.clear_unresponsive_tick(cname)
-                    # If this container had an active crash alert, resolve it
-                    if self._container_crashes_active.get(cname, False):
-                        self._container_crashes_active[cname] = False
-                        if self.emailer:
-                            self.emailer.send_resolution_alert(
-                                event_type=f"CONTAINER_CRASH_{cname}",
-                                title=f"Container {cname} Restored & Healthy on Port {port}",
-                                message=(
-                                    f"vLLM inference container '{cname}' on port {port} has completed model warmup "
-                                    f"and is healthy. Shard load-balancer routing has been restored."
-                                ),
-                                details={
-                                    "Container Name": cname,
-                                    "Endpoint Port": port,
-                                    "MIG Hardware Slice": f"{mig_uuid} ({sm_count} SMs)",
-                                    "Model Loaded": ep_cfg.get("model", "unknown"),
-                                    "Container Status": cinfo.get("status", "running"),
-                                },
-                            )
-                else:
-                    # Container is still initializing or serving in Docker; VLMPool handles request routing.
-                    # Do NOT prematurely kill running containers while loading weights or profiling memory.
-                    pass
+                # CANNOT BE KILLED BY WATCHDOG!
+                pass
 
             if needs_restart:
                 can_res, backoff_reason = self.container_mgr.can_restart(cname)
                 if can_res:
-                    # 1. Capture crash diagnostics & tail logs BEFORE restarting
                     logs = await self.container_mgr.get_container_logs(cname, lines=40)
                     hw = self.container_mgr.get_hardware_telemetry()
                     tools = self.container_mgr.get_solving_tools_guide(cname, port)
 
-                    # 2. Execute self-healing restart
                     if cinfo.get("exists", False):
                         ok_restart, act_msg = await self.container_mgr.restart_container(cname)
                     else:
                         ok_restart, act_msg = await self.container_mgr.launch_container_from_config(idx, ep_cfg)
 
                     self._container_restarts_session += 1
-
-                    # 3. Record in SQLite audit log
                     self._record_sanitation({
                         "pid": cinfo.get("pid", 0),
                         "name": cname,
                         "cmd": f"docker restart {cname}",
                         "rss_mb": 0.0,
                         "cpu_pct": 0.0,
-                        "reason": f"Container Auto-Restart: {crash_reason}",
+                        "reason": f"Self-Healing Crash Recovery: {crash_reason}",
                     })
-
-                    # 4. Capture in error tracker
                     error_tracker.capture_error(
-                        message=f"Watchdog auto-restarted vLLM container {cname} ({crash_reason})",
+                        message=f"Self-Healing recovery for crashed container {cname} ({crash_reason})",
                         component="ContainerWatchdog",
                         effect=act_msg,
                         severity="CRITICAL",
                     )
-
-                    # 5. Dispatch Watchdog Email with diagnostics and solving tools
                     if self.emailer:
                         self._container_crashes_active[cname] = True
                         details = {
@@ -545,7 +599,6 @@ class SystemWatchdog:
                             "Container Exit Code": cinfo.get("exit_code", -1),
                             "OOM Killed Flag": str(cinfo.get("oom_killed", False)),
                             "Host Memory": hw.get("ram_status", "unknown"),
-                            "Host Swap": hw.get("swap_status", "unknown"),
                             "Host GPU Telemetry": hw.get("gpu_status", "unknown"),
                         }
                         self.emailer.send_container_crash_alert(
@@ -559,7 +612,6 @@ class SystemWatchdog:
                             cooldown_sec=300.0,
                         )
                 else:
-                    # In crash-loop backoff: log warning and suppress repeated restarts
                     last_warn = self._unhealthy_shard_warnings.get(f"{cname}_backoff", 0.0)
                     if now - last_warn > 180.0:
                         self._unhealthy_shard_warnings[f"{cname}_backoff"] = now
@@ -569,6 +621,118 @@ class SystemWatchdog:
                             effect="Auto-restart temporarily paused to prevent tight loop",
                             severity="CRITICAL",
                         )
+                return  # Handle at most one crash recovery per cycle
+
+        # ─── PART 2: STAGGERED 6-DAY MAINTENANCE RECYCLE ─────────────────────
+        # If no containers are crashed, evaluate scheduled staggered maintenance.
+        if not maintenance_enabled or getattr(self, "_maintenance_in_progress", None) is not None:
+            return
+
+        if not hasattr(self, "_maintenance_last_restarted"):
+            self._maintenance_last_restarted = {}
+        if not hasattr(self, "_maintenance_healthy_since"):
+            self._maintenance_healthy_since = {}
+
+        for ep in endpoint_states:
+            cname = ep["cname"]
+            port = ep["port"]
+            cinfo = ep["cinfo"]
+            uptime_sec = cinfo.get("uptime_sec", 0.0)
+
+            # Check if this container has reached the 6-day continuous uptime threshold
+            last_maint = self._maintenance_last_restarted.get(cname, 0.0)
+            if uptime_sec < maintenance_interval_sec:
+                continue
+            if last_maint > 0 and (now - last_maint) < maintenance_interval_sec:
+                continue
+
+            # Check eligibility against OTHER containers in the pool
+            other_endpoints = [o for o in endpoint_states if o["cname"] != cname]
+            can_proceed_maintenance = True
+            blocked_reason = ""
+
+            for o in other_endpoints:
+                o_name = o["cname"]
+                # Rule 1: Other container must be running in Docker
+                if not o["cinfo"].get("running", False):
+                    can_proceed_maintenance = False
+                    blocked_reason = f"Alternate container '{o_name}' is not running"
+                    break
+
+                # Rule 2: Other container must be verified HEALTHY (/health 200 OK)
+                if not o["is_healthy"]:
+                    can_proceed_maintenance = False
+                    blocked_reason = f"Alternate container '{o_name}' is not healthy"
+                    break
+
+                # Rule 3: The 1-hour post-health stagger rule
+                # "once this one is up an hour later , the other one can be killed"
+                o_healthy_ts = self._maintenance_healthy_since.get(o_name, 0.0)
+                if o_healthy_ts > 0 and (now - o_healthy_ts) < stagger_delay_sec:
+                    remaining_sec = int(stagger_delay_sec - (now - o_healthy_ts))
+                    can_proceed_maintenance = False
+                    blocked_reason = (
+                        f"Stagger lock active: Alternate container '{o_name}' completed maintenance recently. "
+                        f"Must remain healthy for 1 hour before next container can be recycled (wait {remaining_sec}s)."
+                    )
+                    break
+
+            if not can_proceed_maintenance:
+                last_log = self._unhealthy_shard_warnings.get(f"{cname}_maint_wait", 0.0)
+                if now - last_log > 600.0:
+                    self._unhealthy_shard_warnings[f"{cname}_maint_wait"] = now
+                    print(f"[Maintenance] ⏳ Container '{cname}' eligible for 6-day recycle, but postponed: {blocked_reason}")
+                continue
+
+            # Proceed with staggered maintenance recycle for this container!
+            uptime_days = round(uptime_sec / 86400.0, 1)
+            other_names = ", ".join(o["cname"] for o in other_endpoints) or "None"
+            print(f"[Maintenance] 🛠️ Initiating scheduled 6-day staggered maintenance recycle for container '{cname}' (Uptime: {uptime_days} days). Alternate shard(s): {other_names} active.")
+
+            self._maintenance_in_progress = cname
+            self._maintenance_last_restarted[cname] = now
+
+            # Log to error_tracker & audit
+            error_tracker.capture_error(
+                message=f"Planned 6-day staggered maintenance recycle initiated for {cname} (Uptime: {uptime_days}d)",
+                component="ContainerMaintenance",
+                effect=f"Gracefully recycling container '{cname}'. Alternate shard '{other_names}' serving all traffic.",
+                severity="INFO",
+            )
+            self._record_sanitation({
+                "pid": cinfo.get("pid", 0),
+                "name": cname,
+                "cmd": f"docker restart {cname}",
+                "rss_mb": 0.0,
+                "cpu_pct": 0.0,
+                "reason": f"Scheduled 6-day Staggered Maintenance (Uptime: {uptime_days}d)",
+            })
+
+            # Send maintenance notification email
+            if self.emailer:
+                self.emailer.send_critical_alert(
+                    event_type=f"MAINTENANCE_{cname}",
+                    title=f"Scheduled Maintenance: 6-Day Staggered Recycle for {cname}",
+                    message=(
+                        f"vLLM inference container '{cname}' has reached {uptime_days} days of continuous uptime. "
+                        f"Initiating planned memory hygiene recycle. Traffic is actively routed to healthy alternate shard '{other_names}'."
+                    ),
+                    details={
+                        "Target Container": cname,
+                        "Endpoint Port": port,
+                        "MIG Hardware Slice": f"{ep['mig_uuid']} ({ep['sm_count']} SMs)",
+                        "Current Uptime": f"{uptime_days} days ({int(uptime_sec)}s)",
+                        "Active Serving Alternate": other_names,
+                        "Stagger Lock": "Alternate container will wait at least 1 hour after this container recovers before its maintenance window opens.",
+                    },
+                    severity="INFO",
+                    remediation="No operator action needed. Automated planned maintenance routine.",
+                    cooldown_sec=300.0,
+                )
+
+            # Perform graceful restart
+            await self.container_mgr.restart_container(cname, timeout_sec=15)
+            break  # Recycle at most one container per cycle
 
     def get_summary(self) -> dict:
         uptime_sec = round(time.monotonic() - self._start_time, 1)
