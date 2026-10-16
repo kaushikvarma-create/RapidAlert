@@ -235,16 +235,16 @@ if [[ "$AUTO_START_VLLM" == "true" ]]; then
             fi
         fi
 
-        # Collect MIG capability device nodes if MIG is enabled
+        # Ensure persistent JIT compiler cache exists on host so restarts and rebuilds never recompile
+        VLLM_HOST_CACHE="$HOME/.cache/rapidalert/vllm"
+        mkdir -p "${VLLM_HOST_CACHE}/triton" "${VLLM_HOST_CACHE}/nv" "${VLLM_HOST_CACHE}/vllm_cache"
+
+        # Collect MIG capability device nodes if MIG is enabled (clean slice isolation as in commit aeb128af)
         CAP_FLAGS=()
         if [[ -d /dev/nvidia-caps ]]; then
-            # Root MIG configuration capability - required by all containers
-            if [[ -e /dev/nvidia-caps/nvidia-cap1 ]]; then
-                CAP_FLAGS+=(--device /dev/nvidia-caps/nvidia-cap1)
-            fi
             GI_ID=$(( i + 1 ))
             for cap_file in /dev/nvidia-caps/nvidia-cap${GI_ID}*; do
-                if [[ -e "$cap_file" && "$cap_file" != "/dev/nvidia-caps/nvidia-cap1" ]]; then
+                if [[ -e "$cap_file" ]]; then
                     CAP_FLAGS+=(--device "$cap_file")
                 fi
             done
@@ -259,15 +259,17 @@ if [[ "$AUTO_START_VLLM" == "true" ]]; then
                 --shm-size=4g \
                 -e NVIDIA_VISIBLE_DEVICES=all \
                 -e CUDA_VISIBLE_DEVICES=0 \
-                -e VLLM_HOST_IP=127.0.0.1 \
-                -e NCCL_SOCKET_IFNAME=lo \
-                -e GLOO_SOCKET_IFNAME=lo \
                 -e HF_TOKEN="${HF_TOKEN:-}" \
                 -e HF_HOME=/data/models/huggingface \
+                -e HF_HUB_OFFLINE=1 \
+                -e TRANSFORMERS_OFFLINE=1 \
                 -e EP_MODEL="${EP_MODEL}" \
                 -e EP_QUANTIZATION="${EP_QUANTIZATION}" \
                 "${CAP_FLAGS[@]}" \
                 -v "${HF_CACHE}:/data/models/huggingface" \
+                -v "${VLLM_HOST_CACHE}/triton:/root/.triton" \
+                -v "${VLLM_HOST_CACHE}/nv:/root/.nv" \
+                -v "${VLLM_HOST_CACHE}/vllm_cache:/root/.cache/vllm" \
                 "${VLLM_IMAGE}" \
                 bash -c " \
                     TARGET_MODEL=\"\${EP_MODEL}\"; \
@@ -285,6 +287,7 @@ if [[ "$AUTO_START_VLLM" == "true" ]]; then
                     --dtype auto \
                     --enforce-eager \
                     --max-num-seqs \"${VLLM_MAX_SEQS}\" \
+                    --limit-mm-per-prompt '{\"image\": 4}' \
                     --trust-remote-code \
                     ${EP_QUANTIZATION:+--quantization \"${EP_QUANTIZATION}\"} \
                     --disable-log-stats \

@@ -268,16 +268,16 @@ class ContainerManager:
         except Exception:
             pass
 
-        # Build capability flags for NVIDIA Thor MIG
+        # Build capability flags for NVIDIA Thor MIG (clean slice isolation as in commit aeb128af)
         cap_flags = []
         if os.path.isdir("/dev/nvidia-caps"):
-            # Root MIG configuration capability — required by all containers
-            if os.path.exists("/dev/nvidia-caps/nvidia-cap1"):
-                cap_flags.extend(["--device", "/dev/nvidia-caps/nvidia-cap1"])
             gi_id = index + 1
             for cap_file in sorted(glob.glob(f"/dev/nvidia-caps/nvidia-cap{gi_id}*")):
-                if cap_file != "/dev/nvidia-caps/nvidia-cap1":
-                    cap_flags.extend(["--device", cap_file])
+                cap_flags.extend(["--device", cap_file])
+
+        vllm_host_cache = os.path.expanduser("~/.cache/rapidalert/vllm")
+        for sub in ("triton", "nv", "vllm_cache"):
+            os.makedirs(os.path.join(vllm_host_cache, sub), exist_ok=True)
 
         cmd = [
             "docker", "run", "-d",
@@ -287,14 +287,16 @@ class ContainerManager:
             "--shm-size=4g",
             "-e", "NVIDIA_VISIBLE_DEVICES=all",
             "-e", "CUDA_VISIBLE_DEVICES=0",
-            "-e", "VLLM_HOST_IP=127.0.0.1",
-            "-e", "NCCL_SOCKET_IFNAME=lo",
-            "-e", "GLOO_SOCKET_IFNAME=lo",
             "-e", "HF_HOME=/data/models/huggingface",
+            "-e", "HF_HUB_OFFLINE=1",
+            "-e", "TRANSFORMERS_OFFLINE=1",
             "-e", f"EP_MODEL={model}",
             "-e", "EP_QUANTIZATION=",
             *cap_flags,
             "-v", f"{hf_cache}:/data/models/huggingface",
+            "-v", f"{vllm_host_cache}/triton:/root/.triton",
+            "-v", f"{vllm_host_cache}/nv:/root/.nv",
+            "-v", f"{vllm_host_cache}/vllm_cache:/root/.cache/vllm",
             vllm_image,
             "bash", "-c",
             (
@@ -306,6 +308,7 @@ class ContainerManager:
                 f'--dtype auto '
                 f'--enforce-eager '
                 f'--max-num-seqs {max_seqs} '
+                f'--limit-mm-per-prompt \'{{"image": 4}}\' '
                 f'--trust-remote-code '
                 f'--disable-log-stats '
                 f'--no-enable-log-requests'
