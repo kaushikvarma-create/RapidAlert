@@ -52,7 +52,8 @@ class SceneTriggerEngine:
         self.broadcast_fn = broadcast_fn
         self.alert_engine = alert_engine
         self.model_name = model_name
-        self.device = "cpu"
+        self.device = device  # resolved in start() ('auto' -> cuda:0 on the MIG slice, else cpu)
+        self.dtype = torch.float32  # resolved in start(): fp16 on CUDA, fp32 on CPU
         self.default_threshold = default_threshold
         self.major_threshold = major_threshold
         self.minor_threshold = minor_threshold
@@ -72,16 +73,63 @@ class SceneTriggerEngine:
         self._active_collectors: Dict[str, asyncio.Task] = {}
         self.latest_drifts: Dict[str, float] = {}
 
+    @staticmethod
+    def _resolve_device(requested: str) -> str:
+        """
+        'auto'/'cuda' -> 'cuda:0' when CUDA is available, else 'cpu'.
+        With MIG, CUDA_VISIBLE_DEVICES pins this process to ONE MIG instance
+        (backend_mig_uuid), so index 0 is always that slice - never address a
+        MIG UUID directly via torch. Env RAPIDALERT_DINO_DEVICE overrides.
+        """
+        import os
+        req = (os.environ.get("RAPIDALERT_DINO_DEVICE") or requested or "auto").lower()
+        if req == "cpu":
+            return "cpu"
+        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+            return "cuda:0"
+        print("[SceneTrigger] ⚠️ CUDA unavailable; DINOv2 will run on CPU")
+        return "cpu"
+
+    def _resolve_dtype(self) -> torch.dtype:
+        """fp16 by default on CUDA. RAPIDALERT_DINO_DTYPE=fp32|fp16|bf16 overrides."""
+        import os
+        if self.device == "cpu":
+            return torch.float32
+        choice = os.environ.get("RAPIDALERT_DINO_DTYPE", "fp16").lower()
+        return {"fp32": torch.float32, "bf16": torch.bfloat16}.get(choice, torch.float16)
+
+    def _load_model(self) -> None:
+        self.dtype = self._resolve_dtype()
+        self._model = AutoModel.from_pretrained(self.model_name).to(self.device, dtype=self.dtype)
+        self._model.eval()
+
+    def _warmup(self) -> None:
+        dummy = np.zeros((224, 224, 3), dtype=np.uint8)
+        inp = self._processor(images=Image.fromarray(dummy), return_tensors="pt").to(self.device)
+        with torch.inference_mode():
+            self._model(pixel_values=inp["pixel_values"].to(self.dtype))
+
     def start(self) -> None:
         if self._running:
             return
         self._running = True
         try:
+            self.device = self._resolve_device(self.device)
             print(f"[SceneTrigger] Loading {self.model_name} on {self.device}...")
             self._processor = AutoImageProcessor.from_pretrained(self.model_name)
-            self._model = AutoModel.from_pretrained(self.model_name).to(self.device)
-            self._model.eval()
-            print("[SceneTrigger] ✅ DINOv2 ready on CPU for scene shift detection")
+            try:
+                self._load_model()
+                self._warmup()
+            except Exception as gpu_exc:
+                if self.device == "cpu":
+                    raise
+                print(f"[SceneTrigger] ⚠️ GPU init failed ({gpu_exc}); falling back to CPU")
+                self.device = "cpu"
+                self._load_model()
+            print(
+                f"[SceneTrigger] ✅ DINOv2 ready on {self.device.upper()} "
+                f"({str(self.dtype).replace('torch.', '')}) for scene shift detection"
+            )
         except Exception as exc:
             error_tracker.capture_exception(
                 exc,
@@ -191,10 +239,11 @@ class SceneTriggerEngine:
             img = Image.fromarray(rgb)
 
             inp = self._processor(images=img, return_tensors="pt").to(self.device)
-            with torch.no_grad():
-                out = self._model(**inp)
+            with torch.inference_mode():
+                out = self._model(pixel_values=inp["pixel_values"].to(self.dtype))
 
-            emb = out.last_hidden_state.mean(dim=1).cpu().numpy()[0]
+            # Reduce + normalise in fp32 so cosine drift keeps full precision
+            emb = out.last_hidden_state.float().mean(dim=1).cpu().numpy()[0]
             norm = np.linalg.norm(emb)
             if norm > 0:
                 emb = emb / norm

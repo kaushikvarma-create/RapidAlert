@@ -184,7 +184,7 @@ scene_trigger = SceneTriggerEngine(
     broadcast_fn=ws_manager.broadcast,
     alert_engine=alert_engine,
     model_name=sys_cfg.dinov2_model,
-    device="cpu",
+    device="auto",
     default_threshold=sys_cfg.scene_threshold,
     major_threshold=sys_cfg.dino_major_threshold,
     minor_threshold=sys_cfg.dino_minor_threshold,
@@ -372,19 +372,50 @@ async def favicon():
 #  WebSocket Endpoint
 # ══════════════════════════════════════════════════════════════════
 
+_init_thumbs_cache: dict = {"ts": 0.0, "data": {}}
+_init_thumbs_lock = asyncio.Lock()
+_INIT_THUMBS_TTL = 3.0
+
+
+def _build_init_thumbs() -> dict:
+    thumbs = {}
+    for c in camera_manager.get_active_cameras():
+        snap = frame_store.get_snapshot_b64(
+            c, max_w=PREVIEW_FRAME_WIDTH, quality=PREVIEW_JPEG_QUALITY
+        )
+        if snap:
+            thumbs[c] = [snap]
+    return thumbs
+
+
+async def _get_init_thumbs() -> dict:
+    now = time.monotonic()
+    if now - _init_thumbs_cache["ts"] < _INIT_THUMBS_TTL:
+        return _init_thumbs_cache["data"]
+    async with _init_thumbs_lock:
+        now = time.monotonic()
+        if now - _init_thumbs_cache["ts"] < _INIT_THUMBS_TTL:
+            return _init_thumbs_cache["data"]
+        data = await asyncio.to_thread(_build_init_thumbs)
+        _init_thumbs_cache["data"] = data
+        _init_thumbs_cache["ts"] = time.monotonic()
+        return data
+
+
+async def _get_network_status_safe() -> dict:
+    try:
+        return await asyncio.wait_for(network_service.get_status(), timeout=2.0)
+    except Exception:
+        return {}
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws_manager.connect(ws)
     try:
-        # Send live snapshots for all active cameras so preview is never blank
-        active_cams = camera_manager.get_active_cameras()
-        live_thumbs = {}
-        for c in active_cams:
-            snap = frame_store.get_snapshot_b64(
-                c, max_w=PREVIEW_FRAME_WIDTH, quality=PREVIEW_JPEG_QUALITY
-            )
-            if snap:
-                live_thumbs[c] = [snap]
+        # Live snapshots for all active cameras (built off-loop and cached briefly,
+        # so reconnect storms can't saturate the event loop)
+        live_thumbs = await _get_init_thumbs()
 
         # Send full initial state so the dashboard can render immediately
         await ws.send_json({
@@ -411,7 +442,7 @@ async def websocket_endpoint(ws: WebSocket):
                 "followup": prompt_manager._followup,
                 "cameras": prompt_manager.get_cam_overrides(),
             },
-            "network": await network_service.get_status(),
+            "network": await _get_network_status_safe(),
             "recent_errors": error_tracker.get_recent(limit=10),
         })
 

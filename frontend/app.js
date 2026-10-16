@@ -443,9 +443,12 @@ const App = {
     this.cameras[cam].thumbB64 = thumbnail_b64;
     this.cameras[cam].lastFrameTs = Date.now() / 1000;
 
+    // Skip all DOM/image work when the tab is hidden or an overlay covers the grid
+    // (only the camera shown in the cam-modal still needs frames).
+    if (document.hidden) return;
     const isOnPage = this._isCamOnCurrentPage(cam);
     const isModalOpen = (this.activeCamModal === cam);
-    if (!isOnPage && !isModalOpen) {
+    if (!isModalOpen && (!isOnPage || this._overlayOpen)) {
       return;
     }
 
@@ -698,33 +701,17 @@ const App = {
     const endIndex = Math.min(startIndex + this.camsPerPage, totalCams);
     const visibleOnPage = new Set(eligibleCams.slice(startIndex, endIndex));
 
-    // 3. Phase 1: Detach streams for cameras NOT on this page or if modal is active
+    // 3. Show/hide cards for this page, then let the stream policy decide connections
     for (const name of camNames) {
-      const isVisible = visibleOnPage.has(name);
-      const isEnabled = this.cameras[name]?.config?.enabled !== false;
-      const shouldStream = isVisible && isEnabled && !this.activeCamModal;
-
       const card = document.getElementById(`cam-card-${this._eid(name)}`);
       if (card) {
-        card.style.display = isVisible ? 'flex' : 'none';
-      }
-
-      if (!shouldStream) {
-        this._detachDirectStream(name);
+        card.style.display = visibleOnPage.has(name) ? 'flex' : 'none';
       }
     }
-
-    // 4. Phase 2: Attach hardware-accelerated streams for visible cameras on active page
     for (const name of camNames) {
       this._renderCamCard(name);
-      const isVisible = visibleOnPage.has(name);
-      const isEnabled = this.cameras[name]?.config?.enabled !== false;
-      const shouldStream = isVisible && isEnabled && !this.activeCamModal;
-
-      if (shouldStream) {
-        this._attachDirectStream(name, forceRefresh);
-      }
     }
+    this._syncStreams(forceRefresh);
 
     // 5. Update Header Badges & Empty State
     if (badge) {
@@ -758,7 +745,7 @@ const App = {
     }
     cardImg.onerror = () => {
       setTimeout(() => {
-        if (cardImg.isConnected && this._isCamOnCurrentPage(name) && !this.activeCamModal) {
+        if (cardImg.isConnected && this._streamWanted(name)) {
           cardImg.src = `${streamUrl}&retry=${Date.now()}`;
         }
       }, 1500);
@@ -766,13 +753,84 @@ const App = {
     cardImg.style.opacity = '1';
   },
 
-  _detachDirectStream(name) {
-    const eid = this._eid(name);
-    const cardImg = document.getElementById(`cam-card-img-${eid}`);
-    if (cardImg && (cardImg.src.includes('/stream') || cardImg.src.startsWith('http'))) {
-      cardImg.src = '';
-      cardImg.removeAttribute('src');
+  // ── Stream policy ─────────────────────────────────────────────
+  // Browsers allow only ~6 HTTP/1.1 connections per host and every MJPEG stream
+  // holds one forever. Keep live streams below that so API fetches never starve.
+  MAX_LIVE_STREAMS: 5,
+  _MODAL_IDS: ['cam-modal', 'alert-modal', 'modal-archive', 'modal-reports-explorer',
+    'settings-panel', 'modal-vlm-inspector', 'modal-errors', 'modal-test-trigger', 'modal-admin-auth'],
+
+  isAnyModalOpen() {
+    if (this.activeCamModal || this.activeAlert) return true;
+    for (const id of this._MODAL_IDS) {
+      const el = document.getElementById(id);
+      if (el && !el.hidden && getComputedStyle(el).display !== 'none') return true;
     }
+    return false;
+  },
+
+  _visibleCamNames() {
+    const eligible = Object.keys(this.cameras).filter(n => this._shouldShowCamCard(n));
+    const start = (this.camCurrentPage - 1) * this.camsPerPage;
+    return eligible
+      .slice(start, start + this.camsPerPage)
+      .filter(n => this.cameras[n]?.config?.enabled !== false)
+      .slice(0, this.MAX_LIVE_STREAMS);
+  },
+
+  _streamWanted(name) {
+    if (document.hidden || this.isAnyModalOpen()) return false;
+    return this._visibleCamNames().includes(name);
+  },
+
+  _scheduleStreamSync() {
+    if (this._syncPending) return;
+    this._syncPending = true;
+    setTimeout(() => { this._syncPending = false; this._syncStreams(); }, 30);
+  },
+
+  // Single source of truth: grid streams exist only for on-page cameras while the
+  // tab is visible and no modal/panel is open. Everything else is torn down.
+  _syncStreams(forceRefresh = false) {
+    this._overlayOpen = this.isAnyModalOpen();
+    const wanted = new Set((document.hidden || this._overlayOpen) ? [] : this._visibleCamNames());
+    let stagger = 0;
+    for (const name of Object.keys(this.cameras)) {
+      if (wanted.has(name)) {
+        const img = document.getElementById(`cam-card-img-${this._eid(name)}`);
+        const live = (img?.getAttribute('src') || '').includes('/stream');
+        if (live && !forceRefresh) continue;
+        // Stagger new connections so N encoders don't spin up in the same instant
+        setTimeout(() => {
+          if (this._streamWanted(name)) this._attachDirectStream(name, forceRefresh);
+        }, stagger);
+        stagger += 120;
+      } else {
+        this._detachDirectStream(name);
+      }
+    }
+    // Free the modal's own stream when the tab is hidden; restore on return
+    const modalImg = document.getElementById('modal-frame');
+    if (modalImg && this.activeCamModal && this.modalViewMode === 'live') {
+      const has = !!modalImg.getAttribute('src');
+      if (document.hidden && has) {
+        modalImg.removeAttribute('src');
+      } else if (!document.hidden && !has) {
+        this._updateModalFrameView(this.activeCamModal);
+      }
+    }
+  },
+
+  _initStreamPolicy() {
+    if (this._streamPolicyReady) return;
+    this._streamPolicyReady = true;
+    const sync = () => this._scheduleStreamSync();
+    const observer = new MutationObserver(sync);
+    for (const id of this._MODAL_IDS) {
+      const el = document.getElementById(id);
+      if (el) observer.observe(el, { attributes: true, attributeFilter: ['hidden', 'style', 'class'] });
+    }
+    document.addEventListener('visibilitychange', sync);
   },
 
   resyncAllStreams() {
@@ -797,29 +855,10 @@ const App = {
 
   _startStreamWatchdog() {
     if (this._streamWatchdogTimer) clearInterval(this._streamWatchdogTimer);
+    this._initStreamPolicy();
 
-    this._streamWatchdogTimer = setInterval(() => {
-      // If modal is active, don't interrupt
-      if (this.activeCamModal) return;
-
-      const eligibleCams = Object.keys(this.cameras).filter(n => this._shouldShowCamCard(n));
-      const startIndex = (this.camCurrentPage - 1) * this.camsPerPage;
-      const endIndex = Math.min(startIndex + this.camsPerPage, eligibleCams.length);
-      const visibleOnPage = eligibleCams.slice(startIndex, endIndex);
-
-      for (const name of visibleOnPage) {
-        if (this.cameras[name]?.config?.enabled === false) continue;
-
-        const eid = this._eid(name);
-        const cardImg = document.getElementById(`cam-card-img-${eid}`);
-        if (cardImg) {
-          const curSrc = cardImg.getAttribute('src') || '';
-          if (!curSrc || !curSrc.includes('/stream')) {
-            this._attachDirectStream(name, true);
-          }
-        }
-      }
-    }, 4000);
+    // Safety net: re-run the policy to heal dropped streams / stray connections
+    this._streamWatchdogTimer = setInterval(() => this._syncStreams(), 4000);
   },
 
   _detachDirectStream(name) {
@@ -831,12 +870,14 @@ const App = {
       try { this._hlsInstances[name].destroy(); } catch (e) {}
       delete this._hlsInstances[name];
     }
-    if (videoEl) {
+    if (videoEl && videoEl.getAttribute('src')) {
       videoEl.removeAttribute('src');
       videoEl.load();
       videoEl.style.display = 'none';
     }
-    if (cardImg) {
+    // Closing the <img> src is what terminates the MJPEG HTTP request server-side.
+    // Only touch it when a real stream is attached (keeps thumbnails, avoids churn).
+    if (cardImg && (cardImg.getAttribute('src') || '').includes('/stream')) {
       cardImg.src = '';
       cardImg.removeAttribute('src');
     }
@@ -1222,10 +1263,8 @@ const App = {
       e2eEl.style.color = topResult?.e2e_latency != null ? 'var(--cyan)' : 'var(--text-3)';
     }
 
-    // Ensure direct hardware live stream is active for visible cameras
-    if (isVisible && isEnabled && !this.activeCamModal) {
-      this._attachDirectStream(name);
-    }
+    // Stream attach/detach is decided centrally (debounced)
+    if (isVisible && isEnabled) this._scheduleStreamSync();
 
     // If modal is open for this camera, refresh its live frame/stats
     if (this.activeCamModal === name) {
