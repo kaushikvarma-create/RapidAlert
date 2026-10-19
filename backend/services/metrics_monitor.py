@@ -15,111 +15,55 @@ from backend.core.error_tracker import error_tracker
 _LAST_GPU_WARN = 0.0
 _LAST_CPU_WARN = 0.0
 _LAST_RAM_WARN = 0.0
-_CACHED_GPU_CMD: Optional[list[str]] = None
+_NVML_INITED = False
+_NVML_DEV = None
+
+
+def _init_nvml_safe():
+    global _NVML_INITED, _NVML_DEV
+    if not _NVML_INITED:
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            _NVML_DEV = pynvml.nvmlDeviceGetHandleByIndex(0)
+            _NVML_INITED = True
+        except Exception:
+            _NVML_INITED = False
 
 
 async def get_gpu_util() -> int:
     """
-    Query GPU/MIG compute utilization with command caching and direct execution.
+    Query GPU/MIG compute utilization via direct NVML (sub-millisecond, zero subprocesses).
     """
-    global _LAST_GPU_WARN, _CACHED_GPU_CMD
-
-    # Try cached working command first
-    if _CACHED_GPU_CMD:
+    global _LAST_GPU_WARN
+    _init_nvml_safe()
+    if _NVML_INITED and _NVML_DEV is not None:
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *_CACHED_GPU_CMD,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
-            if proc.returncode == 0 and stdout:
-                lines = [l.strip() for l in stdout.decode().strip().splitlines() if l.strip()]
-                vals = []
-                for line in lines:
-                    if line and not line.startswith("["):
-                        try:
-                            vals.append(int(line))
-                        except ValueError:
-                            pass
-                if vals:
-                    return max(vals)
-        except Exception:
-            _CACHED_GPU_CMD = None
+            import pynvml
+            # 1. Direct utilization rates (when supported)
+            try:
+                util = pynvml.nvmlDeviceGetUtilizationRates(_NVML_DEV)
+                if util and util.gpu is not None:
+                    return int(util.gpu)
+            except Exception:
+                pass
 
-    # Probe 1: Standard GPU utilization
-    try:
-        cmd1 = ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd1,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
-        if proc.returncode == 0 and stdout:
-            val = stdout.decode().strip()
-            if val and not val.startswith("["):
-                _CACHED_GPU_CMD = cmd1
-                return int(val)
-    except Exception:
-        pass
-
-    # Probe 2: MIG per-instance utilization
-    try:
-        cmd2 = ["nvidia-smi", "--query-mig=gpu.utilization", "--format=csv,noheader,nounits"]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd2,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
-        if proc.returncode == 0 and stdout:
-            lines = [l.strip() for l in stdout.decode().strip().splitlines() if l.strip()]
-            values = []
-            for line in lines:
-                if line and not line.startswith("["):
-                    try:
-                        values.append(int(line))
-                    except ValueError:
-                        pass
-            if values:
-                _CACHED_GPU_CMD = cmd2
-                return max(values)
-    except Exception:
-        pass
-
-    # Probe 3: Jetson Thor NVML Power & Dynamic Activity fallback (MIG mode support)
-    try:
-        import pynvml
-        pynvml.nvmlInit()
-        dev = pynvml.nvmlDeviceGetHandleByIndex(0)
-        # Try direct utilization rates first
-        try:
-            util = pynvml.nvmlDeviceGetUtilizationRates(dev)
-            if util and util.gpu is not None:
-                return int(util.gpu)
+            # 2. Jetson Thor dynamic power draw (18W idle -> 120W TDP)
+            pwr_mw = pynvml.nvmlDeviceGetPowerUsage(_NVML_DEV)
+            if pwr_mw and pwr_mw > 0:
+                pwr_w = pwr_mw / 1000.0
+                dynamic_pct = max(0, min(100, int(((pwr_w - 18.0) / (120.0 - 18.0)) * 100)))
+                return dynamic_pct
         except Exception:
             pass
-        
-        # When MIG mode reports Not Supported for SM %, calculate dynamic GPU load from active power draw
-        # Jetson Thor baseline idle is ~18W, dynamic TDP cap is ~120W
-        pwr_mw = pynvml.nvmlDeviceGetPowerUsage(dev)
-        if pwr_mw and pwr_mw > 0:
-            pwr_w = pwr_mw / 1000.0
-            # Scale power consumption between idle floor (18W) and TDP max (120W)
-            dynamic_pct = max(0, min(100, int(((pwr_w - 18.0) / (120.0 - 18.0)) * 100)))
-            return dynamic_pct
-    except Exception:
-        pass
 
-    # All methods failed
     now = time.time()
     if now - _LAST_GPU_WARN > 300:
         _LAST_GPU_WARN = now
         error_tracker.capture_error(
-            message="All GPU utilization query methods returned [N/A] or failed",
+            message="GPU NVML telemetry unavailable; defaulting to 0%",
             component="MetricsMonitor",
-            effect="GPU utilization telemetry unavailable; dashboard will show 0%",
+            effect="GPU utilization telemetry defaulted to 0%",
             severity="WARNING",
         )
     return 0

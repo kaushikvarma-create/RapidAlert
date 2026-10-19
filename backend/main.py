@@ -334,6 +334,7 @@ async def _config_sync_loop() -> None:
 
 # ══════════════════════════════════════════════════════════════════
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 
 app = FastAPI(
     title="The Sentry — CLOVE HQ Site Intelligence",
@@ -360,6 +361,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(GracefulShutdownMiddleware)
 
 
@@ -797,7 +799,7 @@ async def _broadcast_active_streams() -> None:
 
 
 @app.get("/api/cameras/active-streams")
-def api_get_active_streams():
+async def api_get_active_streams():
     """Returns exact real-time count and names of video streams actively pulled right now."""
     with _stream_tracker_lock:
         total = sum(_active_display_streams.values())
@@ -811,14 +813,16 @@ def api_get_active_streams():
 
 
 @app.get("/api/cameras/{name}/stream")
-async def api_camera_stream(name: str, width: int = 1280, quality: int = 78):
-    """Direct zero-latency continuous MJPEG live stream (100% native hardware FPS, zero polling jitter)."""
+async def api_camera_stream(request: Request, name: str, width: int = 640, quality: int = 70):
+    """Direct zero-latency continuous MJPEG live stream with rapid disconnect detection."""
     async def frame_generator():
         _register_stream_start(name)
         last_seq = -1
         try:
             while not _is_shutting_down:
-                frame_data = await asyncio.to_thread(frame_store.get_frame_since, name, last_seq, 1.0, width, quality)
+                if await request.is_disconnected():
+                    break
+                frame_data = await asyncio.to_thread(frame_store.get_frame_since, name, last_seq, 0.5, width, quality)
                 if frame_data is not None:
                     seq, jpeg_bytes = frame_data
                     last_seq = seq
@@ -827,9 +831,9 @@ async def api_camera_stream(name: str, width: int = 1280, quality: int = 78):
                         b"Content-Type: image/jpeg\r\n\r\n" + jpeg_bytes + b"\r\n"
                     )
                 else:
-                    if _is_shutting_down:
+                    if _is_shutting_down or await request.is_disconnected():
                         break
-                    await asyncio.sleep(0.01)
+                    await asyncio.sleep(0.02)
         except (asyncio.CancelledError, GeneratorExit):
             pass
         finally:
@@ -866,18 +870,18 @@ def api_camera_stream_urls(name: str, request: Request):
 # ══════════════════════════════════════════════════════════════════
 
 @app.get("/api/status")
-def api_get_status():
+async def api_get_status():
     return result_store.get_all_latest()
 
 
 @app.get("/api/cameras/{name}/history")
-def api_get_history(name: str, limit: int = 50, offset: int = 0):
+async def api_get_history(name: str, limit: int = 50, offset: int = 0):
     """Persistent history from SQLite (survives restarts)."""
-    return storage.query(cam=name, limit=limit, offset=offset)
+    return await asyncio.to_thread(storage.query, cam=name, limit=limit, offset=offset)
 
 
 @app.get("/api/history")
-def api_get_all_history(
+async def api_get_all_history(
     cam: Optional[str] = None,
     severity: Optional[str] = None,
     safety: Optional[str] = None,
@@ -890,7 +894,8 @@ def api_get_all_history(
     offset: int = 0,
 ):
     """Filtered history query across all cameras with full-text keyword and metadata search."""
-    return storage.query(
+    return await asyncio.to_thread(
+        storage.query,
         cam=cam,
         since_ts=since,
         until_ts=until,
@@ -905,37 +910,37 @@ def api_get_all_history(
 
 
 @app.get("/api/storage/stats")
-def api_storage_stats():
-    return storage.get_stats()
+async def api_storage_stats():
+    return await asyncio.to_thread(storage.get_stats)
 
 
 @app.get("/api/archive/stats")
-def api_archive_stats():
+async def api_archive_stats():
     """Archive summary metrics: total stored alert sets, total frames, and timestamp span."""
-    return storage.get_archive_stats()
+    return await asyncio.to_thread(storage.get_archive_stats)
 
 
 @app.get("/api/incidents/{incident_id}/frames")
-def api_get_incident_frames(incident_id: str):
+async def api_get_incident_frames(incident_id: str):
     """Retrieve the sequence of stored frames (base64) for an incident or event ID."""
-    frames = storage.get_incident_frames(incident_id)
+    frames = await asyncio.to_thread(storage.get_incident_frames, incident_id)
     if not frames:
         raise HTTPException(status_code=404, detail=f"No stored frames found for incident {incident_id}")
     return {"incident_id": incident_id, "count": len(frames), "frames": frames}
 
 
 @app.get("/api/incidents/{incident_id}/frame/{frame_idx}")
-def api_get_incident_frame_raw(incident_id: str, frame_idx: int = 0):
+async def api_get_incident_frame_raw(incident_id: str, frame_idx: int = 0):
     """Retrieve a single raw JPEG binary image for an incident frame index (0..3)."""
-    raw_jpeg = storage.get_incident_frame_raw(incident_id, frame_idx=frame_idx)
+    raw_jpeg = await asyncio.to_thread(storage.get_incident_frame_raw, incident_id, frame_idx=frame_idx)
     if not raw_jpeg:
         raise HTTPException(status_code=404, detail=f"Frame #{frame_idx} not found for incident {incident_id}")
     return Response(content=raw_jpeg, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.get("/api/cameras/{name}/stats")
-def api_cam_stats(name: str, hours: float = 24):
-    return storage.get_camera_summary(name, hours=hours)
+async def api_cam_stats(name: str, hours: float = 24):
+    return await asyncio.to_thread(storage.get_camera_summary, name, hours=hours)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1453,14 +1458,77 @@ async def api_audit_containers():
 
 
 
-class NoCacheStaticFiles(StaticFiles):
+_index_html_cache: tuple[float, bytes] = (0.0, b"")
+
+@app.get("/", include_in_schema=False)
+async def serve_index_html():
+    """Ultra-low-latency in-memory root handler with zero-stale Cache-Control."""
+    global _index_html_cache
+    index_path = FRONTEND_DIR / "index.html"
+    try:
+        mtime = os.path.getmtime(index_path)
+        if _index_html_cache[0] != mtime or not _index_html_cache[1]:
+            content = await asyncio.to_thread(index_path.read_bytes)
+            _index_html_cache = (mtime, content)
+        else:
+            content = _index_html_cache[1]
+    except Exception:
+        content = await asyncio.to_thread(index_path.read_bytes)
+
+    return Response(
+        content=content,
+        media_type="text/html; charset=utf-8",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
+class FastStaticFiles(StaticFiles):
+    """
+    High-performance in-memory caching static files server.
+    Completely eliminates anyio.to_thread threadpool bottlenecks,
+    serving assets in sub-millisecond time even under heavy multi-camera streaming.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._cache: dict[str, tuple[float, bytes, str]] = {}
+
     async def get_response(self, path: str, scope: Scope) -> Response:
-        response = await super().get_response(path, scope)
-        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-        response.headers["Pragma"] = "no-cache"
-        response.headers["Expires"] = "0"
-        return response
+        import mimetypes
+        clean_path = path.strip("/") if path else "index.html"
+        if not clean_path or clean_path == ".":
+            clean_path = "index.html"
+
+        file_path = Path(self.directory) / clean_path
+        if not file_path.is_file():
+            return await super().get_response(path, scope)
+
+        try:
+            mtime = os.path.getmtime(file_path)
+            cached = self._cache.get(clean_path)
+            if cached is not None and cached[0] == mtime:
+                content, media_type = cached[1], cached[2]
+            else:
+                content = file_path.read_bytes()
+                media_type, _ = mimetypes.guess_type(str(file_path))
+                media_type = media_type or "application/octet-stream"
+                self._cache[clean_path] = (mtime, content, media_type)
+
+            headers = {}
+            if clean_path.endswith(".html"):
+                headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
+                headers["Pragma"] = "no-cache"
+                headers["Expires"] = "0"
+            else:
+                headers["Cache-Control"] = "public, max-age=86400, stale-while-revalidate=604800"
+
+            return Response(content=content, media_type=media_type, headers=headers)
+        except Exception:
+            return await super().get_response(path, scope)
 
 app.mount("/clips", StaticFiles(directory=str(CLIPS_DIR)), name="clips")
-app.mount("/", NoCacheStaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
+app.mount("/", FastStaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
 

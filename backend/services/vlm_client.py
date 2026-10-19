@@ -91,6 +91,9 @@ class _EndpointShard:
         self._sem:   asyncio.Semaphore     = asyncio.Semaphore(max_concurrent)
         self._workers: list[asyncio.Task]  = []
         self.healthy = False  # Start as False until health probe confirms 200 OK
+        # Set after a request timeout: vLLM /health can return 200 while the engine is wedged,
+        # so a suspect shard is only re-enabled after a real 1-token inference succeeds.
+        self.suspect = False
         self._active_jobs: list[dict]      = []
 
         # Per-shard telemetry counters
@@ -323,13 +326,16 @@ class _EndpointShard:
                 await asyncio.sleep(0.1)
 
             except asyncio.TimeoutError as exc:
-                if attempt == _RETRY_COUNT - 1:
-                    error_tracker.capture_exception(
-                        exc, component="VLMClient", camera=cam_name,
-                        effect=f"Timeout on {self.url} after {_RETRY_COUNT} attempts",
-                        severity="WARNING",
-                    )
-                await asyncio.sleep(0.5)
+                # A 90s timeout means the engine is wedged/overloaded: retrying on the same shard
+                # just stacks 3x90s of dead time. Suspend it and fall through to the fallback result.
+                self.healthy = False
+                self.suspect = True
+                error_tracker.capture_exception(
+                    exc, component="VLMClient", camera=cam_name,
+                    effect=f"Timeout on {self.url}; shard suspended until a real inference probe passes",
+                    severity="WARNING",
+                )
+                break
 
             except Exception as exc:
                 if attempt == _RETRY_COUNT - 1:
@@ -501,6 +507,10 @@ class MIGAwareVLMPool:
     def has_healthy_shards(self) -> bool:
         """Returns True if at least one shard endpoint is healthy and ready."""
         return any(s.healthy for s in self._shards)
+
+    def healthy_capacity(self) -> int:
+        """Total concurrent inference slots across currently healthy shards."""
+        return sum(s.max_concurrent for s in self._shards if s.healthy)
 
     @property
     def endpoints(self) -> list[dict]:
@@ -915,10 +925,29 @@ Return ONLY valid JSON:
                     try:
                         async with self._session.get(
                             f"{shard.url}/health",
-                            timeout=aiohttp.ClientTimeout(total=3)
+                            timeout=aiohttp.ClientTimeout(total=8)
                         ) as r:
                             was_healthy = shard.healthy
                             shard.healthy = (r.status == 200)
+                            if shard.healthy and shard.suspect:
+                                # /health is shallow; require a real 1-token inference to clear suspicion
+                                try:
+                                    probe = {
+                                        "model": shard.model,
+                                        "messages": [{"role": "user", "content": "ping"}],
+                                        "max_tokens": 1,
+                                        "chat_template_kwargs": {"enable_thinking": False},
+                                    }
+                                    async with self._session.post(
+                                        f"{shard.url}/v1/chat/completions", json=probe,
+                                        timeout=aiohttp.ClientTimeout(total=15)
+                                    ) as pr:
+                                        if pr.status == 200:
+                                            shard.suspect = False
+                                        else:
+                                            shard.healthy = False
+                                except Exception:
+                                    shard.healthy = False
                             if not was_healthy and shard.healthy:
                                 print(f"[VLMPool] ✅ Shard {shard.url} is ONLINE and healthy")
                                 # Auto-detect model if missing

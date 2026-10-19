@@ -41,6 +41,7 @@ from backend.core.config import (
     FEED_TICK_SEC,
     IDLE_TICK_SEC,
     QUEUE_CAP_PER_WORKER,
+    TRIGGER_RESERVED_SLOTS,
     TEMPORAL_THUMB_WIDTH,
     TEMPORAL_THUMB_QUALITY,
     HIGH_RES_FRAME_WIDTH,
@@ -59,6 +60,7 @@ class DeadlineScheduler:
     FEED_TICK = FEED_TICK_SEC
     IDLE_TICK = IDLE_TICK_SEC
     QUEUE_CAP_PER_WORKER = QUEUE_CAP_PER_WORKER
+    TRIGGER_RESERVED_SLOTS = TRIGGER_RESERVED_SLOTS
 
     def __init__(
         self,
@@ -90,7 +92,13 @@ class DeadlineScheduler:
         self._max_concurrency = max_concurrency
         self._running = False
         self._last_analyzed: dict[str, float] = {}
-        self._in_flight: set[str] = set()
+        self._in_flight: set[str] = set()   # union view: cams with an outstanding heartbeat or trigger job
+        # Job lifecycle tracking (all keyed by cam unless noted; jid = unique job id)
+        self._hb: dict[str, dict] = {}          # outstanding (queued or running) heartbeat job per cam
+        self._inc: dict[str, dict] = {}         # outstanding (queued or running) trigger incident per cam
+        self._pending_inc: dict[str, dict] = {} # trigger that arrived while one was running (coalesced)
+        self._running_jids: set = set()         # jids currently executing in a worker
+        self._superseded: set = set()           # jids queued but replaced; workers skip them
         self._workers: list[asyncio.Task] = []
         self._queue: Optional[asyncio.PriorityQueue] = None
         self._seq: int = 0
@@ -183,23 +191,104 @@ class DeadlineScheduler:
 
     # ── Priority Tier Enqueueing ────────────────────────────────────
 
-    async def queue_incident(self, incident: dict) -> None:
-        """Enqueue a prioritized incident trigger (Tier-1 Follow-Up, Tier-2 Major, Tier-3 Minor)."""
-        if not self._running or self._queue is None:
-            return
+    def _refresh_in_flight(self, cam: str) -> None:
+        """Keep the `_in_flight` union view in sync with outstanding heartbeat/trigger jobs."""
+        if cam in self._hb or cam in self._inc:
+            self._in_flight.add(cam)
+        else:
+            self._in_flight.discard(cam)
+
+    def _heartbeat_slot_limit(self) -> int:
+        """
+        Max heartbeat jobs allowed outstanding (queued + running). Sized against *healthy*
+        inference capacity minus TRIGGER_RESERVED_SLOTS so at least one slot is always free
+        for triggers/follow-ups. Always >= 1 so heartbeats never fully starve.
+        """
+        workers = max(1, len(self._workers))
+        try:
+            cap = int(self.vlm_pool.healthy_capacity())
+        except Exception:
+            cap = 0
+        usable = min(workers, cap) if cap > 0 else workers
+        return max(1, usable - self.TRIGGER_RESERVED_SLOTS)
+
+    async def _enqueue_incident(self, incident: dict) -> None:
+        """Assign a job id, track it as the cam's outstanding trigger, and queue by tier priority."""
         cam_name = incident.get("cam", "")
-        # Prevent piling up identical camera jobs in queue
-        if cam_name in self._in_flight:
-            return
-        self._in_flight.add(cam_name)
         tier = incident.get("tier", 2)
         # Tier-1 (Followup) and Tier-2 (Major Shift): Priority 0
         # Tier-3 (Minor Shift / Monitoring): Priority 1
         priority = 0 if tier <= 2 else 1
+        jid = self._next_seq()
+        incident["jid"] = jid
         incident["priority"] = priority
-        await self._queue.put((priority, self._next_seq(), incident))
+        self._inc[cam_name] = incident
+        self._refresh_in_flight(cam_name)
+        await self._queue.put((priority, jid, incident))
         tag = "Major" if tier == 2 else ("Minor" if tier == 3 else "Follow-Up")
         print(f"[Scheduler] 📥 Queued {tag} incident for {cam_name} (Tier-{tier}, Priority {priority})")
+
+    @staticmethod
+    def _merge_incidents(old: dict, new: dict) -> dict:
+        """Newer trigger wins (fresher frames) but keeps the earliest trigger_time and strongest tier."""
+        new["trigger_time"] = min(
+            old.get("trigger_time", new.get("trigger_time", time.monotonic())),
+            new.get("trigger_time", time.monotonic()),
+        )
+        new["tier"] = min(old.get("tier", 2), new.get("tier", 2))
+        return new
+
+    async def queue_incident(self, incident: dict) -> None:
+        """
+        Enqueue a prioritized incident trigger (Tier-1 Follow-Up, Tier-2 Major, Tier-3 Minor).
+
+        Triggers are never dropped:
+          - queued heartbeat for the cam  -> superseded by this trigger
+          - queued trigger for the cam    -> superseded by this (fresher) one, earliest trigger_time kept
+          - trigger already running       -> coalesced into a single pending slot, run right after
+          - heartbeat running             -> trigger runs concurrently on a free (reserved) slot
+        """
+        if not self._running or self._queue is None:
+            return
+        cam_name = incident.get("cam", "")
+        incident.setdefault("trigger_time", time.monotonic())
+
+        existing = self._inc.get(cam_name)
+        if existing is not None:
+            if existing.get("jid") in self._running_jids:
+                pending = self._pending_inc.get(cam_name)
+                self._pending_inc[cam_name] = self._merge_incidents(pending, incident) if pending else incident
+                print(f"[Scheduler] ⏭️  Trigger for {cam_name} coalesced behind running incident (will run next)")
+                return
+            # Queued but not started: replace with the fresher trigger
+            self._superseded.add(existing["jid"])
+            incident = self._merge_incidents(existing, incident)
+            print(f"[Scheduler] 🔁 Queued trigger for {cam_name} superseded by fresher trigger")
+
+        hb = self._hb.get(cam_name)
+        if hb is not None and hb.get("jid") not in self._running_jids:
+            self._superseded.add(hb["jid"])
+            self._hb.pop(cam_name, None)
+
+        await self._enqueue_incident(incident)
+
+    async def _on_job_done(self, job: dict) -> None:
+        """Release lifecycle tracking for a finished job and promote any coalesced trigger."""
+        cam = job.get("cam", "")
+        jid = job.get("jid")
+        self._running_jids.discard(jid)
+        if job.get("is_heartbeat"):
+            cur = self._hb.get(cam)
+            if cur is not None and cur.get("jid") == jid:
+                self._hb.pop(cam, None)
+        elif not job.get("is_followup"):
+            cur = self._inc.get(cam)
+            if cur is not None and cur.get("jid") == jid:
+                self._inc.pop(cam, None)
+                nxt = self._pending_inc.pop(cam, None)
+                if nxt is not None:
+                    await self._enqueue_incident(nxt)
+        self._refresh_in_flight(cam)
 
     # ── Feed loop (Heartbeat check for quiet cameras) ───────────────
 
@@ -219,16 +308,19 @@ class DeadlineScheduler:
                     and now - self._last_analyzed.get(c, 0) >= self.get_cam_heartbeat_interval(c)
                 ]
 
-                queue_cap = max(1, len(self._workers)) * self.QUEUE_CAP_PER_WORKER
-                if eligible and self._queue.qsize() < queue_cap:
+                # Admit a heartbeat only while outstanding heartbeats (queued + running) are below
+                # healthy capacity minus the trigger reserve, so a free slot always exists for triggers.
+                if eligible and len(self._hb) < self._heartbeat_slot_limit():
                     cam = max(
                         eligible,
                         key=lambda c: now - self._last_analyzed.get(c, 0),
                     )
-                    self._in_flight.add(cam)
-                    job = {"cam": cam, "is_heartbeat": True, "tier": 4}
+                    jid = self._next_seq()
+                    job = {"cam": cam, "is_heartbeat": True, "tier": 4, "jid": jid}
+                    self._hb[cam] = job
+                    self._refresh_in_flight(cam)
                     # Tier-4 Routine Heartbeat: Priority 2 (yields to any T1/T2/T3)
-                    await self._queue.put((2, self._next_seq(), job))
+                    await self._queue.put((2, jid, job))
                     await asyncio.sleep(self.FEED_TICK)
                 else:
                     await asyncio.sleep(self.IDLE_TICK)
@@ -255,8 +347,16 @@ class DeadlineScheduler:
                 break
 
             priority, seq, job = item
+            jid = job.get("jid")
+            if jid is not None and jid in self._superseded:
+                # Replaced by a fresher trigger while queued; skip without touching tracking state
+                self._superseded.discard(jid)
+                self._queue.task_done()
+                continue
             job["priority"] = priority
             cam = job.get("cam", "")
+            if jid is not None:
+                self._running_jids.add(jid)
             try:
                 await self._analyze_job(job)
             except Exception as exc:
@@ -268,8 +368,10 @@ class DeadlineScheduler:
                     severity="ERROR",
                 )
             finally:
-                self._in_flight.discard(cam)
-                self._queue.task_done()
+                try:
+                    await self._on_job_done(job)
+                finally:
+                    self._queue.task_done()
 
     def _apply_severity_policy(self, cam_name: str, result: dict) -> None:
         """Apply configured-checklist precedence and conservative severity fallback."""

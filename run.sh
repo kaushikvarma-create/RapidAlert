@@ -152,7 +152,7 @@ python3 scripts/system_health_audit.py --fix || warn "System audit completed wit
 
 # ── Kill orphaned processes from previous runs ───────────────────────
 log "Cleaning up any orphaned backend processes ..."
-pkill -9 -f "apport-gtk" 2>/dev/null || true
+pkill -9 -f "apport" 2>/dev/null || true
 rm -f /var/crash/_usr_bin_python3* 2>/dev/null || true
 pkill -CONT -f "backend.main" 2>/dev/null || true
 pkill -CONT -f "uvicorn.*backend" 2>/dev/null || true
@@ -288,6 +288,7 @@ if [[ "$AUTO_START_VLLM" == "true" ]]; then
                     --enforce-eager \
                     --max-num-seqs \"${VLLM_MAX_SEQS}\" \
                     --limit-mm-per-prompt '{\"image\": 4}' \
+                    --mm-processor-cache-gb 0 \
                     --trust-remote-code \
                     ${EP_QUANTIZATION:+--quantization \"${EP_QUANTIZATION}\"} \
                     --disable-log-stats \

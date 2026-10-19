@@ -47,7 +47,7 @@ DEFAULT_VLLM_PORT = 8000
 DEFAULT_VLLM_HOST = "http://localhost:8000"
 
 # AI Models
-DEFAULT_VLM_MODEL = "Qwen/Qwen3.5-9B"
+DEFAULT_VLM_MODEL = "cyankiwi/Qwen3.5-9B-AWQ-4bit"
 DEFAULT_DINOV2_MODEL = "facebook/dinov2-small"
 
 # Video Ingest & Image Resolutions
@@ -82,6 +82,7 @@ DEFAULT_PERSISTENT_FOLLOWUP = True # persist follow-up until severity stabilizes
 DEFAULT_INITIAL_CONCURRENCY = 4
 DEFAULT_MAX_CONCURRENCY = 8
 QUEUE_CAP_PER_WORKER = 1
+TRIGGER_RESERVED_SLOTS = 1         # inference slots never filled by routine heartbeats (kept free for triggers)
 FEED_TICK_SEC = 0.005              # 5ms feed loop frequency
 IDLE_TICK_SEC = 0.05               # 50ms idle sleep when queue full or no cams
 TUNE_INTERVAL_SEC = 15.0           # auto-tune worker check interval

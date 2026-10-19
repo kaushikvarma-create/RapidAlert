@@ -215,7 +215,10 @@ class SceneTriggerEngine:
                                 self._collect_incident(cam_name, distance, frame_ts, trigger_time=t_trigger, tier=tier)
                             )
 
-                # Broadcast live drift metrics to dashboard every 1s
+                    # Cooperative event loop yield: give 40ms breathing room to Uvicorn between camera inferences
+                    await asyncio.sleep(0.04)
+
+                # Small pause before next pass
                 await asyncio.sleep(0.05)
             except asyncio.CancelledError:
                 break

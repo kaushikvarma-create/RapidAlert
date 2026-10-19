@@ -319,7 +319,7 @@ class SystemWatchdog:
         if now - self._last_process_sweep_ts >= 30.0:
             self._last_process_sweep_ts = now
             try:
-                self.audit_and_sanitize_processes(startup=False)
+                await asyncio.to_thread(self.audit_and_sanitize_processes, False)
             except Exception as exc:
                 print(f"[Watchdog] ⚠️ Error during process sanitation sweep: {exc}")
 
@@ -373,8 +373,8 @@ class SystemWatchdog:
                     details={"Active Cameras": total_cams},
                 )
 
-        # ── 3. Memory Pressure & Periodic GC Sweep ─────────────────────────────
-        gc.collect()
+        # ── 3. Memory Pressure Monitoring ──────────────────────────────────────
+        # Note: Avoid manual synchronous gc.collect() on event loop to prevent latency spikes.
 
         # ── 4. Docker Container Crash Audit & Self-Healing Restarts ────────────
         await self._audit_and_heal_containers()

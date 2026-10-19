@@ -24,7 +24,7 @@ from typing import Optional, Dict, Any, List, Tuple
 import weasyprint
 from jinja2 import Environment
 
-from backend.core.config import DATABASE_PATH, SYSTEM_CONFIG_PATH
+from backend.core.config import DATABASE_PATH, SYSTEM_CONFIG_PATH, DEFAULT_VLM_MODEL
 from backend.core.error_tracker import error_tracker
 from backend.core.shutdown_logger import log_system_event
 
@@ -108,6 +108,10 @@ class ReportingService:
             pass
         return {}
 
+    def _get_vlm_model(self) -> str:
+        cfg = self._get_sys_config()
+        return cfg.get("vllm_model") or cfg.get("primary_model") or DEFAULT_VLM_MODEL
+
     def _enforce_rolling_buffer(self) -> int:
         """
         Enforces a rolling buffer of MAX_REPORTS_BUFFER (69 reports).
@@ -163,7 +167,7 @@ class ReportingService:
             resp = requests.post(
                 "http://localhost:8000/v1/chat/completions",
                 json={
-                    "model": "Qwen/Qwen3.5-9B",
+                    "model": self._get_vlm_model(),
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.2,
                     "max_tokens": 60,
@@ -200,7 +204,7 @@ class ReportingService:
             resp = requests.post(
                 "http://localhost:8000/v1/chat/completions",
                 json={
-                    "model": "Qwen/Qwen3.5-9B",
+                    "model": self._get_vlm_model(),
                     "messages": [{
                         "role": "user",
                         "content": [

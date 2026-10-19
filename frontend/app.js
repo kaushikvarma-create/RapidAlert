@@ -35,11 +35,6 @@ const App = {
     this._initAudio();
     this.bindUIEvents();
     this._bindWakeListeners();
-    this._fetchVLMEndpoints();
-    this._fetchInitialAlerts();
-    this._fetchReportingStats();
-    this._fetchReports();
-    this._fetchActiveStreams();
     this.connectWS();
     this.startLivenessWatchdog();
     this._startStreamWatchdog();
@@ -190,13 +185,33 @@ const App = {
   },
 
   _bindWakeListeners() {
-    // When user unlocks OS / returns to tab after screen sleep
+    // When user unlocks OS / returns to tab after screen sleep or switches tabs
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') {
         this.onTabWake();
+      } else {
+        this.onTabSleep();
       }
     });
     window.addEventListener('focus', () => this.onTabWake());
+
+    // Immediate stream & socket teardown on reload or page navigation:
+    // Releases browser HTTP connections instantly so the next load has 0 queue latency.
+    window.addEventListener('beforeunload', () => {
+      this.onTabSleep();
+      if (this.ws) {
+        try { this.ws.close(); } catch (_) {}
+      }
+    });
+    window.addEventListener('pagehide', () => {
+      this.onTabSleep();
+    });
+  },
+
+  onTabSleep() {
+    for (const name of Object.keys(this.cameras || {})) {
+      this._detachDirectStream(name);
+    }
   },
 
   onTabWake() {
@@ -210,7 +225,7 @@ const App = {
       this.connectWS();
     }
     this._fetchStatusSnapshot();
-    this._fetchInitialAlerts();
+    this._syncStreamsToDisplay();
   },
 
   async _fetchStatusSnapshot() {
@@ -738,7 +753,7 @@ const App = {
     const cardImg = document.getElementById(`cam-card-img-${eid}`);
     if (!cardImg) return;
 
-    const streamUrl = `/api/cameras/${encodeURIComponent(name)}/stream?width=1280&quality=78`;
+    const streamUrl = `/api/cameras/${encodeURIComponent(name)}/stream?width=640&quality=70`;
     const curSrc = cardImg.getAttribute('src') || '';
     if (forceRefresh || !curSrc || !curSrc.includes(`/api/cameras/${encodeURIComponent(name)}/stream`)) {
       cardImg.src = `${streamUrl}&t=${Date.now()}`;
@@ -754,9 +769,7 @@ const App = {
   },
 
   // ── Stream policy ─────────────────────────────────────────────
-  // Browsers allow only ~6 HTTP/1.1 connections per host and every MJPEG stream
-  // holds one forever. Keep live streams below that so API fetches never starve.
-  MAX_LIVE_STREAMS: 5,
+  MAX_LIVE_STREAMS: 6,
   _MODAL_IDS: ['cam-modal', 'alert-modal', 'modal-archive', 'modal-reports-explorer',
     'settings-panel', 'modal-vlm-inspector', 'modal-errors', 'modal-test-trigger', 'modal-admin-auth'],
 
@@ -775,7 +788,7 @@ const App = {
     return eligible
       .slice(start, start + this.camsPerPage)
       .filter(n => this.cameras[n]?.config?.enabled !== false)
-      .slice(0, this.MAX_LIVE_STREAMS);
+      .slice(0, this.camsPerPage);
   },
 
   _streamWanted(name) {
@@ -2460,7 +2473,7 @@ const App = {
       this.modalViewMode = 'live';
       this.selectedEventIdx = null;
       if (img) {
-        const streamSrc = `/api/cameras/${encodeURIComponent(name)}/stream`;
+        const streamSrc = `/api/cameras/${encodeURIComponent(name)}/stream?width=1280&quality=80`;
         img.src = streamSrc;
         img.style.display = 'block';
         if (loading) loading.style.display = 'none';

@@ -263,7 +263,11 @@ class ContainerManager:
 
         # Clean any old broken container
         try:
-            await asyncio.create_subprocess_exec("docker", "rm", "-f", cname)
+            rm_proc = await asyncio.create_subprocess_exec(
+                "docker", "rm", "-f", cname,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(rm_proc.wait(), timeout=30.0)
             await asyncio.sleep(0.5)
         except Exception:
             pass
@@ -309,6 +313,7 @@ class ContainerManager:
                 f'--enforce-eager '
                 f'--max-num-seqs {max_seqs} '
                 f'--limit-mm-per-prompt \'{{"image": 4}}\' '
+                f'--mm-processor-cache-gb 0 '
                 f'--trust-remote-code '
                 f'--disable-log-stats '
                 f'--no-enable-log-requests'
