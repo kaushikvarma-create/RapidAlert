@@ -26,7 +26,10 @@ MEDIAMTX_HLS_PORT = 8888
 
 def get_safe_cam_slug(cam_name: str) -> str:
     """Normalize camera name into URL-safe path slug for MediaMTX (e.g. '1ST_ENTRANCE' -> '1st_entrance')."""
-    return cam_name.strip().lower().replace(" ", "_").replace("-", "_")
+    # Only a-z, 0-9 and _ : anything else (spaces, hyphens, #, &, /, quotes, non-ASCII) becomes _.
+    # frontend/app.js _getCamSlug must produce exactly the same string.
+    import re
+    return re.sub(r"[^a-z0-9_]", "_", cam_name.strip().lower()) or "cam"
 
 
 class MediaMTXService:
@@ -42,6 +45,7 @@ class MediaMTXService:
     def generate_config(self, cameras: List[Dict[str, Any]]) -> str:
         """Generate mediamtx.yml content dynamically from camera registry."""
         paths_config: Dict[str, Any] = {}
+        live_sources: Dict[str, str] = {}
         for cam in cameras:
             name = cam.get("name")
             url = cam.get("url")
@@ -50,10 +54,25 @@ class MediaMTXService:
                 continue
 
             slug = get_safe_cam_slug(name)
+            # Browser live view: "<slug>_live" is published by scripts/stream_transcode.sh, which
+            # MediaMTX starts when the first viewer connects and stops after the last one leaves.
+            # It hardware-transcodes the camera's H.265 to H.264 so WebRTC can carry it.
+            live_sources[f"{slug}_live"] = url
+            paths_config[f"{slug}_live"] = {
+                "runOnDemand": str(self.root_dir / "scripts" / "stream_transcode.sh"),
+                "runOnDemandRestart": True,
+                "runOnDemandStartTimeout": "15s",
+                "runOnDemandCloseAfter": "10s",
+            }
             paths_config[slug] = {
                 "source": url,
                 "sourceProtocol": "tcp",
-                "sourceOnDemand": False,
+                # Pull from the camera only while a viewer is connected. With False, MediaMTX held a
+                # second permanent session on every camera's main stream (~50 Mbit/s for 18
+                # cameras) even though the dashboard currently has no HLS/WebRTC player.
+                "sourceOnDemand": True,
+                "sourceOnDemandStartTimeout": "10s",
+                "sourceOnDemandCloseAfter": "10s",
             }
 
         config_dict = {
@@ -62,6 +81,9 @@ class MediaMTXService:
             "api": True,
             "apiAddress": "127.0.0.1:9997",
             "rtspAddress": ":8554",
+            # Local-only RTMP ingest for the on-demand live transcoders.
+            "rtmp": True,
+            "rtmpAddress": "127.0.0.1:1935",
             "hls": True,
             "hlsAddress": ":8888",
             "hlsAllowOrigin": "*",
@@ -79,6 +101,10 @@ class MediaMTXService:
         }
 
         self.stream_dir.mkdir(parents=True, exist_ok=True)
+        # slug -> camera URL map read by scripts/stream_transcode.sh (stream/ is gitignored).
+        import json
+        with open(self.stream_dir / "live_sources.json", "w", encoding="utf-8") as f:
+            json.dump(live_sources, f)
         yml_str = yaml.dump(config_dict, sort_keys=False)
         with open(self.yml_path, "w", encoding="utf-8") as f:
             f.write(yml_str)

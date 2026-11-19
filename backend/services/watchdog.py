@@ -22,10 +22,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Callable
 
-from backend.core.config import DATABASE_PATH
+from backend.core.config import DATABASE_PATH, ROOT_DIR
 from backend.core.error_tracker import error_tracker
 from backend.services.container_manager import ContainerManager, container_manager
 from backend.services.watchdog_emailer import WatchdogEmailer
+
+_PROJECT_ROOT = os.path.realpath(str(ROOT_DIR))
 
 
 class SystemWatchdog:
@@ -152,6 +154,11 @@ class SystemWatchdog:
         cleaned_events: list[dict] = []
         current_pid = os.getpid()
         current_ppid = os.getppid()
+        # Our own process group / session (launcher, uvicorn, children) is never a "stale" target.
+        try:
+            own_pgid = os.getpgid(0)
+        except OSError:
+            own_pgid = -1
 
         # 1. Clean any runaway crash dumps in /var/crash
         try:
@@ -175,24 +182,10 @@ class SystemWatchdog:
         except Exception:
             pass
 
-        # 2. Reaping immediate child zombies via waitpid
-        try:
-            while True:
-                wpid, status = os.waitpid(-1, os.WNOHANG)
-                if wpid <= 0:
-                    break
-                evt = {
-                    "pid": wpid,
-                    "name": "child_worker",
-                    "cmd": "child_process",
-                    "rss_mb": 0.0,
-                    "cpu_pct": 0.0,
-                    "reason": "Reaped Child Zombie Process",
-                }
-                cleaned_events.append(evt)
-                self._record_sanitation(evt)
-        except (ChildProcessError, OSError):
-            pass
+        # NOTE: never call os.waitpid(-1) here. This process's children (docker, nmcli, ip,
+        # ffmpeg, nvidia-smi, mediamtx) are owned by asyncio / subprocess, which reap them
+        # themselves. Reaping them from this thread steals their exit status, so callers see a
+        # bogus failure (e.g. `docker inspect` reported as "container not found").
 
         # 3. Scan system /proc
         for p_dir in glob.glob("/proc/[0-9]*"):
@@ -212,59 +205,71 @@ class SystemWatchdog:
                 rest = stat_content[r_paren + 2 :].split()
                 state = rest[0]
                 ppid = int(rest[1])
+                pgrp = int(rest[2])
+                if state == "Z" or ppid == current_pid or pgrp == own_pgid:
+                    continue
                 rss_pages = int(rest[21]) if len(rest) > 21 else 0
                 rss_mb = (rss_pages * 4096) / (1024 * 1024)
 
-                # Read cmdline
+                # Read cmdline as real argv tokens. Matching on substrings of the joined command
+                # line killed unrelated processes (any shell, grep, editor or pgrep whose arguments
+                # merely mentioned the backend), so every rule below matches argv positions.
                 try:
                     with open(f"{p_dir}/cmdline", "rb") as f:
-                        cmdline = f.read().replace(b"\x00", b" ").decode("utf-8", errors="ignore").strip()
+                        argv = [a.decode("utf-8", errors="ignore") for a in f.read().split(b"\x00") if a]
                 except Exception:
-                    cmdline = comm
+                    argv = []
+                cmdline = " ".join(argv) if argv else comm
+                exe_name = os.path.basename(argv[0]) if argv else comm
+
+                # Only processes started from this project directory can be "ours".
+                try:
+                    in_project = os.path.realpath(os.readlink(f"{p_dir}/cwd")).startswith(_PROJECT_ROOT)
+                except OSError:
+                    in_project = False
 
                 should_kill = False
                 reason = ""
 
                 # Rule A: Rogue apport crash reporter GUI
-                if comm in ("apport-gtk", "apport") or "apport-gtk" in cmdline:
+                if comm in ("apport-gtk", "apport") or exe_name == "apport-gtk":
                     should_kill = True
                     reason = f"Rogue Apport Crash Daemon ({rss_mb:.1f} MB RAM)"
 
                 # Rule B: Stale uvicorn backend process from a prior run
-                elif ("uvicorn" in cmdline and "backend.main" in cmdline) and pid != current_pid:
+                elif (
+                    in_project
+                    and exe_name.startswith("python")
+                    and "uvicorn" in argv[1:4]
+                    and any(a.startswith("backend.main:") for a in argv)
+                ):
                     should_kill = True
                     reason = "Stale Uvicorn Backend Instance"
 
                 # Rule C: Stale launcher script
-                elif ("bash ./run.sh" in cmdline or "bash run.sh" in cmdline) and pid not in (current_pid, current_ppid):
+                elif (
+                    in_project
+                    and exe_name in ("bash", "sh")
+                    and len(argv) >= 2
+                    and os.path.basename(argv[1]) == "run.sh"
+                    and pid != current_ppid
+                ):
                     should_kill = True
                     reason = "Stale run.sh Launcher Script"
 
                 # Rule D: Orphaned multiprocessing spawn worker
-                elif "from multiprocessing.spawn import spawn_main" in cmdline and ppid in (1, 0):
+                elif (
+                    in_project
+                    and exe_name.startswith("python")
+                    and ppid in (1, 0)
+                    and any("from multiprocessing.spawn import spawn_main" in a for a in argv)
+                ):
                     should_kill = True
                     reason = "Orphaned Multiprocessing Spawn Worker"
 
-                # Rule E: Zombie process whose parent is not us
-                elif state == "Z":
-                    if ppid != 1 and os.path.exists(f"/proc/{ppid}"):
-                        try:
-                            with open(f"/proc/{ppid}/cmdline", "rb") as f:
-                                p_cmd = f.read().replace(b"\x00", b" ").decode("utf-8", errors="ignore")
-                            if "run.sh" in p_cmd or "uvicorn" in p_cmd:
-                                os.kill(ppid, signal.SIGTERM)
-                                evt = {
-                                    "pid": ppid,
-                                    "name": "stale_parent",
-                                    "cmd": p_cmd,
-                                    "rss_mb": 0.0,
-                                    "cpu_pct": 0.0,
-                                    "reason": f"Parent of Zombie {pid} Terminated ({comm})",
-                                }
-                                cleaned_events.append(evt)
-                                self._record_sanitation(evt)
-                        except Exception:
-                            pass
+                # Zombies are deliberately left alone: a zombie cannot be killed, only reaped by
+                # its parent, and signalling the parent meant SIGTERMing this backend whenever one
+                # of its own short-lived children was caught between exit and reap.
 
                 if should_kill:
                     try:
@@ -524,6 +529,26 @@ class SystemWatchdog:
                         },
                     )
 
+        # Containers have a Docker restart policy, so a crash is normally repaired by Docker before
+        # this audit ever sees an "exited" state. Report it anyway: each new Docker restart is a
+        # crash someone should know about, and a rising count is a crash loop.
+        if not hasattr(self, "_docker_restart_counts"):
+            self._docker_restart_counts = {}
+        for ep in endpoint_states:
+            count = ep["cinfo"].get("docker_restarts")
+            if count is None:
+                continue
+            prev = self._docker_restart_counts.get(ep["cname"])
+            self._docker_restart_counts[ep["cname"]] = count
+            if prev is not None and count > prev:
+                error_tracker.capture_error(
+                    message=(f"Container {ep['cname']} crashed and was restarted by Docker "
+                             f"({count} restart(s) since it was created)"),
+                    component="ContainerWatchdog",
+                    effect="Shard unavailable while the model reloads; repeated restarts mean a crash loop",
+                    severity="CRITICAL",
+                )
+
         # ─── PART 1: CRASH-ONLY SELF-HEALING ─────────────────────────────────
         # STRICT RULE: Watchdog CANNOT kill or restart a running container.
         # Only if the container is confirmed dead/stopped on its own (OOM, exited, missing).
@@ -540,7 +565,7 @@ class SystemWatchdog:
             crash_reason = ""
 
             # If inspect timed out or transient state, DO NOT TOUCH!
-            if cinfo.get("status") == "inspect_timeout":
+            if cinfo.get("status") in ("inspect_timeout", "inspect_error"):
                 continue
 
             # Case A: Missing from Docker completely
@@ -550,7 +575,10 @@ class SystemWatchdog:
                     crash_reason = f"Container '{cname}' does not exist in Docker engine"
 
             # Case B: Linux Kernel OOM Killed
-            elif cinfo.get("oom_killed", False):
+            elif cinfo.get("oom_killed", False) and not cinfo.get("running", False):
+                # Only while it is actually down. Docker's restart policy can bring an OOM-killed
+                # container back by itself, and its OOMKilled flag stays set until the next stop,
+                # so acting on the flag alone would restart a container that is already running.
                 needs_restart = True
                 crash_reason = f"Linux Kernel OOM Killed (Out of Memory, Exit Code {cinfo.get('exit_code', -1)})"
 

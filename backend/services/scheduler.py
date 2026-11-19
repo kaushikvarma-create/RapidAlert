@@ -47,6 +47,7 @@ from backend.core.config import (
     HIGH_RES_FRAME_WIDTH,
     HIGH_RES_JPEG_QUALITY,
 )
+from backend.core.config import config_manager
 from backend.core.error_tracker import error_tracker
 
 if TYPE_CHECKING:
@@ -61,6 +62,7 @@ class DeadlineScheduler:
     IDLE_TICK = IDLE_TICK_SEC
     QUEUE_CAP_PER_WORKER = QUEUE_CAP_PER_WORKER
     TRIGGER_RESERVED_SLOTS = TRIGGER_RESERVED_SLOTS
+    PLACEHOLDER_RETRY_SEC = 30.0   # re-check a camera this soon after a warmup/unavailable reply
 
     def __init__(
         self,
@@ -130,6 +132,19 @@ class DeadlineScheduler:
                         severity="WARNING",
                     )
         return float(self.default_heartbeat_sec)
+
+    def _heartbeat_intervals(self) -> dict[str, float]:
+        """Per-camera heartbeat overrides from one config read (cameras without one are omitted)."""
+        out: dict[str, float] = {}
+        for c in self.camera_manager.get_config():
+            hb = c.get("heartbeat_sec")
+            if hb is None:
+                continue
+            try:
+                out[c.get("name")] = float(hb)
+            except (ValueError, TypeError):
+                continue  # invalid override: fall back to the default interval
+        return out
 
     def _next_seq(self) -> int:
         self._seq += 1
@@ -301,11 +316,18 @@ class DeadlineScheduler:
             try:
                 cams = self.camera_manager.get_active_cameras()
                 now = time.monotonic()
+                # This loop ticks every 5-50ms, so everything in it must be cheap:
+                #  - one config read per tick (get_cam_heartbeat_interval re-read and copied the
+                #    whole camera config once per camera per tick);
+                #  - cheapest checks first, and has_frames() instead of get_latest(), which copied
+                #    a full-resolution frame per idle camera per tick just to test for None.
+                intervals = self._heartbeat_intervals()
+                default_hb = float(self.default_heartbeat_sec)
                 eligible = [
                     c for c in cams
                     if c not in self._in_flight
-                    and self.frame_store.get_latest(c) is not None
-                    and now - self._last_analyzed.get(c, 0) >= self.get_cam_heartbeat_interval(c)
+                    and now - self._last_analyzed.get(c, 0) >= intervals.get(c, default_hb)
+                    and self.frame_store.has_frames(c)
                 ]
 
                 # Admit a heartbeat only while outstanding heartbeats (queued + running) are below
@@ -478,7 +500,8 @@ class DeadlineScheduler:
                 self.frame_store.get_snapshot_b64(cam_name, max_w=HIGH_RES_FRAME_WIDTH, quality=HIGH_RES_JPEG_QUALITY)
                 or (thumbs_b64[-1] if thumbs_b64 else None)
             )
-            job_labels = ["t -10.0s", "t -6.5s", "t -3.0s", "t 0.0s (Current)"]
+            # Must match FrameStore._select_temporal(count=4, span_sec=10.0)
+            job_labels = ["t -10.0s", "t -6.7s", "t -3.3s", "t 0.0s (Current)"]
 
         if not frames_b64:
             return
@@ -493,6 +516,32 @@ class DeadlineScheduler:
         t0 = time.monotonic()
         priority = job.get("priority", 0 if is_incident else 2)
         res = await self.vlm_pool.analyze(cam_name, frames_b64, prompt, labels=job_labels, priority=priority)
+
+        # The pool returns a placeholder instead of raising when no shard could answer: "warmup"
+        # while the models load, or "VLM unavailable" after retries/timeouts. Those are not
+        # analyses. Previously they were stored, counted in latency metrics and written to the
+        # database as LOW/OK results, and the camera then waited a full heartbeat interval.
+        # Now: tell the dashboard (so the card can show the state), record nothing, retry soon.
+        if res.get("verdict") == "WARMUP" or res.get("error"):
+            retry_at = time.monotonic() - max(0.0, self.get_cam_heartbeat_interval(cam_name) - self.PLACEHOLDER_RETRY_SEC)
+            self._last_analyzed[cam_name] = retry_at
+            if self.broadcast_fn:
+                await self.broadcast_fn({
+                    "type": "result_concurrent",
+                    "cam": cam_name,
+                    "results": [res],
+                    "thumbnails_b64": thumbs_b64,
+                    "drift": drift_score,
+                    "is_incident": False,
+                    "is_followup": False,
+                    "cycle": cycle,
+                    "labels": job_labels,
+                    "latency": None,
+                    "e2e_latency": None,
+                    "trigger_to_post": None,
+                })
+            return
+
         res["model"] = DEFAULT_VLM_MODEL
         self._apply_severity_policy(cam_name, res)
         latency = res.get("latency", time.monotonic() - t0)
@@ -555,28 +604,33 @@ class DeadlineScheduler:
                     or (alert.get("id") if alert else f"INC-{cam_name}-{int(rec_ts)}")
                 )
 
-                self.storage.save(
-                    dict(res, cam=cam_name),
-                    latency=latency,
-                    e2e_latency=e2e_latency,
-                    incident_id=inc_target_id,
-                    event_id=alert.get("id") if alert else inc_target_id,
-                    parent_id=alert.get("parent_id") if alert else parent_id,
-                    trigger_mode=alert.get("trigger_mode") if alert else ("TRIGGER" if is_incident else ("FOLLOWUP" if is_followup else "PERIODIC")),
-                    clip_path=alert.get("clip_path") if alert else None,
-                    labels=job_labels,
-                )
-                if thumbs_b64 and len(thumbs_b64) > 0:
-                    self.storage.save_incident_frames(
+                def _persist() -> None:
+                    self.storage.save(
+                        dict(res, cam=cam_name),
+                        latency=latency,
+                        e2e_latency=e2e_latency,
                         incident_id=inc_target_id,
                         event_id=alert.get("id") if alert else inc_target_id,
-                        cam=cam_name,
-                        frames=thumbs_b64,
-                        ts=rec_ts,
-                        frame_timestamps=frame_timestamps,
-                        max_sets=self.incident_frames_max_sets,
-                        max_gb=self.incident_frames_max_gb,
+                        parent_id=alert.get("parent_id") if alert else parent_id,
+                        trigger_mode=alert.get("trigger_mode") if alert else ("TRIGGER" if is_incident else ("FOLLOWUP" if is_followup else "PERIODIC")),
+                        clip_path=alert.get("clip_path") if alert else None,
+                        labels=job_labels,
                     )
+                    if thumbs_b64 and len(thumbs_b64) > 0:
+                        self.storage.save_incident_frames(
+                            incident_id=inc_target_id,
+                            event_id=alert.get("id") if alert else inc_target_id,
+                            cam=cam_name,
+                            frames=thumbs_b64,
+                            ts=rec_ts,
+                            frame_timestamps=frame_timestamps,
+                            max_sets=self.incident_frames_max_sets,
+                            max_gb=self.incident_frames_max_gb,
+                        )
+
+                # SQLite writes (and their lock waits) run in a worker thread: done inline they
+                # froze the event loop whenever another connection held the database.
+                await asyncio.to_thread(_persist)
             except Exception as exc:
                 error_tracker.capture_exception(
                     exc,
@@ -732,11 +786,13 @@ class DeadlineScheduler:
                 )
                 return
 
-            step = max(1.0, delay_sec / 4.0)
+            # The 4 frames span exactly the `delay_sec` since the previous check (see
+            # FrameStore._select_temporal), so the first one is the moment of that check.
+            step = delay_sec / 3.0
             followup_labels = [
+                "t +0.0s (Previous check)",
                 f"t +{step:.1f}s",
                 f"t +{step * 2:.1f}s",
-                f"t +{step * 3:.1f}s",
                 f"t +{delay_sec:.1f}s (Outcome)",
             ]
             followup_job = {
@@ -848,6 +904,15 @@ class DeadlineScheduler:
                 await asyncio.sleep(300)
                 if self.storage and self.clip_rolling_buffer_enabled:
                     await asyncio.to_thread(self.storage.prune_expired_clips, self.clip_retention_hours)
+                if self.storage:
+                    cfg = config_manager.get()
+                    await asyncio.to_thread(
+                        self.storage.apply_retention,
+                        float(getattr(cfg, "retention_important_days", 90.0)),
+                        float(getattr(cfg, "retention_low_trigger_hours", 72.0)),
+                        float(getattr(cfg, "retention_low_periodic_hours", 36.0)),
+                        float(getattr(cfg, "retention_analysis_days", 90.0)),
+                    )
             except asyncio.CancelledError:
                 break
             except Exception as exc:

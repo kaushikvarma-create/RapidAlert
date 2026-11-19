@@ -35,6 +35,8 @@ class StorageManager:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA cache_size=-8000")
+            # Wait for a competing writer (e.g. a retention batch) instead of failing after 5s.
+            conn.execute("PRAGMA busy_timeout=30000")
             self._local.conn = conn
         return self._local.conn
 
@@ -718,6 +720,86 @@ class StorageManager:
                 severity="WARNING",
             )
             return 0
+
+    def apply_retention(
+        self,
+        important_days: float = 90.0,
+        low_trigger_hours: float = 72.0,
+        low_periodic_hours: float = 36.0,
+        analysis_days: float = 90.0,
+        batch_rows: int = 2000,
+        max_batches: int = 20,
+    ) -> dict:
+        """
+        Retention by importance instead of by age alone.
+
+        Stored frames are ~all of the database's size, and almost all of them belong to routine
+        LOW checks. The old rule (keep the newest N sets) evicted a HIGH incident's evidence at
+        the same age as a routine heartbeat. Now:
+          - frames of MEDIUM/HIGH events, safety WARNING/DANGER and follow-ups: `important_days`
+          - frames of LOW motion-triggered checks (and frames with no analysis row): `low_trigger_hours`
+          - frames of LOW routine (periodic) checks: `low_periodic_hours`
+          - analysis text rows: `analysis_days`
+
+        Deletes in small committed batches so writers are never blocked for long; one call removes
+        at most batch_rows * max_batches frames, so a backlog drains over several calls.
+        Meant to be called from a worker thread.
+        """
+        now = time.time()
+        important = (
+            "(UPPER(COALESCE(a.severity,'')) IN ('MEDIUM','HIGH','EXTREME') "
+            "OR UPPER(COALESCE(a.safety,'')) IN ('WARNING','DANGER','CRITICAL','CAUTION') "
+            "OR UPPER(COALESCE(a.trigger_mode,'')) = 'FOLLOWUP')"
+        )
+        rules = [
+            # (label, cutoff timestamp, extra condition on the joined analysis row)
+            ("low_periodic", now - low_periodic_hours * 3600,
+             f"a.id IS NOT NULL AND NOT {important} AND UPPER(COALESCE(a.trigger_mode,'')) = 'PERIODIC'"),
+            ("low_trigger", now - low_trigger_hours * 3600,
+             f"(a.id IS NULL OR (NOT {important} AND UPPER(COALESCE(a.trigger_mode,'')) <> 'PERIODIC'))"),
+            ("important", now - important_days * 86400, "1=1"),
+        ]
+        removed = {"low_periodic": 0, "low_trigger": 0, "important": 0, "analyses": 0}
+        try:
+            conn = self._conn()
+            batches_left = max_batches
+            for label, cutoff, cond in rules:
+                while batches_left > 0:
+                    cur = conn.execute(
+                        f"""
+                        DELETE FROM incident_frames WHERE id IN (
+                            SELECT f.id FROM incident_frames f
+                            LEFT JOIN analyses a ON a.event_id = f.event_id
+                            WHERE f.ts < ? AND {cond}
+                            LIMIT ?
+                        )
+                        """,
+                        (cutoff, batch_rows),
+                    )
+                    conn.commit()
+                    batches_left -= 1
+                    removed[label] += cur.rowcount
+                    if cur.rowcount < batch_rows:
+                        break
+            # Analysis rows are tiny; trim the very old ones (also clears rows with a bogus timestamp).
+            cur = conn.execute(
+                "DELETE FROM analyses WHERE id IN (SELECT id FROM analyses WHERE ts < ? LIMIT ?)",
+                (now - analysis_days * 86400, batch_rows * 5),
+            )
+            conn.commit()
+            removed["analyses"] = cur.rowcount
+            if any(removed.values()):
+                print(f"[Storage] 🧹 Retention: removed frames {removed['low_periodic']} routine, "
+                      f"{removed['low_trigger']} low-trigger, {removed['important']} aged-out important; "
+                      f"{removed['analyses']} old analysis rows")
+        except Exception as exc:
+            error_tracker.capture_exception(
+                exc,
+                component="StorageManager",
+                effect="Retention pass failed; will retry on the next cycle",
+                severity="WARNING",
+            )
+        return removed
 
     def get_archive_stats(self) -> dict:
         """

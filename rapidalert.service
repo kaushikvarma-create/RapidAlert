@@ -1,7 +1,7 @@
 [Unit]
 Description=RapidAlert AI Surveillance System
-After=network.target docker.service nv-oem-config.service
-Wants=docker.service
+After=network.target docker.service nv-oem-config.service nvidia-mig.service
+Wants=docker.service nvidia-mig.service
 
 [Service]
 Type=simple

@@ -642,6 +642,9 @@ def _persist_cameras() -> None:
         with open(CAMERAS_CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(camera_manager.get_config(), f, indent=2)
         camera_manager._config_mtime = os.path.getmtime(CAMERAS_CONFIG_PATH)
+        # Keep MediaMTX's stream paths in step with the camera list; it reloads its config file
+        # on change, so cameras added or removed in the dashboard get a live view without a restart.
+        mediamtx_service.generate_config(camera_manager.get_config())
     except Exception as e:
         error_tracker.capture_exception(
             e,
@@ -1016,7 +1019,8 @@ async def api_trigger_test_alert(cam: Optional[str] = None, severity: str = "HIG
     temporal_snaps = frame_store.get_temporal_snapshots_b64(
         cam_name, count=4, span_sec=10.0, max_w=TEMPORAL_THUMB_WIDTH, quality=TEMPORAL_THUMB_QUALITY
     )
-    labels = ["t -10.0s", "t -5.0s", "t -2.0s", "t 0.0s (Trigger)"]
+    # Must match FrameStore._select_temporal(count=4, span_sec=10.0), which picks these frames.
+    labels = ["t -10.0s", "t -6.7s", "t -3.3s", "t 0.0s (Trigger)"]
     alert = await alert_engine.process(
         cam_name=cam_name,
         result={
@@ -1161,7 +1165,7 @@ async def api_network_status():
 @app.post("/api/network/hotspot/start", dependencies=[Depends(require_admin)])
 async def api_network_hotspot_start():
     """Manually start the godofthunder hotspot."""
-    return await network_service.start_hotspot()
+    return await network_service.start_hotspot(manual=True)
 
 
 @app.post("/api/network/hotspot/stop", dependencies=[Depends(require_admin)])
@@ -1356,27 +1360,17 @@ async def api_generate_report(body: GenerateReportBody = Body(...)):
 @app.get("/api/reports/stats")
 def api_get_reporting_stats():
     """Returns reporting schedule status, buffer capacity, recipients, and next scheduled runs."""
+    # Reports go out at every 6-hour slot (see ReportingService._due_reports).
     now = datetime.now()
-    today_6am = now.replace(hour=6, minute=0, second=0, microsecond=0)
-    today_6pm = now.replace(hour=18, minute=0, second=0, microsecond=0)
-    tomorrow_6am = (now + timedelta(days=1)).replace(hour=6, minute=0, second=0, microsecond=0)
-    
-    if now < today_6am:
-        next_run = today_6am
-        next_shift = "NIGHT"
-    elif now < today_6pm:
-        next_run = today_6pm
-        next_shift = "DAY"
-    else:
-        next_run = tomorrow_6am
-        next_shift = "NIGHT"
+    next_run = (now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=6 - now.hour % 6))
+    next_shift = ", ".join(lbl.split(" (")[0] for lbl, _, _ in reporting_service._due_reports(next_run)) or "6-HOUR"
 
     sys_cfg = config_manager.get()
     buf_stats = reporting_service.get_buffer_stats()
 
     return {
         "enabled": getattr(sys_cfg, "reporting_enabled", True),
-        "schedule_hours": [6, 18],
+        "schedule_hours": [0, 6, 12, 18],
         "next_scheduled_run": next_run.strftime("%b %d, %Y %H:%M:%S IST"),
         "next_shift": next_shift,
         "recipients": getattr(sys_cfg, "report_email_recipients", ["pandalavacarji@gmail.com", "reportsclove@gmail.com"]),

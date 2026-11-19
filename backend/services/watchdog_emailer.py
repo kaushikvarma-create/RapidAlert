@@ -293,6 +293,21 @@ class WatchdogEmailer:
     #  1. Real-Time Severe Incident Alerting
     # ════════════════════════════════════════════════════════════
 
+    @staticmethod
+    def _event_key(event_type: str, title: str) -> str:
+        """
+        Dedup / resolution key for an incident.
+
+        Stateful incidents (camera blackout, storage, container crash, maintenance) are keyed by
+        event type alone: their titles carry live counts ("3/18 Streams Frozen") and differ
+        between the alert and its resolution, so a title-based key never matched on resolve and
+        no [RESOLVED] email was ever sent. One-shot fault reports keep the title so that two
+        different faults inside the cooldown window are not collapsed into one email.
+        """
+        if event_type in ("FATAL_EXCEPTION", "CRITICAL_FAULT"):
+            return f"{event_type}_{title}"
+        return event_type
+
     def send_critical_alert(
         self,
         event_type: str,
@@ -309,11 +324,13 @@ class WatchdogEmailer:
         Applies cooldown throttling to avoid email floods during persistent failures.
         """
         now = time.monotonic()
-        event_key = f"{event_type}_{title}"
+        event_key = self._event_key(event_type, title)
 
         with self._lock:
-            last_sent = self._sent_alerts.get(event_key, 0.0)
-            if now - last_sent < cooldown_sec:
+            # None (not 0.0) for "never sent": time.monotonic() counts from boot, so comparing
+            # against 0.0 suppressed every first alert for `cooldown_sec` after a host reboot.
+            last_sent = self._sent_alerts.get(event_key)
+            if last_sent is not None and now - last_sent < cooldown_sec:
                 print(f"[WatchdogEmailer] ⏳ Suppressed duplicate alert '{event_key}' (cooldown: {int(cooldown_sec - (now - last_sent))}s remaining)")
                 return False
             self._sent_alerts[event_key] = now
@@ -336,7 +353,7 @@ class WatchdogEmailer:
         details: Optional[dict] = None,
     ) -> bool:
         """Sends a green [RESOLVED] email when a critical incident condition clears."""
-        event_key = f"{event_type}_{title}"
+        event_key = self._event_key(event_type, title)
         with self._lock:
             if not self._active_incidents.get(event_key, False):
                 return False  # Was not actively alerted
@@ -371,8 +388,8 @@ class WatchdogEmailer:
         event_key = f"CONTAINER_CRASH_{container_name}"
 
         with self._lock:
-            last_sent = self._sent_alerts.get(event_key, 0.0)
-            if now - last_sent < cooldown_sec:
+            last_sent = self._sent_alerts.get(event_key)
+            if last_sent is not None and now - last_sent < cooldown_sec:
                 print(f"[WatchdogEmailer] ⏳ Suppressed duplicate container alert '{event_key}' (cooldown: {int(cooldown_sec - (now - last_sent))}s remaining)")
                 return False
             self._sent_alerts[event_key] = now

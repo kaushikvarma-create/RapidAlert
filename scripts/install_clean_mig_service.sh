@@ -35,6 +35,9 @@ Before=display-manager.service gdm.service gdm3.service lightdm.service nvargus-
 Type=oneshot
 ExecStart=/usr/local/bin/create-thor-mig.sh
 RemainAfterExit=yes
+# If slicing fails (driver still not up), try again instead of giving up for the whole boot.
+Restart=on-failure
+RestartSec=15
 
 [Install]
 WantedBy=multi-user.target
@@ -47,6 +50,10 @@ if [[ -f /etc/systemd/system/rapidalert.service ]]; then
     if ! grep -q "nvidia-mig.service" /etc/systemd/system/rapidalert.service; then
         sed -i 's/After=network.target docker.service nv-oem-config.service/After=network.target docker.service nv-oem-config.service nvidia-mig.service/' /etc/systemd/system/rapidalert.service
     fi
+    # "Requires" meant a failed MIG setup blocked RapidAlert from starting at all. "Wants" still
+    # starts MIG setup first, but RapidAlert comes up either way (run.sh falls back to the whole
+    # GPU when the slices are missing).
+    sed -i 's/^Requires=nvidia-mig.service$/Wants=nvidia-mig.service/' /etc/systemd/system/rapidalert.service
 fi
 
 # 4. Enable nvidia-mig.service

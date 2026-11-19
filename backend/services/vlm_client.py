@@ -6,10 +6,9 @@ Architecture:
       • asyncio.Queue(maxsize=queue_depth)   — bounded, prevents runaway backlog
       • asyncio.Semaphore(max_concurrent)    — hard cap on in-flight HTTP requests
       • N worker coroutines = max_concurrent — one per semaphore slot
-  - analyze() selects the shard with the lowest weighted load score:
-        load_score = (in_flight + queued) / weight
-    This gives the 12SM shard (weight=3) 3x the preference over 8SM (weight=2),
-    matching the hardware 60/40 compute split.
+  - analyze() selects the shard with the lowest load score, the expected time to finish:
+        load_score = (in_flight + queued + 1) * recent seconds per request
+    The configured weight is only the starting guess until a shard has recent results.
   - If every shard's queue is full, we block on the one with the lowest load_score.
   - A background health loop probes /health every 30s and gates routing away
     from unhealthy endpoints automatically.
@@ -102,17 +101,35 @@ class _EndpointShard:
         self.stat_completed: int   = 0      # successfully completed
         self.stat_errors:    int   = 0      # all-retries-failed count
         self._latencies: deque[float] = deque(maxlen=100)
+        self._last_result_ts: float = 0.0   # monotonic time of the last completed request
 
     # ── Load score for routing ─────────────────────────────────────────────
 
     def load_score(self) -> float:
         """
-        Weighted load: lower = prefer this shard.
-        Accounts for both in-flight and pending queue depth, normalised by weight.
+        Expected seconds until a new request on this shard would finish: lower = prefer it.
+
+            (requests ahead of it + itself) x recent seconds per request
+
+        Routing used a fixed weight per shard, on the assumption that the larger GPU slice is the
+        faster one. Measured on this machine that is not stable: whichever slice is sharing its
+        GPU with other work at the moment (analysis decoders, live-view transcoders, the desktop)
+        is the slow one, and that changes during the day. So speed is measured, not assumed.
+        The configured weight is only the starting guess, used until the shard has recent results.
         """
         if not self.healthy:
             return float("inf")
-        return (self.stat_inflight + self._queue.qsize()) / self.weight
+        return (self.stat_inflight + self._queue.qsize() + 1) * self._recent_latency()
+
+    _ASSUMED_LATENCY_SEC = 10.0     # before any measurement: typical request time, scaled by weight
+    _LATENCY_STALE_SEC = 180.0      # a shard with no result this recently is measured afresh
+
+    def _recent_latency(self) -> float:
+        """Mean of the last few request times, or the weight-based guess if there are none recent."""
+        recent = list(self._latencies)[-12:]
+        if not recent or (time.monotonic() - self._last_result_ts) > self._LATENCY_STALE_SEC:
+            return self._ASSUMED_LATENCY_SEC / self.weight
+        return max(0.5, sum(recent) / len(recent))
 
     # ── Worker lifecycle ───────────────────────────────────────────────────
 
@@ -297,6 +314,7 @@ class _EndpointShard:
                     if is_text_job:
                         lat = time.monotonic() - t0
                         self._latencies.append(lat)
+                        self._last_result_ts = time.monotonic()
                         return {
                             "text": raw,
                             "raw": raw,
@@ -313,6 +331,7 @@ class _EndpointShard:
                     result["total_tokens"] = total_tokens
                     result["tokens"] = total_tokens
                     self._latencies.append(result["latency"])
+                    self._last_result_ts = time.monotonic()
                     return result
 
             except (aiohttp.ServerDisconnectedError, aiohttp.ClientConnectionError) as exc:
@@ -397,7 +416,7 @@ class MIGAwareVLMPool:
     Manages N _EndpointShards (one per MIG/vLLM instance).
 
     Routing:
-      analyze()  — weighted-load: routes to shard with min (inflight+queued)/weight.
+      analyze()  — routes to the shard with the lowest expected time to finish (see load_score).
                    On full queue, overflows to next best shard; if all full, blocks
                    on the shard with lowest load_score.
 

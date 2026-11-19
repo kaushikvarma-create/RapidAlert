@@ -12,10 +12,11 @@ LOG="/var/log/nvidia-thor-mig.log"
 exec >> "$LOG" 2>&1
 echo "=== Starting NVIDIA Thor MIG initialization at $(date) ==="
 
-# Wait up to 30 seconds for the NVIDIA kernel driver to be ready
+# Wait up to 180 seconds for the NVIDIA kernel driver to be ready (30s was not always enough
+# on a cold boot, and a failure here used to keep RapidAlert from starting at all)
 echo "Waiting for NVIDIA driver to be accessible..."
 READY=0
-for i in {1..30}; do
+for i in {1..180}; do
     if nvidia-smi >/dev/null 2>&1; then
         READY=1
         echo "NVIDIA driver ready after ${i}s."
@@ -25,7 +26,7 @@ for i in {1..30}; do
 done
 
 if [ "$READY" -ne 1 ]; then
-    echo "❌ ERROR: NVIDIA driver did not become ready within 30 seconds."
+    echo "❌ ERROR: NVIDIA driver did not become ready within 180 seconds."
     exit 1
 fi
 

@@ -16,16 +16,21 @@ echo -e "${BOLD}${YELLOW}Stopping RapidAlert AI Surveillance...${NC}"
 # 1. Stop systemd service if running
 if systemctl is-active --quiet rapidalert 2>/dev/null; then
   echo -e "${CYAN}  • Stopping systemd background service...${NC}"
-  sudo -n systemctl stop rapidalert 2>/dev/null || true
+  # The unit has Restart=always: killing the backend without stopping the unit just makes
+  # systemd start it again 5 seconds later, so a failed stop here must not be ignored.
+  if ! sudo -n systemctl stop rapidalert 2>/dev/null && ! systemctl stop rapidalert 2>/dev/null; then
+    echo -e "${RED}  ✗ Could not stop the rapidalert service (needs privileges).${NC}"
+    echo -e "    Run:  sudo systemctl stop rapidalert"
+    exit 1
+  fi
 fi
 
-# 2. Terminate uvicorn backend processes
+# 2. Terminate uvicorn backend processes (exact command line only — see run.sh BACKEND_PGREP)
+BACKEND_PGREP='^python3 -m uvicorn backend\.main:app '
 echo -e "${CYAN}  • Stopping backend server processes...${NC}"
-pkill -15 -f "backend.main" 2>/dev/null || true
-pkill -15 -f "uvicorn.*backend" 2>/dev/null || true
+pkill -15 -f "${BACKEND_PGREP}" 2>/dev/null || true
 sleep 0.5
-pkill -9 -f "backend.main" 2>/dev/null || true
-pkill -9 -f "uvicorn.*backend" 2>/dev/null || true
+pkill -9 -f "${BACKEND_PGREP}" 2>/dev/null || true
 
 # 3. Free port 7000
 fuser -k 7000/tcp 2>/dev/null || true

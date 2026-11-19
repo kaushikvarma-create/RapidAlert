@@ -11,6 +11,20 @@
 [![Reporting](https://img.shields.io/badge/Reporting-Shift%20PDF%20%26%2069--Report%20Buffer-success)](#-automated-shift-reporting--pdf-generation)
 [![Inference Engine](https://img.shields.io/badge/Engine-vLLM%200.19.0%20(PagedAttention)-green)](https://github.com/vllm-project/vllm)
 
+> [!IMPORTANT]
+> **Current state (updated 2026-11-19).** Parts of this document describe the original design. Where they differ, this is what the code does today:
+> - **Model:** whatever `vllm_model` in `config/system.json` names (currently `cyankiwi/Qwen3.5-9B-AWQ-4bit`), not Cosmos Reason2.
+> - **Cameras:** any number, defined in `config/cameras.json`; nothing is tied to a fixed camera list.
+> - **Live view:** each watched camera is hardware-transcoded H.265 -> H.264 on demand (`scripts/stream_transcode.sh`, started by MediaMTX) and played over WebRTC; MJPEG is the fallback. The dashboard does not use HLS.
+> - **Analysis ingest:** capped at 5 frames per second per camera, with 20 seconds of history.
+> - **Drift trigger:** compares consecutive DINOv2 samples (batched across cameras), not a moving baseline.
+> - **Routing:** requests go to the vLLM shard with the lowest expected time to finish, measured live; `weight` is only a starting guess.
+> - **Containers:** started by `scripts/start_vllm.sh` (used by both `run.sh` and the watchdog), with a fixed KV-cache size and a Docker restart policy.
+> - **Watchdog:** restarts containers only when they have crashed or exited; it never restarts on latency. There is no `VLLM_CLUSTER_DOWN` or `BACKOFF_EXCEEDED` alert.
+> - **Reports:** PDF via WeasyPrint, emailed every 6, 12 and 24 hours with a written summary; branding is set by `report_site_name`, `report_provider_name` and the logo paths in `config/system.json`.
+> - **Storage:** frames are kept by importance (see `retention_*` settings), not as a fixed-size rolling buffer.
+> - **Hotspot:** on by default; joining a Wi-Fi network from the dashboard switches the single radio to that network until it is lost.
+
 RapidAlert is an enterprise-grade, edge-native surveillance and reasoning platform engineered specifically for **NVIDIA Jetson AGX Thor**. It bridges real-time GStreamer/NVDEC hardware camera ingestion, direct low-latency hardware streaming (MediaMTX / Hls.js), and microsecond visual embedding drift detection with deep multimodal reasoning from **Cosmos Reason2 8B (NVFP4)** across partitioned **Multi-Instance GPU (MIG)** compute shards.
 
 ---
@@ -463,7 +477,7 @@ RapidAlert generates executive shift intelligence reports (`backend/services/rep
   "reporting_enabled": true,
   "report_schedule_hours": [6, 18],
   "report_sender_email": "reportsclove@gmail.com",
-  "report_sender_password": "wakl rpps mvql eznn",
+  "report_sender_password": "<app password - set locally, never commit>",
   "report_email_recipients": [
     "pandalavacarji@gmail.com",
     "reportsclove@gmail.com"

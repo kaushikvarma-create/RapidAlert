@@ -225,7 +225,7 @@ const App = {
       this.connectWS();
     }
     this._fetchStatusSnapshot();
-    this._syncStreamsToDisplay();
+    this._scheduleStreamSync();
   },
 
   async _fetchStatusSnapshot() {
@@ -241,7 +241,6 @@ const App = {
             this.cameras[cam].lastAnalysisTs = item.ts;
           }
         }
-        this._updateAllResults();
       }
     } catch (_) {}
   },
@@ -657,6 +656,9 @@ const App = {
     // Remove stale cards
     for (const name of Object.keys(this.cameras)) {
       if (!names.has(name)) {
+        // Close its live video session first; otherwise the connection (and the transcoder
+        // on the Thor) keeps running until the page is closed.
+        this._detachDirectStream(name);
         delete this.cameras[name];
         document.getElementById(`cam-card-${this._eid(name)}`)?.remove();
       }
@@ -745,10 +747,146 @@ const App = {
   },
 
   _getCamSlug(name) {
-    return (name || '').trim().toLowerCase().replace(/ /g, '_').replace(/-/g, '_');
+    // Must match get_safe_cam_slug() in backend/services/mediamtx_service.py exactly.
+    return (name || '').trim().toLowerCase().replace(/[^a-z0-9_]/g, '_') || 'cam';
+  },
+
+  // ── Live video: WebRTC from MediaMTX ─────────────────────────────
+  // MediaMTX hardware-transcodes a camera (H.265 -> H.264 on the Thor) only while somebody is
+  // watching its "<slug>_live" path, and serves it over WebRTC (WHEP). That gives real video at
+  // the camera's frame rate with no per-frame work in the Python backend. The older MJPEG <img>
+  // stream stays as the automatic fallback.
+  _LIVE_VIDEO_START_TIMEOUT_MS: 15000,   // on-demand transcoder start + first keyframe
+  _LIVE_VIDEO_RETRY_AFTER_MS: 60000,     // after a failure, use MJPEG this long before retrying
+
+  _liveVideoUrl(name) {
+    return `${location.protocol}//${location.hostname}:8889/${this._getCamSlug(name)}_live/whep`;
+  },
+
+  _liveVideoAllowed(name) {
+    if (!window.RTCPeerConnection) return false;
+    return Date.now() >= ((this._liveVideoFailUntil || {})[name] || 0);
+  },
+
+  _stopLiveVideo(key) {
+    const s = this._rtc && this._rtc[key];
+    if (!s) return;
+    delete this._rtc[key];
+    s.stopped = true;
+    clearTimeout(s.timer);
+    try { s.abort.abort(); } catch (_) {}
+    try { s.pc.close(); } catch (_) {}
+    if (s.sessionUrl) fetch(s.sessionUrl, { method: 'DELETE' }).catch(() => {});
+    if (s.video) {
+      try { s.video.srcObject = null; } catch (_) {}
+      s.video.style.display = 'none';
+    }
+  },
+
+  // key: one session per slot ('card:<name>' or 'modal'). onPlaying/onFail are optional.
+  _startLiveVideo(key, name, video, onPlaying, onFail) {
+    this._rtc = this._rtc || {};
+    this._stopLiveVideo(key);
+    const pc = new RTCPeerConnection();
+    const s = { pc, video, name, abort: new AbortController(), stopped: false, playing: false };
+    this._rtc[key] = s;
+
+    const fail = (why) => {
+      if (s.stopped) return;
+      console.warn(`[LiveVideo] ${name}: ${why}; using MJPEG fallback`);
+      this._liveVideoFailUntil = this._liveVideoFailUntil || {};
+      this._liveVideoFailUntil[name] = Date.now() + this._LIVE_VIDEO_RETRY_AFTER_MS;
+      this._stopLiveVideo(key);
+      if (onFail) onFail();
+    };
+
+    s.timer = setTimeout(() => { if (!s.playing) fail('no video within start timeout'); },
+      this._LIVE_VIDEO_START_TIMEOUT_MS);
+    video.onplaying = () => {
+      if (s.stopped || s.playing) return;
+      s.playing = true;
+      clearTimeout(s.timer);
+      video.style.display = 'block';
+      if (onPlaying) onPlaying();
+    };
+    pc.addTransceiver('video', { direction: 'recvonly' });
+    pc.ontrack = (e) => {
+      video.srcObject = e.streams[0] || new MediaStream([e.track]);
+      video.play().catch(() => {});
+    };
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'failed') fail('connection failed');
+    };
+
+    (async () => {
+      await pc.setLocalDescription(await pc.createOffer());
+      // Non-trickle: wait briefly for ICE candidates so one POST carries everything.
+      await new Promise((resolve) => {
+        if (pc.iceGatheringState === 'complete') return resolve();
+        const t = setTimeout(resolve, 1500);
+        pc.addEventListener('icegatheringstatechange', () => {
+          if (pc.iceGatheringState === 'complete') { clearTimeout(t); resolve(); }
+        });
+      });
+      if (s.stopped) return;
+      const url = this._liveVideoUrl(name);
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/sdp' },
+        body: pc.localDescription.sdp,
+        signal: s.abort.signal,
+      });
+      if (res.status !== 201) throw new Error(`WHEP HTTP ${res.status}`);
+      const loc = res.headers.get('Location');
+      if (loc) s.sessionUrl = new URL(loc, url).toString();
+      const answer = await res.text();
+      if (s.stopped) return;
+      await pc.setRemoteDescription({ type: 'answer', sdp: answer });
+    })().catch((e) => { if (!s.stopped) fail(e && e.message ? e.message : 'signalling error'); });
   },
 
   _attachDirectStream(name, forceRefresh = false) {
+    if (!this._liveVideoAllowed(name)) {
+      this._liveVideoFallback = this._liveVideoFallback || {};
+      this._liveVideoFallback[name] = true;
+      return this._attachMjpegStream(name, forceRefresh);
+    }
+    const eid = this._eid(name);
+    const wrap = document.getElementById(`cam-video-${eid}`);
+    const cardImg = document.getElementById(`cam-card-img-${eid}`);
+    if (!wrap || !cardImg) return;
+    const key = `card:${name}`;
+    if (this._rtc && this._rtc[key] && !forceRefresh) return;
+
+    let video = document.getElementById(`cam-card-video-${eid}`);
+    if (!video) {
+      video = document.createElement('video');
+      video.id = `cam-card-video-${eid}`;
+      video.className = 'cam-card-video-el';
+      video.muted = true;
+      video.autoplay = true;
+      video.playsInline = true;
+      video.style.display = 'none';
+      cardImg.insertAdjacentElement('afterend', video);
+    }
+    this._startLiveVideo(key, name, video,
+      () => {
+        // Video is up: drop the MJPEG request if one was running underneath it.
+        if (this._liveVideoFallback) delete this._liveVideoFallback[name];
+        if ((cardImg.getAttribute('src') || '').includes('/stream')) {
+          cardImg.src = '';
+          cardImg.removeAttribute('src');
+        }
+      },
+      () => {
+        this._liveVideoFallback = this._liveVideoFallback || {};
+        this._liveVideoFallback[name] = true;
+        // Not forced: if MJPEG is already showing, leave it alone (a forced reconnect flickers).
+        if (this._streamWanted(name)) this._attachMjpegStream(name, false);
+      });
+  },
+
+  _attachMjpegStream(name, forceRefresh = false) {
     const eid = this._eid(name);
     const cardImg = document.getElementById(`cam-card-img-${eid}`);
     if (!cardImg) return;
@@ -811,8 +949,14 @@ const App = {
     for (const name of Object.keys(this.cameras)) {
       if (wanted.has(name)) {
         const img = document.getElementById(`cam-card-img-${this._eid(name)}`);
-        const live = (img?.getAttribute('src') || '').includes('/stream');
-        if (live && !forceRefresh) continue;
+        const key = `card:${name}`;
+        // A grid re-render can replace the card; a session bound to a removed <video> is dead.
+        if (this._rtc && this._rtc[key] && !this._rtc[key].video.isConnected) this._stopLiveVideo(key);
+        const hasVideo = !!(this._rtc && this._rtc[key]);
+        const hasMjpeg = (img?.getAttribute('src') || '').includes('/stream');
+        // After a video failure the card runs on MJPEG; try video again once the back-off expires.
+        const upgrade = hasMjpeg && !hasVideo && this._liveVideoFallback?.[name] && this._liveVideoAllowed(name);
+        if ((hasVideo || hasMjpeg) && !forceRefresh && !upgrade) continue;
         // Stagger new connections so N encoders don't spin up in the same instant
         setTimeout(() => {
           if (this._streamWanted(name)) this._attachDirectStream(name, forceRefresh);
@@ -825,10 +969,12 @@ const App = {
     // Free the modal's own stream when the tab is hidden; restore on return
     const modalImg = document.getElementById('modal-frame');
     if (modalImg && this.activeCamModal && this.modalViewMode === 'live') {
-      const has = !!modalImg.getAttribute('src');
-      if (document.hidden && has) {
+      const src = modalImg.getAttribute('src') || '';
+      const streaming = src.includes('/stream') || !!(this._rtc && this._rtc.modal);
+      if (document.hidden && (src || streaming)) {
+        this._stopLiveVideo('modal');
         modalImg.removeAttribute('src');
-      } else if (!document.hidden && !has) {
+      } else if (!document.hidden && !streaming) {
         this._updateModalFrameView(this.activeCamModal);
       }
     }
@@ -875,6 +1021,7 @@ const App = {
   },
 
   _detachDirectStream(name) {
+    this._stopLiveVideo(`card:${name}`);
     const eid = this._eid(name);
     const videoEl = document.getElementById(`cam-card-video-${eid}`);
     const cardImg = document.getElementById(`cam-card-img-${eid}`);
@@ -1765,7 +1912,7 @@ const App = {
           if (parent) {
             this.openAlertModal(parent);
           } else {
-            this.showToast('Initial trigger event not found in current feed memory.', 'info');
+            this._showToast('Initial trigger event not found in current feed memory.', 'info');
           }
         };
       }
@@ -2453,6 +2600,7 @@ const App = {
     const btnEvents = document.getElementById('modal-btn-events');
 
     if (this.modalViewMode === 'event' && cam.eventPhotos && cam.eventPhotos.length > 0) {
+      this._stopLiveVideo('modal');
       const idx = (this.selectedEventIdx != null && this.selectedEventIdx < cam.eventPhotos.length)
         ? this.selectedEventIdx
         : (cam.eventPhotos.length - 1);
@@ -2474,9 +2622,32 @@ const App = {
       this.selectedEventIdx = null;
       if (img) {
         const streamSrc = `/api/cameras/${encodeURIComponent(name)}/stream?width=1280&quality=80`;
-        img.src = streamSrc;
+        const useMjpeg = () => {
+          if (this.activeCamModal !== name || this.modalViewMode !== 'live') return;
+          img.src = streamSrc;
+          img.style.display = 'block';
+          if (loading) loading.style.display = 'none';
+        };
         img.style.display = 'block';
-        if (loading) loading.style.display = 'none';
+        if (this._liveVideoAllowed(name)) {
+          let video = document.getElementById('modal-frame-video');
+          if (!video) {
+            video = document.createElement('video');
+            video.id = 'modal-frame-video';
+            video.muted = true;
+            video.autoplay = true;
+            video.playsInline = true;
+            video.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;display:none;z-index:1;';
+            img.insertAdjacentElement('afterend', video);
+          }
+          // Until the first video frame arrives the <img> keeps showing WS thumbnails.
+          if ((img.getAttribute('src') || '').includes('/stream')) img.removeAttribute('src');
+          this._startLiveVideo('modal', name, video,
+            () => { if (loading) loading.style.display = 'none'; },
+            useMjpeg);
+        } else {
+          useMjpeg();
+        }
       }
       if (liveIndicator) {
         liveIndicator.innerHTML = `<span class="live-pulse-dot"></span> LIVE RTSP`;
@@ -2624,6 +2795,7 @@ const App = {
       modal.setAttribute('hidden', '');
       modal.style.display = 'none';
     }
+    this._stopLiveVideo('modal');
     const img = document.getElementById('modal-frame');
     if (img && img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
     if (img) {
@@ -3029,8 +3201,17 @@ const App = {
 
     if (!ssid || ssid === '—') return;
     if (btn) btn.disabled = true;
+    // The Thor's radio is either the hotspot or a Wi-Fi client, never both. If this page was
+    // opened through the hotspot, joining a network drops this very connection, so tell the
+    // operator where the dashboard will be afterwards before the request is sent.
+    const ns = this.networkStatus || {};
+    const viaHotspot = !!(ns.hotspot && ns.hotspot.ip && location.hostname === ns.hotspot.ip);
+    const whereNext = `Connect this device to "${ssid}" and open ${ns.mdns_url || 'the dashboard'} (or port ${ns.dashboard_port || 7000} on the address that network gives the Thor). `
+      + `If the Thor cannot join, the "${ns.hotspot?.ssid || 'hotspot'}" hotspot comes back within about a minute.`;
     if (errEl) {
-      errEl.textContent = `Connecting to ${ssid}...`;
+      errEl.textContent = viaHotspot
+        ? `Joining ${ssid}… the hotspot is switching off now. ${whereNext}`
+        : `Connecting to ${ssid}...`;
       errEl.style.color = 'var(--text-muted)';
       errEl.style.display = 'block';
     }
@@ -3055,8 +3236,9 @@ const App = {
       }
     } catch (e) {
       if (errEl) {
-        errEl.textContent = `Error: ${e.message}`;
-        errEl.style.color = 'var(--red)';
+        // Over the hotspot a dropped request is the expected outcome of a join, not a failure.
+        errEl.textContent = viaHotspot ? `Connection to the hotspot ended. ${whereNext}` : `Error: ${e.message}`;
+        errEl.style.color = viaHotspot ? 'var(--text-muted)' : 'var(--red)';
       }
     } finally {
       if (btn) btn.disabled = false;
@@ -3607,6 +3789,18 @@ const App = {
     el.style.animation = 'none';
     void el.offsetWidth;
     el.style.animation = 'fade-out 2s forwards';
+  },
+
+  // Most of the UI calls _showToast(msg, kind) and _escapeHtml(s), which were never defined, so
+  // every such call threw and silently skipped whatever came after it (e.g. opening Settings
+  // after a successful login, rendering the System Errors list). They delegate to the two
+  // helpers that do exist; `kind` ('ok' | 'error' | 'warn' | 'info') is accepted for callers.
+  _showToast(msg, kind) {
+    this._toast(msg);
+  },
+
+  _escapeHtml(s) {
+    return this._esc(s);
   },
 
   _toast(msg) {

@@ -155,6 +155,9 @@ class SceneTriggerEngine:
                 active_cams = self.camera_manager.get_active_cameras()
                 now = time.monotonic()
 
+                # Pass 1: pick every camera that is due and grab its frame (same rules as before).
+                due: list[tuple[str, float]] = []
+                frames: list[np.ndarray] = []
                 for cam_name in active_cams:
                     if cam_name not in self._cam_first_seen:
                         self._cam_first_seen[cam_name] = now
@@ -173,9 +176,15 @@ class SceneTriggerEngine:
 
                     frame, frame_ts = latest
                     self._last_sample_time[cam_name] = now
+                    due.append((cam_name, frame_ts))
+                    frames.append(frame)
 
-                    # Run embedding inference in thread pool to avoid blocking asyncio event loop
-                    emb = await asyncio.to_thread(self._extract_embedding, frame)
+                # One batched DINOv2 forward pass for all due cameras, in a worker thread, instead
+                # of one thread hop + GPU call per camera (18 per cycle on the slice vLLM shares).
+                embs = await asyncio.to_thread(self._extract_embeddings, frames) if frames else []
+
+                # Pass 2: per-camera drift evaluation, unchanged.
+                for (cam_name, frame_ts), emb in zip(due, embs):
                     if emb is None:
                         continue
 
@@ -214,9 +223,6 @@ class SceneTriggerEngine:
                             self._active_collectors[cam_name] = asyncio.create_task(
                                 self._collect_incident(cam_name, distance, frame_ts, trigger_time=t_trigger, tier=tier)
                             )
-
-                    # Cooperative event loop yield: give 40ms breathing room to Uvicorn between camera inferences
-                    await asyncio.sleep(0.04)
 
                 # Small pause before next pass
                 await asyncio.sleep(0.05)
@@ -259,6 +265,43 @@ class SceneTriggerEngine:
                 severity="WARNING",
             )
             return None
+
+    def _extract_embeddings(self, frames: List[np.ndarray]) -> List[Optional[np.ndarray]]:
+        """
+        Batched form of _extract_embedding: same resize, colour conversion, preprocessing, mean
+        pooling and L2 normalisation, run as one forward pass. Returns one entry per input frame.
+        If the batch fails for any reason, falls back to the per-frame path so one bad frame
+        cannot blank out drift detection for every camera.
+        """
+        if not frames:
+            return []
+        try:
+            images = []
+            for frame in frames:
+                h, w = frame.shape[:2]
+                target_w = DINOV2_INPUT_WIDTH
+                target_h = int(h * (target_w / w))
+                small = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
+                images.append(Image.fromarray(cv2.cvtColor(small, cv2.COLOR_BGR2RGB)))
+
+            inp = self._processor(images=images, return_tensors="pt").to(self.device)
+            with torch.inference_mode():
+                out = self._model(pixel_values=inp["pixel_values"].to(self.dtype))
+
+            pooled = out.last_hidden_state.float().mean(dim=1).cpu().numpy()
+            result: List[Optional[np.ndarray]] = []
+            for emb in pooled:
+                norm = np.linalg.norm(emb)
+                result.append(emb / norm if norm > 0 else emb)
+            return result
+        except Exception as e:
+            error_tracker.capture_exception(
+                e,
+                component="SceneTrigger",
+                effect="Batched DINOv2 embedding failed; falling back to per-camera extraction",
+                severity="WARNING",
+            )
+            return [self._extract_embedding(frame) for frame in frames]
 
     def set_default_threshold(self, val: float) -> None:
         self.default_threshold = float(val)

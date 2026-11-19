@@ -67,8 +67,16 @@ for arg in "$@"; do
   [[ "$arg" == "--reload" || "$arg" == "--dev" ]] && DEV_MODE="true"
 done
 
-# If systemd background service is running, stop it to prevent conflicting port 7000 restart loop
-if systemctl is-active --quiet rapidalert 2>/dev/null; then
+# Exact command line of the backend. Kill patterns below match this and nothing else:
+# the old patterns ("backend.main", "uvicorn.*backend") were unanchored regexes that also matched
+# editors, greps and test runs touching backend/main.py and SIGKILLed them.
+BACKEND_PGREP='^python3 -m uvicorn backend\.main:app '
+
+# If systemd background service is running, stop it to prevent conflicting port 7000 restart loop.
+# Skipped when systemd itself launched this script (INVOCATION_ID is set for service processes):
+# the unit is already "active" at that point, so the stop below would be the service stopping
+# itself on every start. That only failed to happen because `sudo -n` needed a password.
+if [[ -z "${INVOCATION_ID:-}" ]] && systemctl is-active --quiet rapidalert 2>/dev/null; then
   echo -e "\033[1;33m[Notice]\033[0m RapidAlert systemd background service is active."
   echo -e "         Stopping background service to run in interactive terminal mode..."
   sudo -n systemctl stop rapidalert 2>/dev/null || systemctl stop rapidalert 2>/dev/null || true
@@ -76,6 +84,9 @@ if systemctl is-active --quiet rapidalert 2>/dev/null; then
 fi
 
 # Docker config for Jetson Thor
+# A running container that has not answered /v1/models within this window is treated as wedged.
+# Observed model-load times on this box: ~70s (6SM slice) to ~270s (12SM slice shared with backend).
+VLLM_BOOT_GRACE_SEC=600
 VLLM_IMAGE="ghcr.io/nvidia-ai-iot/vllm:latest-jetson-thor"
 HF_CACHE="$HOME/huggingface"
 declare -a LOG_PIDS=()
@@ -98,8 +109,7 @@ cleanup() {
             kill -9 "${UVICORN_PID}" 2>/dev/null || true
         fi
     fi
-    pkill -15 -f "uvicorn.*backend.main" 2>/dev/null || true
-    pkill -15 -f "backend.main" 2>/dev/null || true
+    pkill -15 -f "${BACKEND_PGREP}" 2>/dev/null || true
     fuser -k "${DASHBOARD_PORT}/tcp" 2>/dev/null || true
     # Restore terminal state (prevents frozen/noecho terminal on exit)
     stty sane 2>/dev/null || true
@@ -154,14 +164,11 @@ python3 scripts/system_health_audit.py --fix || warn "System audit completed wit
 log "Cleaning up any orphaned backend processes ..."
 pkill -9 -f "apport" 2>/dev/null || true
 rm -f /var/crash/_usr_bin_python3* 2>/dev/null || true
-pkill -CONT -f "backend.main" 2>/dev/null || true
-pkill -CONT -f "uvicorn.*backend" 2>/dev/null || true
+pkill -CONT -f "${BACKEND_PGREP}" 2>/dev/null || true
 sleep 0.1
-pkill -15 -f "backend.main" 2>/dev/null || true
-pkill -15 -f "uvicorn.*backend" 2>/dev/null || true
+pkill -15 -f "${BACKEND_PGREP}" 2>/dev/null || true
 sleep 0.5
-pkill -9 -f "backend.main" 2>/dev/null || true
-pkill -9 -f "uvicorn.*backend" 2>/dev/null || true
+pkill -9 -f "${BACKEND_PGREP}" 2>/dev/null || true
 fuser -k "${DASHBOARD_PORT}/tcp" 2>/dev/null || true
 sleep 0.2
 
@@ -210,8 +217,12 @@ if [[ "$AUTO_START_VLLM" == "true" ]]; then
         # Per-endpoint GPU memory utilization — lower on the 12SM shard to protect NVDEC/GUI
         EP_GPU_UTIL=$(python3 -c "import json; d=json.load(open('config/system.json')); eps=d.get('vllm_endpoints', []); print(eps[$i].get('gpu_utilization', d.get('vllm_gpu_utilization', 0.95)) if $i < len(eps) else d.get('vllm_gpu_utilization', 0.95))" 2>/dev/null || echo "${VLLM_GPU_UTILIZATION}")
 
+        # Optional fixed KV-cache size (GiB -> bytes); empty = vLLM auto-sizes from gpu_utilization.
+        # See VLMEndpointConfig.kv_cache_gb in backend/core/config.py for why this exists.
+        EP_KV_BYTES=$(python3 -c "import json; d=json.load(open('config/system.json')); eps=d.get('vllm_endpoints', []); g=float(eps[$i].get('kv_cache_gb', 0) or 0) if $i < len(eps) else 0; print(int(g * 1024**3) if g > 0 else '')" 2>/dev/null || echo "")
+
         if [[ -n "$EP_MIG_UUID" ]]; then
-            log "Instance ${i}: MIG=${EP_MIG_UUID} (${EP_SM} SMs)  port=${PORT}  gpu_util=${EP_GPU_UTIL}"
+            log "Instance ${i}: MIG=${EP_MIG_UUID} (${EP_SM} SMs)  port=${PORT}  gpu_util=${EP_GPU_UTIL}  kv_cache_bytes=${EP_KV_BYTES:-auto}"
         else
             warn "Instance ${i}: no mig_uuid set — container will use any available GPU"
         fi
@@ -229,70 +240,28 @@ if [[ "$AUTO_START_VLLM" == "true" ]]; then
                 sleep 2
             fi
         else
-            if docker ps -aq --filter "name=${CNAME}" | grep -q .; then
+            # Not answering yet. A container that is running and still inside its model-load
+            # window is booting, not dead: removing it here threw away minutes of load time every
+            # time the backend restarted while a shard was starting or being recycled.
+            C_RUNNING=$(docker inspect -f '{{.State.Running}}' "${CNAME}" 2>/dev/null || echo "missing")
+            C_AGE=999999
+            if [[ "$C_RUNNING" == "true" ]]; then
+                C_STARTED=$(docker inspect -f '{{.State.StartedAt}}' "${CNAME}" 2>/dev/null || echo "")
+                C_AGE=$(( $(date +%s) - $(date -d "${C_STARTED}" +%s 2>/dev/null || echo 0) ))
+            fi
+            if [[ "$C_RUNNING" == "true" ]] && (( C_AGE < VLLM_BOOT_GRACE_SEC )); then
+                ok "Instance ${i} (${CNAME}) is still loading its model (${C_AGE}s since start) — leaving it running."
+                NEEDS_START=0
+            elif [[ "$C_RUNNING" != "missing" ]]; then
                 warn "Found dead/unresponsive container '${CNAME}' — removing it ..."
                 docker rm -f "${CNAME}" >/dev/null 2>&1 || true
             fi
         fi
 
-        # Ensure persistent JIT compiler cache exists on host so restarts and rebuilds never recompile
-        VLLM_HOST_CACHE="$HOME/.cache/rapidalert/vllm"
-        mkdir -p "${VLLM_HOST_CACHE}/triton" "${VLLM_HOST_CACHE}/nv" "${VLLM_HOST_CACHE}/vllm_cache"
-
-        # Collect MIG capability device nodes if MIG is enabled (clean slice isolation as in commit aeb128af)
-        CAP_FLAGS=()
-        if [[ -d /dev/nvidia-caps ]]; then
-            GI_ID=$(( i + 1 ))
-            for cap_file in /dev/nvidia-caps/nvidia-cap${GI_ID}*; do
-                if [[ -e "$cap_file" ]]; then
-                    CAP_FLAGS+=(--device "$cap_file")
-                fi
-            done
-        fi
-
         if [[ ${NEEDS_START} -eq 1 ]]; then
             log "Starting container ${CNAME} on port ${PORT} ..."
-            docker run -d \
-                --name "${CNAME}" \
-                --runtime nvidia \
-                --network host \
-                --shm-size=4g \
-                -e NVIDIA_VISIBLE_DEVICES=all \
-                -e CUDA_VISIBLE_DEVICES=0 \
-                -e HF_TOKEN="${HF_TOKEN:-}" \
-                -e HF_HOME=/data/models/huggingface \
-                -e HF_HUB_OFFLINE=1 \
-                -e TRANSFORMERS_OFFLINE=1 \
-                -e EP_MODEL="${EP_MODEL}" \
-                -e EP_QUANTIZATION="${EP_QUANTIZATION}" \
-                "${CAP_FLAGS[@]}" \
-                -v "${HF_CACHE}:/data/models/huggingface" \
-                -v "${VLLM_HOST_CACHE}/triton:/root/.triton" \
-                -v "${VLLM_HOST_CACHE}/nv:/root/.nv" \
-                -v "${VLLM_HOST_CACHE}/vllm_cache:/root/.cache/vllm" \
-                "${VLLM_IMAGE}" \
-                bash -c " \
-                    TARGET_MODEL=\"\${EP_MODEL}\"; \
-                    if [[ \"\${EP_QUANTIZATION}\" == \"gguf\" ]]; then \
-                        TARGET_MODEL=\$(python3 -c \"import sys; from huggingface_hub import HfApi, hf_hub_download; r='\${EP_MODEL}'; fs=HfApi().list_repo_files(r); g=[f for f in fs if f.endswith('.gguf')]; print(hf_hub_download(r, g[0])) if g else print(r)\" 2>/dev/null || echo \"\${EP_MODEL}\"); \
-                    else \
-                        python3 -c \"from huggingface_hub import hf_hub_download; import json; p = hf_hub_download('\${EP_MODEL}', 'tokenizer_config.json'); d = json.load(open(p)); d['extra_special_tokens'] = {} if isinstance(d.get('extra_special_tokens'), list) else d.get('extra_special_tokens'); [d.pop('extra_special_tokens') for _ in [1] if d.get('extra_special_tokens') is None]; json.dump(d, open(p, 'w'))\" 2>/dev/null || true; \
-                    fi; \
-                    vllm serve \"\${TARGET_MODEL}\" \
-                    --host 0.0.0.0 \
-                    --port \"${PORT}\" \
-                    ${EP_TOKENIZER:+--tokenizer \"${EP_TOKENIZER}\"} \
-                    --max-model-len \"${VLLM_MAX_MODEL_LEN}\" \
-                    --gpu-memory-utilization \"${EP_GPU_UTIL}\" \
-                    --dtype auto \
-                    --enforce-eager \
-                    --max-num-seqs \"${VLLM_MAX_SEQS}\" \
-                    --limit-mm-per-prompt '{\"image\": 4}' \
-                    --mm-processor-cache-gb 0 \
-                    --trust-remote-code \
-                    ${EP_QUANTIZATION:+--quantization \"${EP_QUANTIZATION}\"} \
-                    --disable-log-stats \
-                    --no-enable-log-requests"
+            # The launch command lives in one place, shared with the backend's container manager.
+            "${SCRIPT_DIR}/scripts/start_vllm.sh" "$i" >/dev/null
         fi
     done
 
@@ -342,7 +311,11 @@ echo -e "${BOLD}${GREEN}  ╚═════════════════
 echo ""
 
 # ── Run the dashboard backend in foreground with TTY protection ───────────
-UVICORN_CMD=(python3 -m uvicorn backend.main:app --host 0.0.0.0 --port "${DASHBOARD_PORT}" --timeout-graceful-shutdown 2 --log-level info)
+# --loop asyncio (not uvicorn's default uvloop): uvloop starts every subprocess with a full fork()
+# of this multi-GB, ~500-thread process, which froze the event loop for ~0.75-1.3s per call. The
+# network watchdog alone spawns ~10 nmcli/ip processes every 10s, so the loop was frozen most of
+# the time (measured: GET /api/network/status took 4-14s). asyncio's loop spawns via vfork/posix_spawn.
+UVICORN_CMD=(python3 -m uvicorn backend.main:app --host 0.0.0.0 --port "${DASHBOARD_PORT}" --loop asyncio --timeout-graceful-shutdown 2 --log-level info)
 if [[ "${DEV_MODE}" == "true" ]]; then
     warn "Running with --reload (Development Mode). Child processes may be spawned."
     UVICORN_CMD+=(--reload)

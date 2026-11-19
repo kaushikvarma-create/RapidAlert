@@ -70,13 +70,23 @@ class ContainerManager:
         """
         try:
             proc = await asyncio.create_subprocess_exec(
-                "docker", "inspect", name, "--format", "{{json .State}}",
+                "docker", "inspect", name, "--format", "{{json .State}}@@{{.RestartCount}}",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
             if proc.returncode == 0 and stdout:
-                state = json.loads(stdout.decode().strip())
+                # "<state json>@@<restart count>". The count is how many times Docker's own restart
+                # policy has restarted the container; the watchdog reports any increase, because a
+                # container that Docker keeps restarting never shows up as "exited".
+                state_txt, _, count_txt = stdout.decode().strip().rpartition("@@")
+                if not state_txt:            # older format / test doubles: plain state json
+                    state_txt, count_txt = count_txt, "0"
+                state = json.loads(state_txt)
+                try:
+                    docker_restarts = int(count_txt)
+                except ValueError:
+                    docker_restarts = 0
                 started_at = state.get("StartedAt", "")
                 return {
                     "exists": True,
@@ -91,6 +101,23 @@ class ContainerManager:
                     "finished_at": state.get("FinishedAt", ""),
                     "pid": state.get("Pid", 0),
                     "uptime_sec": self.parse_uptime_seconds(started_at),
+                    "docker_restarts": docker_restarts,
+                }
+            err_text = stderr.decode(errors="replace").strip()
+            if "no such object" not in err_text.lower() and "no such container" not in err_text.lower():
+                # Docker did not say the container is missing (daemon busy, CLI error, lost exit
+                # status). The watchdog recreates "missing" containers with `docker rm -f`, so an
+                # inconclusive inspect must never be reported as missing.
+                return {
+                    "exists": True,
+                    "name": name,
+                    "running": True,
+                    "status": "inspect_error",
+                    "exit_code": 0,
+                    "oom_killed": False,
+                    "dead": False,
+                    "error": f"docker inspect inconclusive (rc={proc.returncode}): {err_text[:200]}",
+                    "uptime_sec": 0.0,
                 }
             else:
                 return {
@@ -119,12 +146,13 @@ class ContainerManager:
                 "uptime_sec": 0.0,
             }
         except Exception as exc:
+            # Could not run or parse `docker inspect` at all: inconclusive, not "missing".
             return {
-                "exists": False,
+                "exists": True,
                 "name": name,
-                "running": False,
-                "status": "error",
-                "exit_code": -1,
+                "running": True,
+                "status": "inspect_error",
+                "exit_code": 0,
                 "oom_killed": False,
                 "dead": False,
                 "error": str(exc),
@@ -205,9 +233,21 @@ class ContainerManager:
         except asyncio.TimeoutError:
             # Force kill if graceful restart timed out
             try:
-                await asyncio.create_subprocess_exec("docker", "kill", name)
+                # Wait for each step and check its exit code; previously both were spawned and
+                # abandoned, so "force-cycled" was reported even when neither command had run.
+                kill_proc = await asyncio.create_subprocess_exec(
+                    "docker", "kill", name,
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(kill_proc.wait(), timeout=15.0)
                 await asyncio.sleep(1.0)
-                await asyncio.create_subprocess_exec("docker", "start", name)
+                start_proc = await asyncio.create_subprocess_exec(
+                    "docker", "start", name,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                _, start_err = await asyncio.wait_for(start_proc.communicate(), timeout=20.0)
+                if start_proc.returncode != 0:
+                    return False, f"Force-cycle failed: docker start: {start_err.decode().strip()}"
                 return True, f"Container '{name}' force-cycled after restart timeout"
             except Exception as e:
                 return False, f"Force-cycle failed: {e}"
@@ -252,73 +292,11 @@ class ContainerManager:
         if not can_res:
             return False, reason
 
-        sys_cfg = self._get_sys_config()
         port = int(endpoint_cfg.get("url", f":{8000 + index}").split(":")[-1])
-        model = endpoint_cfg.get("model", sys_cfg.get("vllm_model", "cyankiwi/Qwen3.5-9B-AWQ-4bit"))
-        gpu_util = endpoint_cfg.get("gpu_utilization", sys_cfg.get("vllm_gpu_utilization", 0.2))
-        max_model_len = sys_cfg.get("vllm_max_model_len", 4096)
-        max_seqs = sys_cfg.get("vllm_max_seqs", 4)
-        vllm_image = "ghcr.io/nvidia-ai-iot/vllm:latest-jetson-thor"
-        hf_cache = os.path.expanduser("~/huggingface")
-
-        # Clean any old broken container
-        try:
-            rm_proc = await asyncio.create_subprocess_exec(
-                "docker", "rm", "-f", cname,
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-            )
-            await asyncio.wait_for(rm_proc.wait(), timeout=30.0)
-            await asyncio.sleep(0.5)
-        except Exception:
-            pass
-
-        # Build capability flags for NVIDIA Thor MIG (clean slice isolation as in commit aeb128af)
-        cap_flags = []
-        if os.path.isdir("/dev/nvidia-caps"):
-            gi_id = index + 1
-            for cap_file in sorted(glob.glob(f"/dev/nvidia-caps/nvidia-cap{gi_id}*")):
-                cap_flags.extend(["--device", cap_file])
-
-        vllm_host_cache = os.path.expanduser("~/.cache/rapidalert/vllm")
-        for sub in ("triton", "nv", "vllm_cache"):
-            os.makedirs(os.path.join(vllm_host_cache, sub), exist_ok=True)
-
-        cmd = [
-            "docker", "run", "-d",
-            "--name", cname,
-            "--runtime", "nvidia",
-            "--network", "host",
-            "--shm-size=4g",
-            "-e", "NVIDIA_VISIBLE_DEVICES=all",
-            "-e", "CUDA_VISIBLE_DEVICES=0",
-            "-e", "HF_HOME=/data/models/huggingface",
-            "-e", "HF_HUB_OFFLINE=1",
-            "-e", "TRANSFORMERS_OFFLINE=1",
-            "-e", f"EP_MODEL={model}",
-            "-e", "EP_QUANTIZATION=",
-            *cap_flags,
-            "-v", f"{hf_cache}:/data/models/huggingface",
-            "-v", f"{vllm_host_cache}/triton:/root/.triton",
-            "-v", f"{vllm_host_cache}/nv:/root/.nv",
-            "-v", f"{vllm_host_cache}/vllm_cache:/root/.cache/vllm",
-            vllm_image,
-            "bash", "-c",
-            (
-                f'vllm serve "{model}" '
-                f'--host 0.0.0.0 '
-                f'--port {port} '
-                f'--max-model-len {max_model_len} '
-                f'--gpu-memory-utilization {gpu_util} '
-                f'--dtype auto '
-                f'--enforce-eager '
-                f'--max-num-seqs {max_seqs} '
-                f'--limit-mm-per-prompt \'{{"image": 4}}\' '
-                f'--mm-processor-cache-gb 0 '
-                f'--trust-remote-code '
-                f'--disable-log-stats '
-                f'--no-enable-log-requests'
-            ),
-        ]
+        # The launch command is defined once, in scripts/start_vllm.sh, and shared with run.sh.
+        # (It used to be written out here as well and had drifted from the launcher's copy.)
+        # The script removes any existing container of this name and starts a fresh one.
+        cmd = [str(self.config_path.parent.parent / "scripts" / "start_vllm.sh"), str(index)]
 
         now = time.monotonic()
         self._restart_history.setdefault(cname, deque()).append(now)
@@ -332,9 +310,9 @@ class ContainerManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=20.0)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60.0)
             if proc.returncode == 0:
-                cid = stdout.decode().strip()[:12]
+                cid = stdout.decode().strip().splitlines()[-1][:12] if stdout.strip() else ""
                 print(f"[ContainerManager] ✅ Fresh container '{cname}' launched (CID: {cid}).")
                 return True, f"Container '{cname}' launched fresh (ID: {cid})"
             else:

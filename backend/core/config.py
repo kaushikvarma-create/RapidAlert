@@ -9,7 +9,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # ══════════════════════════════════════════════════════════════════════
 #  Filesystem Paths
@@ -93,6 +93,12 @@ LATENCY_DN_THRESH_SEC = 12.0       # p95 above this -> scale worker down
 CAMERA_RETRY_DELAY_SEC = 5
 CAMERA_READ_TIMEOUT_SEC = 1.5
 CAMERA_BUFFER_SIZE = 1
+# Frames per second kept for analysis. Everything downstream samples sparsely (DINOv2 every
+# ~1.5s; the VLM gets 4 frames spread over 10s), so decoding-to-CPU at the camera's full 20-25fps
+# only burned CPU and memory. Live viewing no longer uses these frames (see stream_transcode.sh).
+INGEST_FPS = 5
+# How much history the per-camera frame buffer holds. Consumers look back at most ~12 seconds.
+FRAME_HISTORY_SEC = 20
 DEEPSTREAM_BATCH_TIMEOUT_US = 33000
 DEEPSTREAM_SYNC_INPUTS = False
 DEEPSTREAM_COMPUTE_HW = 1
@@ -189,13 +195,19 @@ class VLMEndpointConfig(BaseModel):
     mig_profile: str = ""
     sm_count: int = 0
     # Queueing & dispatch weights — sized to the MIG slice compute ratio
-    weight: int = 1            # routing weight; 3 for 12SM shard, 2 for 8SM shard
+    weight: int = 1            # starting guess for routing only; live routing follows measured speed
     max_concurrent: int = 3    # max simultaneous in-flight HTTP requests to this shard
     queue_depth: int = 12      # bounded queue depth before overflow routing kicks in
     # vLLM launch parameter — passed as --gpu-memory-utilization per container
     # 12SM shard: 0.80 (leaves headroom for NVDEC/GUI on the same MIG slice)
     # 8SM shard:  0.95 (dedicated to VLLM only)
     gpu_utilization: float = 0.95
+    # Fixed KV-cache size in GiB, passed as --kv-cache-memory-bytes. 0 = let vLLM size it from
+    # gpu_utilization by profiling. On Thor's unified memory that profiling counts memory that
+    # OTHER processes allocate or free during the container's ~1-3 minute start-up (the backend
+    # restarting, the other shard booting), which produced "Available KV cache memory: -5.95 GiB"
+    # and a crashed container. A fixed size skips that measurement entirely.
+    kv_cache_gb: float = 0.0
 
 
 class NetworkConfig(BaseModel):
@@ -204,10 +216,17 @@ class NetworkConfig(BaseModel):
     hotspot_mode: str = "auto"  # "auto", "always_on", "disabled"
     wifi_interface: str = "wlP1p1s0"
     ethernet_interface: str = "enP2p1s0"
+    # Wi-Fi network the operator explicitly joined from the dashboard ("" = none). While it is
+    # set and connected, auto mode leaves the radio in client mode instead of forcing the hotspot.
+    wifi_client_ssid: str = ""
 
 
 class SystemConfig(BaseModel):
     """Structured representation of config/system.json."""
+    # Keep keys this model does not declare (e.g. maintenance_restart_*, report_* which other
+    # services read straight from the file). Without this, every save() silently deleted them.
+    model_config = ConfigDict(extra="allow")
+
     vllm_endpoints: List[VLMEndpointConfig] = Field(
         default_factory=lambda: [VLMEndpointConfig(url=DEFAULT_VLLM_HOST, model=DEFAULT_VLM_MODEL)]
     )
@@ -245,6 +264,12 @@ class SystemConfig(BaseModel):
     clip_retention_hours: float = 24.0
     incident_frames_max_sets: int = 100000
     incident_frames_max_gb: float = 11.5
+    # Retention by importance (see StorageManager.apply_retention). The count/size limits above
+    # stay as a backstop; these decide what is actually kept.
+    retention_important_days: float = 90.0        # MEDIUM/HIGH events, safety warnings, follow-ups
+    retention_low_trigger_hours: float = 72.0     # frames of LOW motion-triggered checks
+    retention_low_periodic_hours: float = 36.0    # frames of LOW routine checks (covers a 24h report)
+    retention_analysis_days: float = 90.0         # analysis text rows
 
     alert_severity_triggers: List[str] = Field(default_factory=lambda: list(DEFAULT_ALERT_SEVERITIES))
     alert_safety_triggers: List[str] = Field(default_factory=lambda: list(DEFAULT_ALERT_SAFETIES))
@@ -297,7 +322,15 @@ class ConfigManager:
     def update(self, updates: Dict[str, Any]) -> SystemConfig:
         """Apply partial updates, validate, and persist to system.json."""
         current_dict = self._cached_config.model_dump()
-        current_dict.update({k: v for k, v in updates.items() if v is not None})
+        for k, v in updates.items():
+            if v is None:
+                continue
+            if isinstance(v, dict) and isinstance(current_dict.get(k), dict):
+                # Partial nested update (e.g. {"network": {"hotspot_mode": ...}}): merge, so the
+                # fields the caller did not send keep their values instead of reverting to defaults.
+                current_dict[k] = {**current_dict[k], **v}
+            else:
+                current_dict[k] = v
         
         # If threshold updated, keep scene_threshold and default_threshold in sync
         if "default_threshold" in updates:

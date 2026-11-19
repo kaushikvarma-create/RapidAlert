@@ -19,7 +19,7 @@
                 color: #94a3b8;
             }
             @bottom-left {
-                content: "RapidAlert AI Surveillance • Clove HQ";
+                content: "{{ settings.site_name }} • Site Monitoring Report • {{ settings.provider_name }}";
                 font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
                 font-size: 8px;
                 color: #94a3b8;
@@ -305,56 +305,70 @@
             padding: 10px;
             font-style: italic;
         }
+
+        /* ── Branding colours (layout above is unchanged) ── */
+        .logo-strip { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+        .logo-strip td { vertical-align: middle; padding: 0; }
+        .logo-by { font-size: 7px; letter-spacing: 1.2px; text-transform: uppercase; color: #94a3b8; margin-bottom: 3px; }
+        .header-box { background: linear-gradient(120deg, #1f2d1a 0%, #33502a 55%, #4f7d60 100%); border-bottom: 4px solid #d67b4c; }
+        .brand-tag { color: #e6dc9a; }
+        .pill-blue { background: rgba(230, 220, 154, 0.22); color: #f3ecb9; }
+        .pill-shift { background: rgba(214, 123, 76, 0.28); color: #ffd2b8; }
+        h2 { border-bottom: 2px solid #d9cf8a; border-left: 4px solid #4f7d60; padding-left: 7px; color: #1f2d1a; }
+        .kpi-card { border-top: 3px solid #4f7d60; background: #f6f8f1; }
+        .kpi-table td.kpi-card:nth-child(2) { border-top-color: #c0392b; }
+        .kpi-table td.kpi-card:nth-child(3) { border-top-color: #d67b4c; }
+        .kpi-table td.kpi-card:nth-child(4) { border-top-color: #b9a44a; }
+        .kpi-table td.kpi-card:nth-child(5) { border-top-color: #4f6f1a; }
+        table.data-table th { background-color: #1f2d1a; color: #f5efcf; }
+        table.data-table tbody tr:nth-child(even) td { background: #fafbf6; }
+        .zone-card-header { background: #f1f5e8; display: block; text-align: center; padding: 6px 8px; margin-bottom: 6px; border-bottom: none; border-radius: 3px; line-height: 1.2; }
+        .pill-feeds { background: rgba(255, 255, 255, 0.16); color: #ffffff; font-weight: 600; }
+        table.data-table td.sev-cell { text-align: center; vertical-align: middle; }
+        .sev-cell .badge-high, .sev-cell .badge-med, .sev-cell .badge-low { min-width: 52px; padding: 3px 6px; }
+        .sev-type { font-size: 7px; color: #64748b; margin-top: 3px; }
+        .written-summary { margin: 4px 0 12px 0; padding: 10px 12px; background: #f6f8f1; border-left: 4px solid #d67b4c; border-radius: 0 5px 5px 0; page-break-inside: avoid; }
+        .ws-label { font-size: 8px; font-weight: 800; color: #b85a24; text-transform: uppercase; letter-spacing: 0.7px; margin-bottom: 3px; }
+        .ws-text { font-size: 9.5px; line-height: 1.55; color: #1f2933; }
     </style>
 </head>
 <body>
-    <div class="header-box">
-        <div class="brand-tag">CLOVE HQ • RAPIDALERT AI SURVEILLANCE</div>
-        <h1>{{ settings.title }}</h1>
-        <div class="meta-pills">
-            <span class="pill">📅 {{ date_str }}</span>
-            <span class="pill pill-blue">⏱ {{ time_window }}</span>
-            <span class="pill pill-shift">🌓 {{ shift_name }} SHIFT</span>
-        </div>
-    </div>
-
-    <!-- Executive KPI Grid -->
-    <table class="kpi-table">
+    <table class="logo-strip">
         <tr>
-            <td class="kpi-card" style="width: 20%;">
-                <div class="kpi-val">{{ stats.total_analyses }}</div>
-                <div class="kpi-lbl">Total Analyses</div>
-            </td>
-            <td class="kpi-card" style="width: 20%;">
-                <div class="kpi-val" style="color: {% if stats.high_count > 0 %}#dc2626{% else %}#16a34a{% endif %};">{{ stats.high_count }}</div>
-                <div class="kpi-lbl">High Severity</div>
-            </td>
-            <td class="kpi-card" style="width: 20%;">
-                <div class="kpi-val" style="color: {% if stats.med_count > 0 %}#d97706{% else %}#0f172a{% endif %};">{{ stats.med_count }}</div>
-                <div class="kpi-lbl">Medium Alerts</div>
-            </td>
-            <td class="kpi-card" style="width: 20%;">
-                <div class="kpi-val">{{ stats.peak_workers }}</div>
-                <div class="kpi-lbl">Peak Persons</div>
-            </td>
-            <td class="kpi-card" style="width: 20%;">
-                <div class="kpi-val" style="color: #16a34a;">{{ stats.active_cameras_count }} / {{ stats.total_cameras_count }}</div>
-                <div class="kpi-lbl">Active Feeds</div>
+            <td style="text-align: left;">{% if settings.site_logo %}<img src="file://{{ settings.site_logo }}" style="height: 74px;" alt="{{ settings.site_name }}">{% endif %}</td>
+            <td style="text-align: right;">
+                <div class="logo-by">Report by</div>
+                {% if settings.provider_logo %}<img src="file://{{ settings.provider_logo }}" style="height: 40px;" alt="{{ settings.provider_name }}">{% else %}<b>{{ settings.provider_name }}</b>{% endif %}
             </td>
         </tr>
     </table>
+    <div class="header-box">
+        <div class="brand-tag">{{ settings.site_name }} • Site Monitoring</div>
+        <h1>{{ settings.title }}</h1>
+        <div class="meta-pills">
+            <span class="pill">{{ date_str }}</span>
+            <span class="pill pill-blue">{{ time_window }}</span>
+            <span class="pill pill-shift">{{ shift_name }} SHIFT</span>
+            <span class="pill pill-feeds">Active feeds: {{ stats.active_cameras_count }} / {{ stats.total_cameras_count }}</span>
+        </div>
+    </div>
+
+    {% if written_summary %}
+    <div class="written-summary">
+        <div class="ws-label">Written Summary</div>
+        <div class="ws-text">{{ written_summary }}</div>
+    </div>
+    {% endif %}
 
     <h2>1. General Camera Zone Status &amp; Operational Metrics</h2>
     <table class="data-table" id="gen-info">
         <thead>
             <tr>
-                <th style="width: 17%;">Camera</th>
-                <th style="width: 25%;">Zone Description</th>
-                <th style="width: 7%; text-align: center;">In</th>
-                <th style="width: 7%; text-align: center;">Out</th>
-                <th style="width: 11%; text-align: center;">Peak Persons</th>
-                <th style="width: 17%; text-align: center;">Vehicles</th>
-                <th style="width: 16%; text-align: center;">Activity Rate</th>
+                <th style="width: 22%;">Camera</th>
+                <th style="width: 46%;">Zone Description</th>
+                <th style="width: 9%; text-align: center;">In</th>
+                <th style="width: 9%; text-align: center;">Out</th>
+                <th style="width: 14%; text-align: center;">Peak Persons</th>
             </tr>
         </thead>
         <tbody>
@@ -365,8 +379,6 @@
                 <td style="text-align: center;">{{ row[2] }}</td>
                 <td style="text-align: center;">{{ row[3] }}</td>
                 <td style="text-align: center;"><b>{{ row[4] }}</b></td>
-                <td style="text-align: center; font-size: 8px;">{{ row[5]|replace("\n", "<br>")|safe }}</td>
-                <td style="text-align: center;"><span class="badge-ok">{{ row[6] }}</span></td>
             </tr>
             {% endfor %}
         </tbody>
@@ -378,8 +390,8 @@
             <tr>
                 <th style="width: 10%;">Time</th>
                 <th style="width: 13%;">Camera</th>
-                <th style="width: 13%;">Severity / Type</th>
-                <th style="width: 42%;">VLM Observation &amp; Scene Details</th>
+                <th style="width: 13%; text-align: center;">Severity / Type</th>
+                <th style="width: 42%;">Observation &amp; Scene Details</th>
                 <th style="width: 22%; text-align: center;">Evidence Snapshot</th>
             </tr>
         </thead>
@@ -388,10 +400,11 @@
             <tr>
                 <td><b>{{ ev.ts }}</b></td>
                 <td>{{ ev.cam }}</td>
-                <td>
-                    {% if ev.sev == "HIGH" %}<span class="badge-high">🚨 HIGH<br>{{ ev.type }}</span>
-                    {% elif ev.sev == "MEDIUM" %}<span class="badge-med">⚠️ MEDIUM<br>{{ ev.type }}</span>
-                    {% else %}<span class="badge-low">{{ ev.sev }}<br>{{ ev.type }}</span>{% endif %}
+                <td class="sev-cell">
+                    {% if ev.sev == "HIGH" %}<span class="badge-high">HIGH</span>
+                    {% elif ev.sev == "MEDIUM" %}<span class="badge-med">MEDIUM</span>
+                    {% else %}<span class="badge-low">{{ ev.sev }}</span>{% endif %}
+                    <div class="sev-type">{{ ev.type }}</div>
                 </td>
                 <td style="font-size: 8.5px; line-height: 1.3;">{{ ev.obs }}</td>
                 <td style="text-align: center;">
@@ -414,8 +427,7 @@
         {% for zone_item in zone_activity %}
         <div class="zone-card">
             <div class="zone-card-header">
-                <span class="zone-card-title">📷 {{ zone_item.cam }} — {{ zone_item.zone }}</span>
-                <span class="badge-ok">{{ zone_item.act_pct }} Activity</span>
+                <span class="zone-card-title">{{ zone_item.cam }} — {{ zone_item.zone }}</span>
             </div>
             <div class="zone-card-desc">
                 {{ zone_item.summary }}

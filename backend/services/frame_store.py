@@ -15,18 +15,24 @@ from typing import Optional, Tuple, Set
 import cv2
 import numpy as np
 
-from backend.core.config import DEFAULT_FRAME_WIDTH, DEFAULT_JPEG_QUALITY
+from backend.core.config import DEFAULT_FRAME_WIDTH, DEFAULT_JPEG_QUALITY, INGEST_FPS, FRAME_HISTORY_SEC
 from backend.core.error_tracker import error_tracker
 
 
 class FrameStore:
     def __init__(self, max_w: int = DEFAULT_FRAME_WIDTH, jpeg_quality: int = DEFAULT_JPEG_QUALITY):
         self._store: dict[str, collections.deque[Tuple[np.ndarray, float]]] = collections.defaultdict(
-            lambda: collections.deque(maxlen=300)
+            lambda: collections.deque(maxlen=INGEST_FPS * FRAME_HISTORY_SEC)
         )
         self._frame_seq: dict[str, int] = collections.defaultdict(int)
         self._latest_jpeg: dict[str, Tuple[int, float, bytes, int, int]] = {}  # (seq, ts, bytes, w, q)
-        self._condition = threading.Condition()
+        # One mutex guards frame sequence state; each camera gets its own Condition on it so a
+        # new frame wakes only that camera's stream readers. With a single shared Condition every
+        # frame from any camera woke every MJPEG reader (18 cameras x 25fps = ~450 spurious
+        # wake-ups per second per viewer), each of which then returned empty-handed.
+        self._mutex = threading.RLock()
+        self._condition = threading.Condition(self._mutex)
+        self._cam_conditions: dict[str, threading.Condition] = {}
         self._lock = threading.Lock()
         self.max_w = max_w
         self.jpeg_quality = jpeg_quality
@@ -35,10 +41,18 @@ class FrameStore:
         if frame is None or frame.size == 0:
             return
         ts = time.monotonic()
-        with self._condition:
-            self._store[cam_name].append((frame, ts))
+        with self._mutex:
+            # Keep the buffer time-based for every source: the hardware pipeline is already capped
+            # at INGEST_FPS, but the CPU fallback decoder delivers the camera's full frame rate,
+            # which would shrink a fixed-length buffer to a few seconds of history.
+            q = self._store[cam_name]
+            if q and ts - q[-1][1] < 0.75 / INGEST_FPS:
+                return
+            q.append((frame, ts))
             self._frame_seq[cam_name] += 1
-            self._condition.notify_all()
+            cond = self._cam_conditions.get(cam_name)
+            if cond is not None:
+                cond.notify_all()
 
     def get_frame_since(
         self,
@@ -55,10 +69,17 @@ class FrameStore:
         mw = max_w if max_w is not None else 1280
         q = quality if quality is not None else 78
 
-        with self._condition:
+        with self._mutex:
+            cond = self._cam_conditions.get(cam_name)
+            if cond is None:
+                cond = self._cam_conditions[cam_name] = threading.Condition(self._mutex)
+            deadline = time.monotonic() + timeout
             cur_seq = self._frame_seq.get(cam_name, 0)
-            if cur_seq <= last_seq:
-                self._condition.wait(timeout=timeout)
+            while cur_seq <= last_seq:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                cond.wait(timeout=remaining)
                 cur_seq = self._frame_seq.get(cam_name, 0)
 
             if cur_seq <= last_seq or cam_name not in self._store or not self._store[cam_name]:
@@ -87,6 +108,12 @@ class FrameStore:
         except Exception:
             pass
         return None
+
+    def has_frames(self, cam_name: str) -> bool:
+        """True if at least one frame is buffered. Use this instead of get_latest() for existence
+        checks: get_latest() copies the whole frame."""
+        with self._lock:
+            return bool(self._store.get(cam_name))
 
     def get_latest(self, cam_name: str) -> Optional[Tuple[np.ndarray, float]]:
         with self._lock:
@@ -212,30 +239,32 @@ class FrameStore:
                 return None
             items = list(q)
             
-        now = time.monotonic()
-        target_start = now - span_sec
-        
-        # Filter to frames roughly within the window (plus some slack)
-        window = [item for item in items if item[1] >= target_start - 2.0]
-        
-        if not window:
-            window = items
-        if not window:
+        selected = self._select_temporal(items, count, span_sec)
+        if not selected:
             return None
-
-        # If we have fewer than requested, pad by repeating the oldest valid frame
-        if len(window) < count:
-            oldest = window[0]
-            padded = [oldest] * (count - len(window)) + list(window)
-            selected = padded
-        elif len(window) == count:
-            selected = window
-        else:
-            # Evenly sample `count` frames from the window
-            indices = np.linspace(0, len(window) - 1, count, dtype=int)
-            selected = [window[i] for i in indices]
-
         return [self._encode_frame(f, max_w, quality, cam_name=cam_name) for f, _ in selected]
+
+    @staticmethod
+    def _select_temporal(items: list, count: int, span_sec: float) -> list:
+        """
+        Pick `count` frames evenly spaced over exactly `span_sec`, ending at the newest frame:
+        for count=4, span=10 the targets are t-10.0, t-6.67, t-3.33 and t-0, and the frame closest
+        to each target is used.
+
+        The previous version sampled by index over a window with 2 seconds of slack, so the frames
+        handed to the model sat at about t-12, t-8, t-4, t-0 while their labels said
+        t-10, t-6.5, t-3, t-0. If less than `span_sec` of history exists, the oldest frame repeats.
+        """
+        if not items:
+            return []
+        if count <= 1:
+            return [items[-1]]
+        newest_ts = items[-1][1]
+        # Right after a (re)connect there is less history than asked for: spread the frames over
+        # what exists rather than repeating the oldest one three times.
+        span_sec = min(span_sec, newest_ts - items[0][1])
+        targets =[newest_ts - span_sec * (count - 1 - i) / (count - 1) for i in range(count)]
+        return [min(items, key=lambda item: abs(item[1] - t)) for t in targets]
 
     def get_temporal_snapshots_with_timestamps_b64(
         self,
@@ -252,17 +281,9 @@ class FrameStore:
                 return None
             items = list(q)
 
-        target_start = time.monotonic() - span_sec
-        window = [item for item in items if item[1] >= target_start - 2.0] or items
-        if not window:
+        selected = self._select_temporal(items, count, span_sec)
+        if not selected:
             return None
-        if len(window) < count:
-            selected = [window[0]] * (count - len(window)) + list(window)
-        elif len(window) == count:
-            selected = window
-        else:
-            indices = np.linspace(0, len(window) - 1, count, dtype=int)
-            selected = [window[i] for i in indices]
         return [(self._encode_frame(frame, max_w, quality, cam_name=cam_name), ts) for frame, ts in selected]
 
     def encode_frames(

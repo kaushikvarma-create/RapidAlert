@@ -24,21 +24,27 @@ from typing import Optional, Dict, Any, List, Tuple
 import weasyprint
 from jinja2 import Environment
 
-from backend.core.config import DATABASE_PATH, SYSTEM_CONFIG_PATH, DEFAULT_VLM_MODEL
+from backend.core.config import DATABASE_PATH, SYSTEM_CONFIG_PATH, CAMERAS_CONFIG_PATH, DEFAULT_VLM_MODEL
 from backend.core.error_tracker import error_tracker
 from backend.core.shutdown_logger import log_system_event
 
-MAX_REPORTS_BUFFER = 69  # Exactly 69 shift reports (~34.5 days of twice-daily shifts)
+# Reports are emailed on three cadences (see REPORT_SLOT_HOURS below): every 6h, every 12h and
+# every 24h = 7 reports a day. 210 keeps about a month of them.
+MAX_REPORTS_BUFFER = 210
+REPORTS_PER_DAY = 7
 
-ZONE_MAP = {
-    "1ST_ENTRANCE": "1F Corridor & Turnstiles",
-    "1ST_EXIT": "1F Corridor Exit",
-    "1ST_OUT": "Lobby & Lift Area",
-    "ADMIN_CABIN": "Executive Admin Cabin",
-    "PARKING": "Basement Parking Zone",
-    "RECEPTION": "Main Front Reception Desk",
-    "SERVER_ENTRY": "Server Room Corridor"
-}
+# Report clock: a slot every 6 hours. At each slot every window whose length divides the slot
+# hour (counted from 06:00) is due, so: 6h report at 00/06/12/18, 12h report at 06/18, 24h at 06.
+REPORT_SLOT_HOURS = (0, 6, 12, 18)
+REPORT_ANCHOR_HOUR = 6
+DEFAULT_REPORT_WINDOWS_HOURS = (6, 12, 24)
+REPORT_CATCHUP_MIN = 10   # a slot can still be served this many minutes late (e.g. after a restart)
+
+# Report branding (all overridable in system.json: report_site_name, report_provider_name,
+# report_title, report_site_logo, report_provider_logo).
+DEFAULT_SITE_NAME = "Alekhya Rise"
+DEFAULT_PROVIDER_NAME = "Clove Technologies"
+ASSETS_DIR = Path(__file__).resolve().parent.parent / "templates" / "assets"
 
 
 class ReportingService:
@@ -162,70 +168,90 @@ class ReportingService:
             + "\n".join(obs_list)
         )
 
-        try:
-            import requests
-            resp = requests.post(
-                "http://localhost:8000/v1/chat/completions",
-                json={
-                    "model": self._get_vlm_model(),
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.2,
-                    "max_tokens": 60,
-                },
-                timeout=8,
-            )
-            if resp.ok:
-                data = resp.json()
-                text = data["choices"][0]["message"]["content"].strip().replace('"', "")
-                if text:
-                    return text
-        except Exception:
-            pass
+        # Goes through _llm_text, which turns the model's "thinking" output off. The direct call
+        # used before did not, so with a 60-token limit the report printed the start of the
+        # model's reasoning ("Thinking Process: 1. Analyze the Request...") as the camera summary.
+        text = self._llm_text(prompt, max_tokens=80, timeout=15.0).replace('"', "").strip()
+        if text and not text.lower().startswith("thinking"):
+            return text
         return "Standard operational movement and routine zone monitoring observed."
 
-    def _get_parking_vehicle_count(self, latest_frame_bytes: Optional[bytes]) -> str:
-        if not latest_frame_bytes:
-            return "2W: 0\n4W: 0\nHV: 0"
+    def _llm_text(self, prompt: str, max_tokens: int = 260, timeout: float = 45.0) -> str:
+        """Plain text completion against the first configured vLLM endpoint that answers."""
+        import requests
+        cfg = self._get_sys_config()
+        urls = [e.get("url") for e in cfg.get("vllm_endpoints", []) if e.get("url")] or ["http://localhost:8000"]
+        for url in urls:
+            try:
+                resp = requests.post(
+                    f"{url}/v1/chat/completions",
+                    json={
+                        "model": self._get_vlm_model(),
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": 0.2,
+                        "max_tokens": max_tokens,
+                        "chat_template_kwargs": {"enable_thinking": False},
+                    },
+                    timeout=timeout,
+                )
+                if resp.ok:
+                    text = (resp.json()["choices"][0]["message"]["content"] or "").strip()
+                    if text:
+                        return text
+            except Exception:
+                continue
+        return ""
 
-        try:
-            import requests
-            import re
-            b64_img = base64.b64encode(latest_frame_bytes).decode("utf-8")
-            prompt = (
-                "Carefully scan the ENTIRE image and count every single vehicle visible anywhere in the frame.\n"
-                "Count the vehicles by category:\n"
-                "- 2W (motorcycles, bikes, scooters)\n"
-                "- 4W (cars, SUVs, vans)\n"
-                "- HV (trucks, buses, heavy machinery)\n\n"
-                "Return ONLY a valid JSON object in this exact format without any markdown:\n"
-                "{\"2W\": 0, \"4W\": 0, \"HV\": 0}"
-            )
+    def _get_written_summary(
+        self,
+        period_label: str,
+        time_window: str,
+        stats: dict,
+        notable_events: list[dict],
+        routines: Dict[str, str],
+        total_counts: Dict[str, int],
+    ) -> str:
+        """
+        One written paragraph for the whole reporting period, built only from what was recorded.
+        Falls back to a plain factual paragraph if the model cannot be reached.
+        """
+        busiest = sorted(total_counts.items(), key=lambda kv: -kv[1])[:3]
+        quiet = [c for c, n in total_counts.items() if n == 0]
+        fallback_parts = [
+            f"During {time_window}, {stats['total_analyses']} scene analyses were recorded across "
+            f"{stats['active_cameras_count']} of {stats['total_cameras_count']} cameras.",
+            (f"{stats['high_count']} high-severity and {stats['med_count']} medium-severity event(s) were flagged."
+             if (stats['high_count'] or stats['med_count'])
+             else "No high- or medium-severity events were flagged."),
+        ]
+        if busiest and busiest[0][1] > 0:
+            fallback_parts.append("Most activity was recorded on " + ", ".join(c for c, n in busiest if n > 0) + ".")
+        if quiet:
+            fallback_parts.append(f"{len(quiet)} camera(s) recorded no analyses in this period: " + ", ".join(quiet[:6]) + ".")
+        fallback = " ".join(fallback_parts)
 
-            resp = requests.post(
-                "http://localhost:8000/v1/chat/completions",
-                json={
-                    "model": self._get_vlm_model(),
-                    "messages": [{
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}}
-                        ]
-                    }],
-                    "temperature": 0.1,
-                    "max_tokens": 50,
-                },
-                timeout=15,
-            )
-            if resp.ok:
-                reply = resp.json()["choices"][0]["message"]["content"].strip()
-                match = re.search(r"\{.*?\}", reply, re.DOTALL)
-                if match:
-                    d = json.loads(match.group(0))
-                    return f"2W: {d.get('2W', 0)}\n4W: {d.get('4W', 0)}\nHV: {d.get('HV', 0)}"
-        except Exception:
-            pass
-        return "2W: 0\n4W: 0\nHV: 0"
+        event_lines = [f"- {e['ts']} {e['cam']} [{e['sev']}]: {e['obs'][:220]}" for e in notable_events[:12]]
+        cam_lines = [
+            f"- {c}: {total_counts.get(c, 0)} analyses. {routines.get(c, '')[:200]}"
+            for c, _ in sorted(total_counts.items(), key=lambda kv: -kv[1])[:20]
+        ]
+        prompt = (
+            "You are writing the summary paragraph of an automated CCTV monitoring report.\n"
+            f"Reporting period: {period_label}, {time_window}.\n"
+            f"Totals: {stats['total_analyses']} analyses; {stats['high_count']} high-severity events; "
+            f"{stats['med_count']} medium-severity events; {stats['active_cameras_count']} of "
+            f"{stats['total_cameras_count']} cameras reporting.\n\n"
+            "Flagged events (time, camera, severity, observation):\n"
+            + ("\n".join(event_lines) if event_lines else "- none")
+            + "\n\nPer-camera activity:\n"
+            + ("\n".join(cam_lines) if cam_lines else "- none")
+            + "\n\nWrite 4 to 6 plain sentences. State the overall level of activity, describe each flagged "
+            "event with its camera and time (or say clearly that there were none), and name the busiest and "
+            "the quiet cameras. Use only the information above; do not add causes, advice or details that are "
+            "not listed. No headings, no bullet points, no greeting."
+        )
+        text = self._llm_text(prompt, max_tokens=320).replace("\n", " ").strip()
+        return text if len(text) > 40 else fallback
 
     def _get_camera_key_frames(
         self,
@@ -259,7 +285,7 @@ class ReportingService:
             if ev.get("img_path") and Path(ev["img_path"]).exists():
                 key_frames.append({
                     "img_path": ev["img_path"],
-                    "badge_text": f"🚨 ALERT FRAME ({ev['ts']})",
+                    "badge_text": f"ALERT FRAME ({ev['ts']})",
                     "badge_class": "badge-alert",
                     "caption": (ev["obs"][:65] + "...") if len(ev["obs"]) > 65 else ev["obs"],
                     "time_str": ev["ts"],
@@ -283,7 +309,7 @@ class ReportingService:
                     f.write(img_data)
                 key_frames.append({
                     "img_path": str(img_file.resolve()),
-                    "badge_text": f"🚨 ALERT FRAME ({ev['ts']})",
+                    "badge_text": f"ALERT FRAME ({ev['ts']})",
                     "badge_class": "badge-alert",
                     "caption": (ev["obs"][:65] + "...") if len(ev["obs"]) > 65 else ev["obs"],
                     "time_str": ev["ts"],
@@ -314,7 +340,7 @@ class ReportingService:
                         f.write(r["frame_data"])
                     key_frames.append({
                         "img_path": str(img_file.resolve()),
-                        "badge_text": f"📷 ROUTINE CHECKPOINT ({ts_str})",
+                        "badge_text": f"ROUTINE CHECKPOINT ({ts_str})",
                         "badge_class": "badge-routine",
                         "caption": "Normal operational zone status",
                         "time_str": ts_str,
@@ -334,7 +360,7 @@ class ReportingService:
                         f.write(img_data)
                     key_frames.append({
                         "img_path": str(img_file.resolve()),
-                        "badge_text": f"📷 BASELINE MONITOR ({ts_str})",
+                        "badge_text": f"BASELINE MONITOR ({ts_str})",
                         "badge_class": "badge-routine",
                         "caption": "Active zone baseline surveillance",
                         "time_str": ts_str,
@@ -352,6 +378,7 @@ class ReportingService:
         custom_start: Optional[float] = None,
         custom_end: Optional[float] = None,
         send_email: bool = True,
+        label: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Generates executive PDF shift report from SQLite data and optionally dispatches via email.
@@ -365,7 +392,7 @@ class ReportingService:
             p_start, p_end = custom_start, custom_end
             start_dt = datetime.fromtimestamp(p_start)
             end_dt = datetime.fromtimestamp(p_end)
-            shift_label = "CUSTOM"
+            shift_label = label or "CUSTOM"
         else:
             if shift_type == "NIGHT" or (shift_type == "AUTO" and now.hour < 12):
                 # Night shift: yesterday 18:00 to today 06:00
@@ -386,26 +413,39 @@ class ReportingService:
         if p_end > now_ts:
             p_end = now_ts
 
-        time_window = f"{start_dt.strftime('%H:%M')} – {end_dt.strftime('%H:%M')} IST"
+        if start_dt.date() == end_dt.date():
+            time_window = f"{start_dt.strftime('%H:%M')} – {end_dt.strftime('%H:%M')} IST"
+        else:  # window crosses midnight: show both dates so a 24h report is unambiguous
+            time_window = f"{start_dt.strftime('%d %b %H:%M')} – {end_dt.strftime('%d %b %H:%M')} IST"
         date_str = start_dt.strftime("%d %b %Y")
 
         conn = self._conn()
 
         # Fetch active camera list
-        cam_rows = conn.execute("""
-            SELECT DISTINCT cam FROM analyses
-            UNION
-            SELECT name FROM (
-                SELECT 'SERVER_ENTRY' AS name UNION SELECT '1ST_ENTRANCE' UNION
-                SELECT 'PARKING' UNION SELECT '1ST_OUT' UNION
-                SELECT 'ADMIN_CABIN' UNION SELECT '1ST_EXIT' UNION SELECT 'RECEPTION'
-            )
-        """).fetchall()
-        all_cams = sorted(list(set(r[0] for r in cam_rows if r[0])))
+        # Cameras in the report = cameras configured now + cameras that reported in this period.
+        # (It used to be a fixed list of seven office camera names plus every camera that had
+        # ever produced an analysis, so a different site would be reported as mostly dead feeds.)
+        configured_cams: list[str] = []
+        zone_by_cam: Dict[str, str] = {}
+        try:
+            with open(CAMERAS_CONFIG_PATH, "r", encoding="utf-8") as f:
+                for c in json.load(f):
+                    if not c.get("name") or not c.get("enabled", True):
+                        continue
+                    configured_cams.append(c["name"])
+                    # "Area" column: first sentence of the camera's own description, if it has one.
+                    ctx = (c.get("normal_context") or "").strip().split(". ")[0].strip().rstrip(".")
+                    zone_by_cam[c["name"]] = (ctx[:70] + "…") if len(ctx) > 70 else ctx
+        except Exception:
+            pass
+        cam_rows = conn.execute(
+            "SELECT DISTINCT cam FROM analyses WHERE ts >= ? AND ts <= ?", (p_start, p_end)
+        ).fetchall()
+        all_cams = sorted(set(configured_cams) | set(r[0] for r in cam_rows if r[0]))
 
         # Fetch analyses in period
         analyses_rows = conn.execute("""
-            SELECT id, cam, ts, observation, activity, workers, machinery, safety, severity, incident_id
+            SELECT id, cam, ts, observation, activity, workers, machinery, safety, severity, incident_id, trigger_mode
             FROM analyses
             WHERE ts >= ? AND ts <= ?
             ORDER BY ts ASC
@@ -415,6 +455,11 @@ class ReportingService:
         peak_occ_by_cam: Dict[str, int] = {c: 0 for c in all_cams}
         active_counts: Dict[str, int] = {c: 0 for c in all_cams}
         total_counts: Dict[str, int] = {c: 0 for c in all_cams}
+        person_counts: Dict[str, list[int]] = {c: [] for c in all_cams}   # per-check person counts
+        motion_counts: Dict[str, int] = {c: 0 for c in all_cams}          # drift-triggered checks
+        alert_counts: Dict[str, int] = {c: 0 for c in all_cams}           # MEDIUM / HIGH
+        hour_events: Dict[int, int] = {}                                  # hour bucket -> motion events
+        hour_alerts: Dict[int, int] = {}
 
         high_events = []
         med_events = []
@@ -430,6 +475,9 @@ class ReportingService:
                 peak_occ_by_cam[c] = 0
                 active_counts[c] = 0
                 total_counts[c] = 0
+                person_counts[c] = []
+                motion_counts[c] = 0
+                alert_counts[c] = 0
 
             total_counts[c] += 1
             act = (row["activity"] or "IDLE").upper()
@@ -444,14 +492,23 @@ class ReportingService:
                 w_c = 0
             if w_c > peak_occ_by_cam[c]:
                 peak_occ_by_cam[c] = w_c
+            person_counts[c].append(w_c)
 
             sev = (row["severity"] or "LOW").upper()
+            mode = (row["trigger_mode"] or "PERIODIC").upper()
+            hour_bucket = int((row["ts"] - p_start) // 3600)
+            if mode == "TRIGGER":
+                motion_counts[c] += 1
+                hour_events[hour_bucket] = hour_events.get(hour_bucket, 0) + 1
+            if sev in ("HIGH", "MEDIUM"):
+                alert_counts[c] += 1
+                hour_alerts[hour_bucket] = hour_alerts.get(hour_bucket, 0) + 1
             ev_item = {
                 "id": row["id"],
                 "ts": datetime.fromtimestamp(row["ts"]).strftime("%H:%M:%S"),
                 "mtime": row["ts"],
                 "cam": c,
-                "type": act if act != "UNKNOWN" else "MONITORING",
+                "type": {"TRIGGER": "Motion event", "FOLLOWUP": "Follow-up check"}.get(mode, "Routine check"),
                 "sev": sev,
                 "obs": row["observation"] or "Routine scene observation",
                 "incident_id": row["incident_id"],
@@ -512,46 +569,28 @@ class ReportingService:
 
         selected_events.sort(key=lambda x: x["mtime"])
 
-        # Latest parking image for vehicle categorization
-        parking_img_bytes = None
-        if self.frame_store:
-            p_entry = self.frame_store.get_latest_cached_entry("PARKING")
-            if p_entry:
-                try:
-                    parking_img_bytes = base64.b64decode(p_entry[1])
-                except Exception:
-                    pass
+        # Per-camera figures. Nothing here depends on a camera's name, so the report works for
+        # whatever cameras are configured. "Peak persons" is the 95th percentile of the per-check
+        # person counts rather than the single largest number the model ever wrote (one miscount,
+        # e.g. 87, used to set the figure). The Activity Rate and Vehicles columns were removed.
+        def _p95(values: list[int]) -> int:
+            if not values:
+                return 0
+            ordered = sorted(values)
+            return ordered[min(len(ordered) - 1, int(len(ordered) * 0.95))]
 
-        if not parking_img_bytes:
-            p_row = conn.execute("""
-                SELECT frame_data FROM incident_frames
-                WHERE cam = 'PARKING'
-                ORDER BY ts DESC
-                LIMIT 1
-            """).fetchone()
-            if p_row and p_row["frame_data"]:
-                parking_img_bytes = p_row["frame_data"]
-
-        # Compile general info rows and executive zone activity per camera
-        general_info = []
         routines = {}
         zone_activity = []
+        general_info = []
+        peak_by_cam: Dict[str, int] = {}
         for c in all_cams:
-            zone = ZONE_MAP.get(c, "Surveillance Zone")
-            p_occ = peak_occ_by_cam.get(c, 0)
-            tot = total_counts.get(c, 0)
-            act_cnt = active_counts.get(c, 0)
-            act_pct = f"{int((act_cnt / tot) * 100)}%" if tot > 0 else "0%"
+            zone = zone_by_cam.get(c, "") or "Surveillance Zone"
+            peak_by_cam[c] = _p95(person_counts.get(c, []))
 
-            veh_str = "–"
-            if c == "PARKING":
-                veh_str = self._get_parking_vehicle_count(parking_img_bytes)
+            # Camera, zone, In, Out, peak persons. In/Out have no data source and stay blank.
+            general_info.append([c, zone, "–", "–", str(peak_by_cam[c])])
 
-            in_cnt = "–"
-            out_cnt = "–"
-            general_info.append([c, zone, in_cnt, out_cnt, str(p_occ), veh_str, act_pct, "OK"])
-
-            # Routine summary via LLM
+            # One-sentence routine summary for this camera
             c_events = events_by_cam.get(c, [])
             rout_desc = self._get_routine_summary(c, c_events)
             routines[c] = rout_desc
@@ -562,8 +601,7 @@ class ReportingService:
                 "cam": c,
                 "zone": zone,
                 "summary": rout_desc,
-                "act_pct": act_pct,
-                "peak_occ": p_occ,
+                "peak_occ": peak_by_cam[c],
                 "key_frames": c_keyframes,
             })
 
@@ -582,11 +620,16 @@ class ReportingService:
             "total_analyses": len(analyses_rows),
             "high_count": len(high_events),
             "med_count": len(med_events),
-            "peak_workers": max(peak_occ_by_cam.values()) if peak_occ_by_cam else 0,
+            "peak_workers": max(peak_by_cam.values()) if peak_by_cam else 0,
+            "motion_events": sum(motion_counts.values()),
             "active_cameras_count": sum(1 for c in all_cams if total_counts.get(c, 0) > 0),
             "total_cameras_count": len(all_cams),
             "sanitation_count": sanitation_shift_count,
         }
+
+        written_summary = self._get_written_summary(
+            shift_label, time_window, stats, selected_events, routines, total_counts
+        )
 
         # Render PDF via Jinja2 + WeasyPrint
         template_file = Path(__file__).resolve().parent.parent / "templates" / "report_template.html"
@@ -600,10 +643,22 @@ class ReportingService:
         template = env.from_string(template_str)
 
         sys_config = self._get_sys_config()
-        title = sys_config.get("report_title", "CLOVE HQ SITE INTELLIGENCE REPORT")
+        site_name = sys_config.get("report_site_name", DEFAULT_SITE_NAME)
+        provider_name = sys_config.get("report_provider_name", DEFAULT_PROVIDER_NAME)
+        title = sys_config.get("report_title", "Site Monitoring Report")
+
+        def _logo(key: str, default_file: str) -> str:
+            path = Path(sys_config.get(key) or (ASSETS_DIR / default_file))
+            return str(path.resolve()) if path.exists() else ""
 
         html_content = template.render(
-            settings={"title": title},
+            settings={
+                "title": title,
+                "site_name": site_name,
+                "provider_name": provider_name,
+                "site_logo": _logo("report_site_logo", "site_logo.png"),
+                "provider_logo": _logo("report_provider_logo", "provider_logo.png"),
+            },
             date_str=date_str,
             time_window=time_window,
             shift_name=shift_label,
@@ -612,9 +667,11 @@ class ReportingService:
             all_events=selected_events[:20],
             routines=routines,
             zone_activity=zone_activity,
+            written_summary=written_summary,
         )
 
-        pdf_filename = f"Clove_HQ_Shift_Report_{now.strftime('%Y%m%d_%H%M%S')}.pdf"
+        site_slug = "".join(ch if ch.isalnum() else "_" for ch in site_name).strip("_") or "Site"
+        pdf_filename = f"{site_slug}_Site_Report_{now.strftime('%Y%m%d_%H%M%S')}.pdf"
         output_pdf_path = self.reports_dir / pdf_filename
 
         weasyprint.HTML(string=html_content).write_pdf(str(output_pdf_path))
@@ -630,6 +687,9 @@ class ReportingService:
             "generated_at": now.strftime("%b %d, %Y %H:%M:%S"),
             "shift": shift_label,
             "time_window": time_window,
+            "site_name": site_name,
+            "provider_name": provider_name,
+            "written_summary": written_summary,
             "stats": stats,
             "exec_highlights": exec_highlights[:5],
             "safety_compliance": "✔ Standard safety compliance observed across all operational zones." if stats["high_count"] == 0 else f"⚠ {stats['high_count']} high severity incident(s) flagged during shift.",
@@ -733,6 +793,15 @@ class ReportingService:
         try:
             stats = summary.get("stats", {})
             highlights = summary.get("exec_highlights", [])
+            site_name = summary.get("site_name") or sys_config.get("report_site_name", DEFAULT_SITE_NAME)
+            provider_name = summary.get("provider_name") or sys_config.get("report_provider_name", DEFAULT_PROVIDER_NAME)
+            site_logo = Path(sys_config.get("report_site_logo") or (ASSETS_DIR / "site_logo.png"))
+            provider_logo = Path(sys_config.get("report_provider_logo") or (ASSETS_DIR / "provider_logo.png"))
+            site_logo_html = "<img src='cid:sitelogo' alt='' height='64' style='display:block;'>" if site_logo.exists() else ""
+            provider_logo_html = (
+                "<img src='cid:providerlogo' alt='' height='30' style='display:block; margin-left:auto;'>"
+                if provider_logo.exists() else f"<b>{provider_name}</b>"
+            )
             high_cnt = stats.get("high_count", 0)
             med_cnt = stats.get("med_count", 0)
 
@@ -741,12 +810,8 @@ class ReportingService:
                 for h in highlights
             ) or "<li style='color: #64748b;'>Routine baseline surveillance maintained across all active camera zones.</li>"
 
-            sanitation_cnt = stats.get("sanitation_count", 0)
-            sanitation_html = (
-                f"<li style='color: #0284c7; font-weight: 500;'>🧹 Watchdog Sanitation: {sanitation_cnt} stale/rogue process(es) proactively eliminated during shift.</li>"
-                if sanitation_cnt > 0
-                else "<li style='color: #16a34a; font-weight: 500;'>🧹 Watchdog Sanitation: Zero runaway or stale processes detected; process table remained clean.</li>"
-            )
+            import html as _html
+            written_html = _html.escape(summary.get("written_summary") or "")
 
             safety_html = (
                 "<li style='color: #16a34a; font-weight: 600;'>✔ Zero high-severity security or perimeter breaches detected during this shift.</li>"
@@ -759,12 +824,21 @@ class ReportingService:
 <head><meta charset='utf-8'></head>
 <body style='margin: 0; padding: 20px 0; background-color: #f1f5f9; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;'>
     <div style='max-width: 620px; margin: 0 auto; background-color: #ffffff; border-radius: 10px; overflow: hidden; border: 1px solid #cbd5e1;'>
-        <div style='background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); padding: 24px 22px; color: #ffffff;'>
-            <div style='font-size: 10px; font-weight: 700; color: #ea6f3e; text-transform: uppercase; letter-spacing: 1px;'>CLOVE HQ SURVEILLANCE • THE SENTRY</div>
-            <h1 style='margin: 6px 0 10px 0; font-size: 18px; font-weight: 800; color: #ffffff;'>{shift_label} Site Intelligence Report</h1>
-            <div style='font-size: 11px; color: #94a3b8;'>
-                <span style='background: rgba(255,255,255,0.12); color: #f8fafc; padding: 3px 8px; border-radius: 4px; margin-right: 6px;'>📅 {date_str}</span>
-                <span style='background: rgba(234,111,62,0.2); color: #ea6f3e; padding: 3px 8px; border-radius: 4px;'>⏱ {timeframe_str}</span>
+        <div style='padding: 14px 22px 12px 22px; background: #ffffff;'>
+            <table width='100%' cellspacing='0' cellpadding='0'><tr>
+                <td style='vertical-align: middle;'>{site_logo_html}</td>
+                <td style='vertical-align: middle; text-align: right;'>
+                    <div style='font-size: 8px; letter-spacing: 1px; color: #94a3b8; text-transform: uppercase; margin-bottom: 3px;'>Report by</div>
+                    {provider_logo_html}
+                </td>
+            </tr></table>
+        </div>
+        <div style='background: linear-gradient(120deg, #1f2d1a 0%, #33502a 55%, #4f7d60 100%); padding: 22px 22px; color: #ffffff; border-bottom: 4px solid #d67b4c;'>
+            <div style='font-size: 10px; font-weight: 700; color: #e6dc9a; text-transform: uppercase; letter-spacing: 1px;'>{site_name} • Site Monitoring</div>
+            <h1 style='margin: 6px 0 10px 0; font-size: 18px; font-weight: 800; color: #ffffff;'>{shift_label} Site Report</h1>
+            <div style='font-size: 11px; color: #cbd5c0;'>
+                <span style='background: rgba(255,255,255,0.14); color: #f8fafc; padding: 3px 8px; border-radius: 4px; margin-right: 6px;'>{date_str}</span>
+                <span style='background: rgba(214,123,76,0.3); color: #ffd2b8; padding: 3px 8px; border-radius: 4px;'>{timeframe_str}</span>
             </div>
         </div>
         <div style='padding: 20px 22px;'>
@@ -772,7 +846,7 @@ class ReportingService:
                 <tr>
                     <td align='center' style='padding: 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; width: 25%;'>
                         <div style='font-size: 18px; font-weight: 800; color: #0f172a;'>{stats.get('total_analyses', 0)}</div>
-                        <div style='font-size: 9px; font-weight: 700; color: #64748b; margin-top: 2px;'>ANALYSES</div>
+                        <div style='font-size: 9px; font-weight: 700; color: #64748b; margin-top: 2px;'>SCENE CHECKS</div>
                     </td>
                     <td style='width: 6px;'></td>
                     <td align='center' style='padding: 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; width: 25%;'>
@@ -793,8 +867,15 @@ class ReportingService:
             </table>
 
             <div style='margin-bottom: 18px;'>
+                <div style='font-size: 11px; font-weight: 700; color: #0f172a; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; border-bottom: 2px solid #ea6f3e; padding-bottom: 4px;'>
+                    Summary of the period
+                </div>
+                <p style='margin: 0; font-size: 12.5px; line-height: 1.55; color: #1e293b;'>{written_html}</p>
+            </div>
+
+            <div style='margin-bottom: 18px;'>
                 <div style='font-size: 11px; font-weight: 700; color: #0f172a; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; border-bottom: 2px solid #3b82f6; padding-bottom: 4px; display: inline-block;'>
-                    📌 Shift Highlights & Zone Activity
+                    Highlights by camera
                 </div>
                 <ul style='margin: 0; padding-left: 18px; font-size: 12px;'>
                     {exec_bullets_html}
@@ -803,31 +884,38 @@ class ReportingService:
 
             <div style='margin-bottom: 18px;'>
                 <div style='font-size: 11px; font-weight: 700; color: #0f172a; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; border-bottom: 2px solid #10b981; padding-bottom: 4px; display: inline-block;'>
-                    🛡️ Safety Compliance & Host Integrity
+                    Safety status
                 </div>
                 <ul style='margin: 0; padding-left: 18px; font-size: 12px;'>
                     {safety_html}
-                    {sanitation_html}
                 </ul>
             </div>
 
             <div style='padding: 12px 14px; background-color: #f8fafc; border: 1px dashed #cbd5e1; border-radius: 6px; font-size: 11px; color: #64748b;'>
-                📎 The comprehensive PDF report containing detailed zone metrics, vehicle counts, and visual evidence thumbnails is attached to this email.
+                The full PDF report, with per-camera figures and snapshots, is attached to this email.
             </div>
         </div>
         <div style='background: #f8fafc; padding: 12px 22px; border-top: 1px solid #e2e8f0; font-size: 10px; color: #94a3b8; text-align: center;'>
-            Generated automatically by The Sentry AI Surveillance Engine (Clove Technologies) • Jetson Thor Platform
+            {site_name} • Site Monitoring Report • {provider_name}
         </div>
     </div>
 </body>
 </html>"""
 
             msg = EmailMessage()
-            msg["Subject"] = f"[The Sentry] {shift_label} Site Intelligence Report — {date_str}"
+            msg["Subject"] = f"[{site_name}] {shift_label} Site Monitoring Report — {date_str}"
             msg["From"] = sender_email
             msg["To"] = ", ".join(recipients)
-            msg.set_content("Please review the attached Site Intelligence Shift Report from The Sentry.")
+            msg.set_content(
+                f"{site_name} site monitoring report for {timeframe_str}, {date_str}.\n\n"
+                f"{summary.get('written_summary', '')}\n\nThe full report is attached as a PDF.\n\n{provider_name}"
+            )
             msg.add_alternative(html_body, subtype="html")
+            # Logos travel inside the email (referenced as cid:...), so they show without remote images.
+            html_part = msg.get_payload()[1]
+            for cid, logo in (("sitelogo", site_logo), ("providerlogo", provider_logo)):
+                if logo.exists():
+                    html_part.add_related(logo.read_bytes(), maintype="image", subtype="png", cid=f"<{cid}>")
 
             with open(pdf_path, "rb") as f:
                 pdf_bytes = f.read()
@@ -861,32 +949,76 @@ class ReportingService:
 
     # ── Background Scheduler Loop ──────────────────────────────
 
+    def _due_reports(self, now: datetime) -> list[tuple[str, float, float]]:
+        """
+        Reports due at the 6-hour slot `now` falls in, as (label, period_start, period_end).
+        Slots are 00:00, 06:00, 12:00, 18:00. Every slot gets a 6-hour report; 06:00 and 18:00
+        also get a 12-hour report; 06:00 also gets the 24-hour report. Which windows are sent is
+        configurable with "report_windows_hours" in system.json (default [6, 12, 24]).
+        """
+        if now.hour not in REPORT_SLOT_HOURS or now.minute >= REPORT_CATCHUP_MIN:
+            return []
+        cfg = self._get_sys_config()
+        if not cfg.get("reporting_enabled", True):
+            return []
+        try:
+            windows = sorted({int(w) for w in cfg.get("report_windows_hours", DEFAULT_REPORT_WINDOWS_HOURS)})
+        except (TypeError, ValueError):
+            windows = list(DEFAULT_REPORT_WINDOWS_HOURS)
+        slot_end = now.replace(minute=0, second=0, microsecond=0)
+        due = []
+        for hours in windows:
+            if hours <= 0 or (now.hour - REPORT_ANCHOR_HOUR) % hours != 0:
+                continue
+            start = slot_end - timedelta(hours=hours)
+            span = f"{start.strftime('%H:%M')} – {slot_end.strftime('%H:%M')}"
+            if hours == 12:
+                # Keeps the dashboard's existing Day / Night filters working for the 12-hour reports.
+                label = f"{'NIGHT' if now.hour == 6 else 'DAY'} 12-HOUR ({span})"
+            else:
+                label = f"{hours}-HOUR ({span})"
+            due.append((label, start.timestamp(), slot_end.timestamp()))
+        return due
+
+    def _already_reported(self, label: str, period_end: float) -> bool:
+        """True if this exact report was already generated (survives restarts, unlike a flag)."""
+        try:
+            row = self._conn().execute(
+                "SELECT 1 FROM reports WHERE shift_type = ? AND ABS(period_end - ?) < 60 LIMIT 1",
+                (label, period_end),
+            ).fetchone()
+            return row is not None
+        except Exception:
+            return False
+
+    def _run_due_reports(self, due: list[tuple[str, float, float]]) -> None:
+        """Generate and email each due report, one after another (runs in a worker thread)."""
+        for label, p_start, p_end in due:
+            if self._already_reported(label, p_end):
+                continue
+            try:
+                print(f"[ReportService] 🚀 Generating scheduled report: {label}")
+                self.generate_shift_report("CUSTOM", p_start, p_end, True, label)
+            except Exception as exc:
+                error_tracker.capture_exception(
+                    exc,
+                    component="ReportingService",
+                    effect=f"Scheduled report '{label}' failed",
+                    severity="WARNING",
+                )
+
     async def _scheduler_loop(self) -> None:
-        """
-        Monitors system clock and triggers automated shift reports at 06:00 and 18:00 IST.
-        """
-        print("[ReportService] ⏰ Shift report scheduler started (Scheduled triggers: 06:00 AM & 06:00 PM IST)")
+        """Checks the clock every 20s and sends the reports due at each 6-hour slot."""
+        print("[ReportService] ⏰ Report scheduler started (6h at 00/06/12/18, 12h at 06/18, 24h at 06:00)")
         while self._running:
             try:
-                now = datetime.now()
-                # Target hours: 6 (06:00) and 18 (18:00)
-                if now.hour in (6, 18) and now.minute == 0:
-                    slot_id = f"{now.strftime('%Y%m%d')}_{now.hour:02d}"
+                due = self._due_reports(datetime.now())
+                if due:
+                    slot_id = f"{datetime.now().strftime('%Y%m%d_%H')}"
                     if self._last_scheduled_slot != slot_id:
                         self._last_scheduled_slot = slot_id
-                        shift_name = "NIGHT" if now.hour == 6 else "DAY"
-                        print(f"[ReportService] 🚀 Triggering automated {shift_name} Shift Report ({slot_id})...")
-                        
-                        # Run in background executor to avoid blocking event loop
                         loop = asyncio.get_running_loop()
-                        await loop.run_in_executor(
-                            None,
-                            self.generate_shift_report,
-                            shift_name,
-                            None,
-                            None,
-                            True,
-                        )
+                        await loop.run_in_executor(None, self._run_due_reports, due)
                 await asyncio.sleep(20)
             except asyncio.CancelledError:
                 break
@@ -894,7 +1026,7 @@ class ReportingService:
                 error_tracker.capture_exception(
                     exc,
                     component="ReportingService",
-                    effect="Error in shift report background scheduler loop",
+                    effect="Error in report scheduler loop",
                     severity="WARNING",
                 )
                 await asyncio.sleep(30)
@@ -968,7 +1100,7 @@ class ReportingService:
         return {
             "stored_count": stored_count,
             "max_buffer": MAX_REPORTS_BUFFER,
-            "buffer_coverage_days": round(MAX_REPORTS_BUFFER / 2, 1),
+            "buffer_coverage_days": round(MAX_REPORTS_BUFFER / REPORTS_PER_DAY, 1),
             "disk_usage_mb": round(total_bytes / (1024 * 1024), 2),
             "average_pdf_kb": round((total_bytes / 1024) / max(1, stored_count), 1),
         }

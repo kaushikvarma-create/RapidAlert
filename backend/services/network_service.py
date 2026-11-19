@@ -14,6 +14,8 @@ import logging
 import os
 import re
 import shutil
+import socket
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -21,6 +23,8 @@ logger = logging.getLogger("RapidAlert.Network")
 
 
 class NetworkService:
+    CLIENT_RETRY_SEC = 300.0   # how often to retry a joined Wi-Fi network while on the hotspot
+
     def __init__(self, config_manager, broadcaster=None, dashboard_port: int = 7000):
         self.config_manager = config_manager
         self.broadcast = broadcaster
@@ -28,6 +32,7 @@ class NetworkService:
         self._watchdog_task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
         self._last_state_hash: Optional[str] = None
+        self._last_client_retry: float = 0.0
 
         # Cached interface names (auto-detected if None)
         self.eth_interface: str = "enP2p1s0"
@@ -236,8 +241,12 @@ class NetworkService:
                 "url": f"http://{wifi_info['ip']}:{self.dashboard_port}"
             })
 
+        hostname = socket.gethostname()
         return {
             "status": "ok",
+            "hostname": hostname,
+            "mdns_url": f"http://{hostname}.local:{self.dashboard_port}",
+            "wifi_client_ssid": getattr(net_cfg, "wifi_client_ssid", "") if net_cfg else "",
             "active_mode_desc": active_desc,
             "dashboard_port": self.dashboard_port,
             "ethernet": {
@@ -381,8 +390,25 @@ class NetworkService:
             await self._run_cmd("nmcli", "con", "modify", self.hotspot_profile_name, "ipv4.method", "shared")
             return True
 
-    async def start_hotspot(self, ssid: Optional[str] = None, password: Optional[str] = None) -> Dict[str, Any]:
-        """Activate the godofthunder hotspot."""
+    def _pinned_client_ssid(self) -> str:
+        net_cfg = getattr(self.config_manager.get(), "network", None)
+        return getattr(net_cfg, "wifi_client_ssid", "") if net_cfg else ""
+
+    def _set_pinned_client_ssid(self, ssid: str) -> None:
+        """Remember (or clear, with "") the Wi-Fi network the operator chose to join."""
+        net_cfg = getattr(self.config_manager.get(), "network", None)
+        if net_cfg is None or getattr(net_cfg, "wifi_client_ssid", "") == ssid:
+            return
+        merged = net_cfg.model_dump()
+        merged["wifi_client_ssid"] = ssid
+        self.config_manager.update({"network": merged})
+
+    async def start_hotspot(self, ssid: Optional[str] = None, password: Optional[str] = None,
+                            manual: bool = False) -> Dict[str, Any]:
+        """Activate the godofthunder hotspot. `manual` = requested by the operator, which also
+        cancels any earlier "stay on this Wi-Fi network" choice."""
+        if manual:
+            self._set_pinned_client_ssid("")
         async with self._lock:
             cfg = self.config_manager.get()
             net_cfg = getattr(cfg, "network", None)
@@ -424,6 +450,19 @@ class NetworkService:
         Connect Wi-Fi interface to a wireless LAN access point as a client.
         Brings down the hotspot first (since chip cannot do simultaneous AP+STA).
         """
+        # This radio (RTL8852CE) reports "interface combinations are not supported": it is either
+        # the hotspot or a Wi-Fi client, never both. With the hotspot pinned always-on, a join
+        # would take the hotspot down and be undone by the watchdog seconds later, so refuse it
+        # up front with the reason instead.
+        net_cfg = getattr(self.config_manager.get(), "network", None)
+        if (getattr(net_cfg, "hotspot_mode", "auto") if net_cfg else "auto") == "always_on":
+            return {
+                "status": "error",
+                "message": ("The hotspot is set to Always On, and this Wi-Fi radio cannot be a hotspot and "
+                            "join a network at the same time. Use Ethernet for the Thor's network link, "
+                            "or switch the hotspot mode to Auto to join a Wi-Fi network."),
+            }
+
         async with self._lock:
             # 1. Take down hotspot if active
             await self._run_cmd("nmcli", "con", "down", self.hotspot_profile_name)
@@ -450,6 +489,8 @@ class NetworkService:
                 }
 
             logger.info(f"[Network] ✅ Successfully joined Wi-Fi '{ssid}'")
+            # The operator chose this network: keep the radio on it (see _enforce_auto_failover).
+            self._set_pinned_client_ssid(ssid)
             # Wait briefly for DHCP lease
             await asyncio.sleep(2.0)
             status = await self.get_status()
@@ -463,6 +504,7 @@ class NetworkService:
 
     async def disconnect_wifi(self) -> Dict[str, Any]:
         """Disconnect active Wi-Fi connection."""
+        self._set_pinned_client_ssid("")
         async with self._lock:
             await self._run_cmd("nmcli", "dev", "disconnect", self.wifi_interface)
             status = await self.get_status()
@@ -472,6 +514,8 @@ class NetworkService:
 
     async def forget_wifi(self, ssid: str) -> Dict[str, Any]:
         """Forget/delete saved connection profile for an SSID."""
+        if ssid == self._pinned_client_ssid():
+            self._set_pinned_client_ssid("")
         rc, out, err = await self._run_cmd("nmcli", "con", "delete", "id", ssid)
         return {
             "status": "ok" if rc == 0 else "error",
@@ -507,6 +551,7 @@ class NetworkService:
                 "hotspot_mode": curr_net.hotspot_mode if curr_net else "auto",
                 "wifi_interface": self.wifi_interface,
                 "ethernet_interface": self.eth_interface,
+                "wifi_client_ssid": curr_net.wifi_client_ssid if curr_net else "",
             }
             merged.update(net_updates)
             updates["network"] = merged
@@ -546,20 +591,31 @@ class NetworkService:
         wifi_mode = status["wifi"]["mode"]
         is_hotspot_active = status["hotspot"]["active"]
 
-        if eth_connected:
-            # On Ethernet: Keep Hotspot running
-            if not is_hotspot_active:
-                logger.info("[Network Watchdog] Ethernet connected. Activating AP Hotspot 'godofthunder' for direct access.")
-                await self.start_hotspot()
-        else:
-            # No Ethernet
-            if wifi_mode == "client":
-                # Successfully connected to site Wi-Fi — leave it as client
-                pass
-            elif not is_hotspot_active:
-                # No Ethernet and no client Wi-Fi — bring up Rescue Hotspot!
-                logger.info("[Network Watchdog] No active Ethernet or client Wi-Fi. Activating Rescue Hotspot.")
-                await self.start_hotspot()
+        pinned = self._pinned_client_ssid()
+        on_pinned_wifi = bool(pinned) and wifi_mode == "client" and status["wifi"]["connected_ssid"] == pinned
+
+        # The operator joined a Wi-Fi network from the dashboard but the radio is currently the
+        # hotspot (network was out of range at boot, router rebooted, ...). The radio cannot do
+        # both at once, so retry the join now and then - only while nobody is using the hotspot.
+        if (pinned and is_hotspot_active and status["hotspot"]["clients_connected"] == 0
+                and time.monotonic() - self._last_client_retry > self.CLIENT_RETRY_SEC):
+            self._last_client_retry = time.monotonic()
+            logger.info(f"[Network Watchdog] Retrying saved Wi-Fi network '{pinned}'.")
+            async with self._lock:
+                await self._run_cmd("nmcli", "con", "down", self.hotspot_profile_name)
+                rc, _, _ = await self._run_cmd("nmcli", "con", "up", "id", pinned, "ifname", self.wifi_interface, timeout=25.0)
+            if rc == 0:
+                return
+            await self.start_hotspot()
+            return
+
+        # One rule, with or without Ethernet: the hotspot is on unless the radio is connected to
+        # the Wi-Fi network the operator explicitly joined from the dashboard. (The radio cannot
+        # be both at once.) Anything else - nothing connected, or an old saved network that
+        # NetworkManager auto-joined - gets the hotspot back.
+        if not is_hotspot_active and not on_pinned_wifi:
+            logger.info("[Network Watchdog] Not on an operator-chosen Wi-Fi network. Activating hotspot.")
+            await self.start_hotspot()
 
     async def start_watchdog(self, interval_sec: float = 10.0):
         """Start background loop monitoring physical link transitions."""
@@ -576,7 +632,10 @@ class NetworkService:
                 if mode == "auto":
                     await self._enforce_auto_failover()
                 elif mode == "always_on":
-                    await self.start_hotspot()
+                    # Only (re)activate if it is actually down: re-activating a running hotspot
+                    # drops every connected client for a few seconds on each backend restart.
+                    if not (await self.get_status())["hotspot"]["active"]:
+                        await self.start_hotspot()
             except Exception as e:
                 logger.warning(f"[Network Watchdog] Startup error: {e}")
 
