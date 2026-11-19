@@ -277,6 +277,13 @@ class SystemConfig(BaseModel):
     initial_concurrency: int = DEFAULT_INITIAL_CONCURRENCY
     max_concurrency: int = DEFAULT_MAX_CONCURRENCY
     frame_width: int = DEFAULT_FRAME_WIDTH
+    # Size and JPEG quality of the frames sent to the model. The model spends one token per
+    # 32x32 pixels and does not shrink images itself (its limit is ~16.7 megapixels), so every
+    # pixel sent is used and paid for. Measured here with 4 frames: 384px -> ~425 image tokens,
+    # 640 -> ~970, 960 -> ~2130 (+~2.4s per analysis). 1280 (the full stored frame) needs ~3700
+    # tokens, more than fits beside the prompt in a 4096-token context.
+    vlm_frame_width: int = 960
+    vlm_frame_quality: int = 90
     jpeg_quality: int = DEFAULT_JPEG_QUALITY
     dashboard_port: int = DEFAULT_DASHBOARD_PORT
 

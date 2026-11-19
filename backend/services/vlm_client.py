@@ -271,10 +271,10 @@ class _EndpointShard:
             content.append({"type": "text", "text": prompt})
 
             sys_msg = (
-                "You are an objective, conservative CCTV surveillance AI. "
-                "CRITICAL: The checklist is NOT a directive to hunt for violations. Assume the scene is normal unless there is blatant visual proof. "
-                "Flag a checklist item or positive threat ONLY IF YOU ARE HIGHLY CONFIDENT based on unmistakable, clearly visible evidence. "
-                "If there is any doubt, plausible innocent explanation, or low confidence, you MUST NOT flag it (return [] for priority_flags and safety OK / severity LOW)."
+                "You are an objective CCTV monitoring assistant. Report only what is visible in the frames. "
+                "Flag a checklist item when it is visibly happening, never on speculation, and never because an "
+                "image is too unclear to tell. Apply the severity definitions in the instructions exactly and "
+                "reply with the requested JSON only."
             )
 
             payload = {
@@ -805,9 +805,9 @@ LOGICAL AUDIT RULES:
 3. Read complete entries, including qualifiers such as "not", "normal", "okay", "forced", "climbing", "sleeping", and "collapsed".
 
 5. Do not flag a contradiction merely because entries share a generic word. These are distinct:
-   - "walking through a turnstile" vs "climbing over a turnstile"
-   - "carrying a parcel" vs "using force to enter"
-   - "sitting at a desk" vs "sleeping at a desk"
+   - "walking through a gate" vs "climbing over a gate"
+   - "carrying a box" vs "using force to enter"
+   - "sitting down" vs "lying motionless"
    - "standing near a door" vs "kicking the door"
 
 6. A baseline contradiction exists when the baseline explicitly describes a severe condition as normal, okay, acceptable, permitted, or routine.
@@ -1031,6 +1031,13 @@ def _parse_response(raw: str, cam_name: str) -> dict:
     if clean.startswith("```"):
         clean = re.sub(r"^```[a-zA-Z]*\n?", "", clean)
         clean = re.sub(r"\n?```$", "", clean).strip()
+
+    # The model sometimes writes a sentence before or after the JSON (or wraps it in a code fence
+    # further down the reply). Parse the outermost {...} if there is one; previously such replies
+    # fell through to the line parser, which left stray quotes and commas in the field values.
+    first, last = clean.find("{"), clean.rfind("}")
+    if first != -1 and last > first:
+        clean = clean[first:last + 1]
 
     # Tier 1: Try direct JSON parse
     try:

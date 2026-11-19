@@ -27,6 +27,7 @@ from backend.core.config import (
     TEMPORAL_THUMB_WIDTH,
     TEMPORAL_THUMB_QUALITY,
 )
+from backend.core.config import config_manager
 from backend.core.error_tracker import error_tracker
 
 
@@ -363,6 +364,7 @@ class SceneTriggerEngine:
             if trigger_time is None:
                 trigger_time = time.monotonic()
 
+            _cfg = config_manager.get()   # frame size / quality sent to the model
             # Retrieve temporal historical sequence: [-10.0, -5.0, -2.0]
             pre_frames = self.frame_store.get_pre_trigger_frames_with_timestamps(
                 cam_name,
@@ -377,7 +379,7 @@ class SceneTriggerEngine:
             # Fallback if buffer does not have 10 seconds of history yet
             if len(all_raw_frames) < 4:
                 sampled = self.frame_store.get_temporal_snapshots_with_timestamps_b64(
-                    cam_name, count=4, span_sec=10.0, max_w=384, quality=80
+                    cam_name, count=4, span_sec=10.0, max_w=_cfg.vlm_frame_width, quality=_cfg.vlm_frame_quality
                 ) or []
                 thumbs_sampled = self.frame_store.get_temporal_snapshots_with_timestamps_b64(
                     cam_name, count=4, span_sec=10.0, max_w=TEMPORAL_THUMB_WIDTH, quality=TEMPORAL_THUMB_QUALITY
@@ -386,7 +388,7 @@ class SceneTriggerEngine:
                 thumbs_b64 = [frame for frame, _ in thumbs_sampled]
                 frame_mono_ts = [ts for _, ts in thumbs_sampled]
             else:
-                frames_b64 = self.frame_store.encode_frames([frame for frame, _ in all_raw_frames], max_w=384, quality=80)
+                frames_b64 = self.frame_store.encode_frames([frame for frame, _ in all_raw_frames], max_w=_cfg.vlm_frame_width, quality=_cfg.vlm_frame_quality)
                 thumbs_b64 = self.frame_store.encode_frames(
                     [frame for frame, _ in all_raw_frames], max_w=TEMPORAL_THUMB_WIDTH, quality=TEMPORAL_THUMB_QUALITY
                 )

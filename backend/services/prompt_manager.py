@@ -47,6 +47,8 @@ class PromptManager:
         is_followup: bool = False,
         cycle: int = 1,
         interval_sec: float = 10.0,
+        prev_observation: Optional[str] = None,
+        prev_severity: Optional[str] = None,
     ) -> str:
         """Build the final prompt for cam_name with context injected."""
         if hour is None:
@@ -65,21 +67,32 @@ class PromptManager:
             "If an item is visibly present, copy it into routine_flags; otherwise return []. Do not infer intent or risk.\n"
             f"{routine_checklist or '(none provided)'}"
         )
+        # Site-neutral on purpose: what counts as a threat comes from the operator's checklist,
+        # and how to weigh it comes from the template in config/prompts.json.
         threat_block = (
-            "VISUAL CHECKLIST A — PRIORITY THREATS (ONLY FLAG IF HIGHLY CONFIDENT)\n"
-            "CRITICAL: Do NOT proactively search for or force-fit checklist items into normal scenes. "
-            "Copy an item into priority_flags ONLY IF YOU ARE HIGHLY CONFIDENT based on unmistakable, clearly visible evidence across frames. "
-            "If an action is ambiguous, ordinary workplace behavior (e.g. sitting, working, resting, looking at a phone/laptop, walking), or lacks definitive visual proof, you MUST return []. "
-            "Never guess or assume.\n"
+            "VISUAL CHECKLIST A — PRIORITY THREATS\n"
+            "Copy an item into priority_flags when it is visibly happening in the frames; otherwise return []. "
+            "Do not flag an item that is only possible or that the image is too unclear to show.\n"
             f"{threat_checklist or '(none provided)'}"
         )
 
         if is_followup:
+            # The follow-up is told what the previous check saw, so 'evolution' can say whether
+            # the situation resolved, held or got worse. Severity is still judged from these frames.
+            prev_line = ""
+            if prev_observation:
+                prev_text = " ".join(str(prev_observation).split())[:300]
+                prev_line = (
+                    f"The previous check rated the scene {str(prev_severity or 'UNKNOWN').upper()} and observed: "
+                    f"\"{prev_text}\"\n"
+                )
             followup_info = (
-                f"FOLLOW-UP CHECK #{cycle} ({interval_sec:.0f}s after earlier activity):\n"
-                f"Evaluate ONLY the visual evidence in the CURRENT 4 frames independently without assumption. "
-                f"Determine if any active priority event is present right now, or if the scene is normal routine / empty "
-                f"(which MUST be marked \"safety\": \"OK\", \"severity\": \"LOW\")."
+                f"FOLLOW-UP CHECK #{cycle}, {interval_sec:.0f}s after the previous check.\n"
+                f"{prev_line}"
+                f"The 4 frames cover the time since that check. Decide the severity from what these frames show now, "
+                f"not from the earlier rating. In 'evolution', say how the situation has changed since the previous "
+                f"check: resolved, unchanged, or worse. If the scene is now routine or empty, mark "
+                f"\"safety\": \"OK\", \"severity\": \"LOW\"."
             )
 
             template = self._followup

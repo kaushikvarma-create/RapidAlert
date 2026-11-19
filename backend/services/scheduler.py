@@ -489,8 +489,11 @@ class DeadlineScheduler:
                 or (thumbs_b64[-1] if thumbs_b64 else None)
             )
         else:
-            # Heartbeat fallback: extract 4 temporal frames across 10s (max_w=384 for 3s inference)
-            frames_b64 = self.frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=10.0, max_w=384)
+            # Routine check: 4 frames spread over the last 10s, at the configured model frame size
+            _cfg = config_manager.get()
+            frames_b64 = self.frame_store.get_temporal_snapshots_b64(
+                cam_name, count=4, span_sec=10.0, max_w=_cfg.vlm_frame_width, quality=_cfg.vlm_frame_quality
+            )
             timestamped_thumbs = self.frame_store.get_temporal_snapshots_with_timestamps_b64(
                 cam_name, count=4, span_sec=10.0, max_w=TEMPORAL_THUMB_WIDTH, quality=TEMPORAL_THUMB_QUALITY
             ) or []
@@ -511,6 +514,8 @@ class DeadlineScheduler:
             is_followup=is_followup,
             cycle=cycle,
             interval_sec=followup_delay,
+            prev_observation=prev_observation if is_followup else None,
+            prev_severity=prev_severity if is_followup else None,
         )
 
         t0 = time.monotonic()
@@ -765,7 +770,10 @@ class DeadlineScheduler:
             if not self._running or self._queue is None:
                 return
 
-            frames_b64 = self.frame_store.get_temporal_snapshots_b64(cam_name, count=4, span_sec=delay_sec, max_w=384)
+            _cfg = config_manager.get()
+            frames_b64 = self.frame_store.get_temporal_snapshots_b64(
+                cam_name, count=4, span_sec=delay_sec, max_w=_cfg.vlm_frame_width, quality=_cfg.vlm_frame_quality
+            )
             timestamped_thumbs = self.frame_store.get_temporal_snapshots_with_timestamps_b64(
                 cam_name, count=4, span_sec=delay_sec, max_w=TEMPORAL_THUMB_WIDTH, quality=TEMPORAL_THUMB_QUALITY
             ) or []
