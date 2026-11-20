@@ -31,6 +31,18 @@ from backend.core.config import config_manager
 from backend.core.error_tracker import error_tracker
 
 
+# Frames sent to the model for a trigger, in seconds relative to the trigger frame: the lead-up
+# from the buffer, then what followed. The last post offset is also how long the analysis waits.
+#
+# The total (pre + trigger + post) must not exceed the model server's image limit, which is
+# `--limit-mm-per-prompt {"image": 5}` in scripts/start_vllm.sh: a request with more images is
+# refused outright (HTTP 400) and the trigger is lost. To send more frames, raise that limit
+# and recreate both model containers first, then change these.
+PRE_TRIGGER_OFFSETS = (-5.0, -2.0)
+POST_TRIGGER_OFFSETS = (2.5, 5.0)
+MAX_TRIGGER_FRAMES = 5
+
+
 class SceneTriggerEngine:
     def __init__(
         self,
@@ -353,62 +365,99 @@ class SceneTriggerEngine:
         tier: int = 2,
     ) -> None:
         """
-        Immediately collects 4 temporal frames over the past 10 seconds:
-        - Frame 1: Scene baseline (t -10.0s)
-        - Frame 2: Pre-motion development (t -5.0s)
-        - Frame 3: Acceleration / trigger onset (t -2.0s)
-        - Frame 4: Peak scene shift (t 0.0s / trigger moment)
-        Concentrates 3/4 frames in the critical last 5-6 seconds.
+        Collects the frames around a trigger, before and after it:
+        - t -5.0s  Pre-incident: the scene before anything changed
+        - t -2.0s  Onset: just before the change the trigger caught
+        - t  0.0s  Trigger: the frame that tripped the drift threshold
+        - t +2.5s  After: how it develops
+        - t +5.0s  Latest: where it ended up
+        The first three are taken from the buffer at once (and the dashboard card pulses at
+        once); the last two are taken as they happen, so the model sees what the event turned
+        into, not only what led up to it. The analysis therefore starts POST_TRIGGER_OFFSETS[-1]
+        seconds after the trigger.
         """
         try:
             if trigger_time is None:
                 trigger_time = time.monotonic()
 
             _cfg = config_manager.get()   # frame size / quality sent to the model
-            # Retrieve temporal historical sequence: [-10.0, -5.0, -2.0]
             pre_frames = self.frame_store.get_pre_trigger_frames_with_timestamps(
                 cam_name,
                 trigger_time=trigger_time,
-                offsets=[-10.0, -5.0, -2.0],
+                offsets=list(PRE_TRIGGER_OFFSETS),
             )
             latest_entry = self.frame_store.get_latest(cam_name)
             all_raw_frames = list(pre_frames)
             if latest_entry is not None:
                 all_raw_frames.append(latest_entry)
+            pre_tags = ["Pre-incident", "Onset"] if len(pre_frames) == 2 else ["Before"] * len(pre_frames)
+            frame_tags = pre_tags + (["Trigger"] if latest_entry is not None else [])
 
-            # Fallback if buffer does not have 10 seconds of history yet
-            if len(all_raw_frames) < 4:
-                sampled = self.frame_store.get_temporal_snapshots_with_timestamps_b64(
-                    cam_name, count=4, span_sec=10.0, max_w=_cfg.vlm_frame_width, quality=_cfg.vlm_frame_quality
-                ) or []
-                thumbs_sampled = self.frame_store.get_temporal_snapshots_with_timestamps_b64(
-                    cam_name, count=4, span_sec=10.0, max_w=TEMPORAL_THUMB_WIDTH, quality=TEMPORAL_THUMB_QUALITY
-                ) or []
-                frames_b64 = [frame for frame, _ in sampled]
-                thumbs_b64 = [frame for frame, _ in thumbs_sampled]
-                frame_mono_ts = [ts for _, ts in thumbs_sampled]
-            else:
-                frames_b64 = self.frame_store.encode_frames([frame for frame, _ in all_raw_frames], max_w=_cfg.vlm_frame_width, quality=_cfg.vlm_frame_quality)
-                thumbs_b64 = self.frame_store.encode_frames(
-                    [frame for frame, _ in all_raw_frames], max_w=TEMPORAL_THUMB_WIDTH, quality=TEMPORAL_THUMB_QUALITY
-                )
-                frame_mono_ts = [ts for _, ts in all_raw_frames]
+            # With little history (camera just connected) the closest frame to t-5 and t-2 can be
+            # the same frame. Send each frame once, keeping the tag of its latest role.
+            deduped: list = []
+            deduped_tags: list = []
+            for entry, tag in zip(all_raw_frames, frame_tags):
+                if deduped and entry[1] == deduped[-1][1]:
+                    deduped_tags[-1] = tag
+                else:
+                    deduped.append(entry)
+                    deduped_tags.append(tag)
+            all_raw_frames, frame_tags = deduped, deduped_tags
 
-            # Capture high-resolution snapshot for sharp modal preview
+            if not all_raw_frames:
+                # Nothing buffered for this camera: there is nothing to analyse.
+                return
+
+            # The trigger moment, sharp, for the alert preview; and tell the dashboard now,
+            # before waiting for the frames that follow.
+            trigger_frame_ts = all_raw_frames[-1][1]
+            thumbs_b64 = self.frame_store.encode_frames(
+                [frame for frame, _ in all_raw_frames], max_w=TEMPORAL_THUMB_WIDTH, quality=TEMPORAL_THUMB_QUALITY
+            )
             high_res_snap = self.frame_store.get_snapshot_b64(
                 cam_name, max_w=HIGH_RES_FRAME_WIDTH, quality=HIGH_RES_JPEG_QUALITY
             ) or (thumbs_b64[-1] if thumbs_b64 else None)
+            timestamp_str = time.strftime("%Y-%m-%d %H:%M:%S")
 
-            labels = [
-                "t -10.0s (Baseline)",
-                "t -5.0s (Pre-incident)",
-                "t -2.0s (Onset)",
-                "t 0.0s (Trigger)",
-            ]
+            if self.broadcast_fn:
+                await self.broadcast_fn({
+                    "type": "scene_shift",
+                    "cam": cam_name,
+                    "drift": drift_score,
+                    "timestamp": timestamp_str,
+                    "thumbnail_b64": high_res_snap,
+                    "thumbnails_b64": thumbs_b64,
+                })
+
+            # What happened next: the newest frame at each offset after the trigger frame. A
+            # stalled stream yields no new frame, and then nothing is added (no repeats).
+            for i, offset in enumerate(POST_TRIGGER_OFFSETS):
+                wait = trigger_frame_ts + offset - time.monotonic()
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                entry = self.frame_store.get_latest(cam_name)
+                if (entry is not None and entry[1] > all_raw_frames[-1][1]
+                        and len(all_raw_frames) < MAX_TRIGGER_FRAMES):
+                    all_raw_frames.append(entry)
+                    frame_tags.append("Latest" if i == len(POST_TRIGGER_OFFSETS) - 1 else "After")
+                    thumbs_b64.extend(self.frame_store.encode_frames(
+                        [entry[0]], max_w=TEMPORAL_THUMB_WIDTH, quality=TEMPORAL_THUMB_QUALITY
+                    ))
+
+            frames_b64 = self.frame_store.encode_frames(
+                [frame for frame, _ in all_raw_frames], max_w=_cfg.vlm_frame_width, quality=_cfg.vlm_frame_quality
+            )
+            frame_mono_ts = [ts for _, ts in all_raw_frames]
+
+            # "t -5.0s (Pre-incident)", "t -2.0s (Onset)", "t 0.0s (Trigger)", "t +2.5s (After)",
+            # "t +5.0s (Latest)": real capture times relative to the trigger frame, so they stay
+            # true when history is short or the stream stalled.
+            labels = self.frame_store.offset_labels(frame_mono_ts, zero_ts=trigger_frame_ts, tags=frame_tags)
 
             incident_data = {
                 "cam": cam_name,
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "timestamp": timestamp_str,
                 "trigger_ts": trigger_ts,
                 "trigger_time": trigger_time,
                 "drift": drift_score,
@@ -420,17 +469,6 @@ class SceneTriggerEngine:
                 "labels": labels,
                 "priority": 0,  # High priority incident
             }
-
-            # Broadcast live scene drift shift to dashboard for live card pulse
-            if self.broadcast_fn:
-                await self.broadcast_fn({
-                    "type": "scene_shift",
-                    "cam": cam_name,
-                    "drift": drift_score,
-                    "timestamp": incident_data["timestamp"],
-                    "thumbnail_b64": high_res_snap,
-                    "thumbnails_b64": thumbs_b64,
-                })
 
             # Queue for Cosmos Reason2 8B evaluation
             await self.on_incident_callback(incident_data)

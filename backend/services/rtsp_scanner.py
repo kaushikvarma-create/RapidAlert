@@ -360,39 +360,85 @@ class RTSPScanner:
         pwd = password or ""
         auth = HTTPDigestAuth(user, pwd) if user else None
 
+        creds_part = f"{urllib.parse.quote(user)}:{urllib.parse.quote(pwd)}@" if user else ""
+
+        def _names_from(text: str, block_tag: str) -> dict:
+            """{camera number: name} from a list of <block_tag><id>N</id><name>X</name>…"""
+            out = {}
+            for block in re.findall(rf"<{block_tag}\b[^>]*>(.*?)</{block_tag}>", text, re.DOTALL):
+                id_m = re.search(r"<id>(\d+)</id>", block)
+                name_m = re.search(r"<name>([^<]+)</name>", block)
+                if id_m and name_m and name_m.group(1).strip():
+                    out[int(id_m.group(1))] = name_m.group(1).strip()
+            return out
+
         for proto in ["http", "https"]:
             try:
-                # 1. Device Info
-                r_dev = requests.get(f"{proto}://{ip}/ISAPI/System/deviceInfo", auth=auth, verify=False, timeout=2.0)
+                # 1. Device Info. A 401 here means this login is wrong for this device: stop,
+                #    so a wrong password costs one failed attempt, not several (cameras lock
+                #    the account after a handful).
+                r_dev = requests.get(f"{proto}://{ip}/ISAPI/System/deviceInfo", auth=auth, verify=False, timeout=3.0)
+                if r_dev.status_code == 401:
+                    return [], None
                 if r_dev.status_code == 200:
                     mod_m = re.search(r"<model>([^<]+)</model>", r_dev.text)
                     if mod_m:
                         model = mod_m.group(1).strip()
 
-                # 2. Streaming Channels
-                r_chan = requests.get(f"{proto}://{ip}/ISAPI/Streaming/channels", auth=auth, verify=False, timeout=2.5)
-                if r_chan.status_code == 200 and "<StreamingChannel" in r_chan.text:
-                    creds_part = f"{urllib.parse.quote(user)}:{urllib.parse.quote(pwd)}@" if user else ""
-                    chan_blocks = re.findall(r"<StreamingChannel[^>]*>(.*?)</StreamingChannel>", r_chan.text, re.DOTALL)
-                    for block in chan_blocks:
-                        id_m = re.search(r"<id>(\d+)</id>", block)
-                        name_m = re.search(r"<channelName>([^<]+)</channelName>", block)
-                        if id_m:
+                # 2. Camera names. On a recorder the names the operator sees live in the
+                #    input lists, not in the stream list (which says "Camera 01" or nothing).
+                #    IP cameras attached to a recorder, then analogue/own inputs.
+                names: dict = {}
+                for path, tag in (
+                    ("/ISAPI/ContentMgmt/InputProxy/channels", "InputProxyChannel"),
+                    ("/ISAPI/System/Video/inputs/channels", "VideoInputChannel"),
+                ):
+                    try:
+                        r_n = requests.get(f"{proto}://{ip}{path}", auth=auth, verify=False, timeout=6.0)
+                        if r_n.status_code == 200:
+                            for num, nm in _names_from(r_n.text, tag).items():
+                                names.setdefault(num, nm)
+                    except Exception:
+                        pass
+
+                # 3. Streaming Channels (a recorder with many cameras answers slowly)
+                stream_ids: List[str] = []
+                stream_names: dict = {}
+                try:
+                    r_chan = requests.get(f"{proto}://{ip}/ISAPI/Streaming/channels", auth=auth, verify=False, timeout=10.0)
+                    if r_chan.status_code == 200 and "<StreamingChannel" in r_chan.text:
+                        for block in re.findall(r"<StreamingChannel\b[^>]*>(.*?)</StreamingChannel>", r_chan.text, re.DOTALL):
+                            id_m = re.search(r"<id>(\d+)</id>", block)
+                            if not id_m:
+                                continue
                             ch_id = id_m.group(1)
                             # Only take main streams (ending in 01 or 1)
                             if ch_id.endswith("01") or ch_id.endswith("1"):
-                                ch_name = name_m.group(1).strip() if name_m else f"Channel {ch_id}"
-                                rtsp_url = f"rtsp://{creds_part}{ip}:{port}/Streaming/Channels/{ch_id}"
-                                channels.append({
-                                    "channel": int(ch_id),
-                                    "name": ch_name,
-                                    "rtsp_url": rtsp_url,
-                                    "vendor": "Hikvision",
-                                    "codec": "H.265 / H.264",
-                                    "verified": True,
-                                })
-                    if channels:
-                        break
+                                stream_ids.append(ch_id)
+                                name_m = re.search(r"<channelName>([^<]+)</channelName>", block)
+                                if name_m:
+                                    stream_names[ch_id] = name_m.group(1).strip()
+                except Exception:
+                    pass
+
+                # If the stream list did not come back but the recorder listed its cameras,
+                # build the main-stream ids from the camera numbers (camera N -> N01).
+                if not stream_ids and names:
+                    stream_ids = [f"{num}01" for num in sorted(names)]
+
+                for ch_id in stream_ids:
+                    cam_num = int(ch_id) // 100 if len(ch_id) >= 3 else int(ch_id)
+                    ch_name = names.get(cam_num) or stream_names.get(ch_id) or f"Channel {ch_id}"
+                    channels.append({
+                        "channel": int(ch_id),
+                        "name": ch_name,
+                        "rtsp_url": f"rtsp://{creds_part}{ip}:{port}/Streaming/Channels/{ch_id}",
+                        "vendor": "Hikvision",
+                        "codec": "H.265 / H.264",
+                        "verified": True,
+                    })
+                if channels:
+                    break
             except Exception:
                 pass
         return channels, model
@@ -613,5 +659,11 @@ class RTSPScanner:
         for r in results_raw:
             if isinstance(r, dict) and r.get("channels"):
                 verified_devices.append(r)
+
+        # One line per scan in the service log (no logins): what answered and how it was read.
+        summary = ", ".join(
+            f"{d['ip']}:{d.get('method')}x{len(d['channels'])}" for d in verified_devices
+        ) or "none"
+        print(f"[Scanner] {len(discovered_ips)} device(s) probed in {subnet or 'auto'}; verified: {summary}")
 
         return verified_devices

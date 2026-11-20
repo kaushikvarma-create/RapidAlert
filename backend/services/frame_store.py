@@ -266,6 +266,56 @@ class FrameStore:
         targets =[newest_ts - span_sec * (count - 1 - i) / (count - 1) for i in range(count)]
         return [min(items, key=lambda item: abs(item[1] - t)) for t in targets]
 
+    def get_temporal_frames(
+        self,
+        cam_name: str,
+        count: int = 4,
+        span_sec: float = 10.0,
+    ) -> list[tuple[np.ndarray, float]]:
+        """
+        Raw (frame, capture time) pairs evenly spaced over `span_sec`, oldest first, each frame
+        at most once. One selection, so the model frames, the stored thumbnails and the labels
+        built from these timestamps all describe the same frames.
+
+        Right after a camera connects the buffer holds a frame or two; the plain selection then
+        returns the same frame several times, which was sent to the model as a "10 second
+        sequence". Here it comes back once.
+        """
+        with self._lock:
+            q = self._store.get(cam_name)
+            if not q:
+                return []
+            items = list(q)
+
+        out: list[tuple[np.ndarray, float]] = []
+        for frame, ts in self._select_temporal(items, count, span_sec):
+            if not out or ts != out[-1][1]:
+                out.append((frame, ts))
+        return out
+
+    @staticmethod
+    def offset_labels(
+        timestamps: list[float],
+        zero_ts: float,
+        tags: Optional[list[Optional[str]]] = None,
+        signed_zero: bool = False,
+    ) -> list[str]:
+        """
+        Labels such as "t -5.0s" / "t 0.0s (Current)" from the frames' real capture times,
+        relative to `zero_ts`. Built from the timestamps rather than assumed, so a short buffer
+        or a stalled stream cannot leave a frame labelled with a time it was not taken at.
+        """
+        labels = []
+        for i, ts in enumerate(timestamps):
+            off = round(ts - zero_ts, 1)
+            if off == 0:
+                txt = "t +0.0s" if signed_zero else "t 0.0s"
+            else:
+                txt = f"t {off:+.1f}s"
+            tag = tags[i] if tags and i < len(tags) else None
+            labels.append(f"{txt} ({tag})" if tag else txt)
+        return labels
+
     def get_temporal_snapshots_with_timestamps_b64(
         self,
         cam_name: str,

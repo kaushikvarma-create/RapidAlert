@@ -491,20 +491,21 @@ class DeadlineScheduler:
         else:
             # Routine check: 4 frames spread over the last 10s, at the configured model frame size
             _cfg = config_manager.get()
-            frames_b64 = self.frame_store.get_temporal_snapshots_b64(
-                cam_name, count=4, span_sec=10.0, max_w=_cfg.vlm_frame_width, quality=_cfg.vlm_frame_quality
-            )
-            timestamped_thumbs = self.frame_store.get_temporal_snapshots_with_timestamps_b64(
-                cam_name, count=4, span_sec=10.0, max_w=TEMPORAL_THUMB_WIDTH, quality=TEMPORAL_THUMB_QUALITY
-            ) or []
-            thumbs_b64 = [frame for frame, _ in timestamped_thumbs]
-            frame_timestamps = [time.time() + (ts - time.monotonic()) for _, ts in timestamped_thumbs]
+            selected = self.frame_store.get_temporal_frames(cam_name, count=4, span_sec=10.0)
+            raw_frames = [frame for frame, _ in selected]
+            mono_ts = [ts for _, ts in selected]
+            frames_b64 = self.frame_store.encode_frames(raw_frames, max_w=_cfg.vlm_frame_width, quality=_cfg.vlm_frame_quality)
+            thumbs_b64 = self.frame_store.encode_frames(raw_frames, max_w=TEMPORAL_THUMB_WIDTH, quality=TEMPORAL_THUMB_QUALITY)
+            frame_timestamps = [time.time() + (ts - time.monotonic()) for ts in mono_ts]
             high_res_snap = (
                 self.frame_store.get_snapshot_b64(cam_name, max_w=HIGH_RES_FRAME_WIDTH, quality=HIGH_RES_JPEG_QUALITY)
                 or (thumbs_b64[-1] if thumbs_b64 else None)
             )
-            # Must match FrameStore._select_temporal(count=4, span_sec=10.0)
-            job_labels = ["t -10.0s", "t -6.7s", "t -3.3s", "t 0.0s (Current)"]
+            # Normally "t -10.0s", "t -6.7s", "t -3.3s", "t 0.0s (Current)"; taken from the real
+            # capture times so a just-connected camera is not described as a 10 second sequence.
+            job_labels = self.frame_store.offset_labels(
+                mono_ts, zero_ts=mono_ts[-1], tags=[None] * (len(mono_ts) - 1) + ["Current"]
+            ) if mono_ts else []
 
         if not frames_b64:
             return
@@ -771,14 +772,12 @@ class DeadlineScheduler:
                 return
 
             _cfg = config_manager.get()
-            frames_b64 = self.frame_store.get_temporal_snapshots_b64(
-                cam_name, count=4, span_sec=delay_sec, max_w=_cfg.vlm_frame_width, quality=_cfg.vlm_frame_quality
-            )
-            timestamped_thumbs = self.frame_store.get_temporal_snapshots_with_timestamps_b64(
-                cam_name, count=4, span_sec=delay_sec, max_w=TEMPORAL_THUMB_WIDTH, quality=TEMPORAL_THUMB_QUALITY
-            ) or []
-            thumbs_b64 = [frame for frame, _ in timestamped_thumbs]
-            frame_timestamps = [time.time() + (ts - time.monotonic()) for _, ts in timestamped_thumbs]
+            selected = self.frame_store.get_temporal_frames(cam_name, count=4, span_sec=delay_sec)
+            raw_frames = [frame for frame, _ in selected]
+            mono_ts = [ts for _, ts in selected]
+            frames_b64 = self.frame_store.encode_frames(raw_frames, max_w=_cfg.vlm_frame_width, quality=_cfg.vlm_frame_quality)
+            thumbs_b64 = self.frame_store.encode_frames(raw_frames, max_w=TEMPORAL_THUMB_WIDTH, quality=TEMPORAL_THUMB_QUALITY)
+            frame_timestamps = [time.time() + (ts - time.monotonic()) for ts in mono_ts]
             high_res_snap = (
                 self.frame_store.get_snapshot_b64(cam_name, max_w=HIGH_RES_FRAME_WIDTH, quality=HIGH_RES_JPEG_QUALITY)
                 or (thumbs_b64[-1] if thumbs_b64 else None)
@@ -794,15 +793,16 @@ class DeadlineScheduler:
                 )
                 return
 
-            # The 4 frames span exactly the `delay_sec` since the previous check (see
-            # FrameStore._select_temporal), so the first one is the moment of that check.
-            step = delay_sec / 3.0
-            followup_labels = [
-                "t +0.0s (Previous check)",
-                f"t +{step:.1f}s",
-                f"t +{step * 2:.1f}s",
-                f"t +{delay_sec:.1f}s (Outcome)",
-            ]
+            # The frames span the `delay_sec` since the previous check (see
+            # FrameStore._select_temporal), so the first one is normally the moment of that
+            # check: "t +0.0s (Previous check)" … "t +10.0s (Outcome)". Times come from the real
+            # capture times; the first frame is only called the previous check if it is one.
+            zero_ts = mono_ts[-1] - delay_sec
+            tags: list = [None] * len(mono_ts)
+            tags[-1] = "Outcome"
+            if len(mono_ts) > 1 and abs(mono_ts[0] - zero_ts) <= 0.5:
+                tags[0] = "Previous check"
+            followup_labels = self.frame_store.offset_labels(mono_ts, zero_ts=zero_ts, tags=tags, signed_zero=True)
             followup_job = {
                 "cam": cam_name,
                 "is_incident": True,

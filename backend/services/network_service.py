@@ -24,6 +24,11 @@ logger = logging.getLogger("RapidAlert.Network")
 
 class NetworkService:
     CLIENT_RETRY_SEC = 300.0   # how often to retry a joined Wi-Fi network while on the hotspot
+    # Ethernet counts as the internet uplink after this many consecutive good checks, and stops
+    # counting after this many consecutive bad ones (one check per watchdog tick, 10s), so a
+    # single slow check cannot flip the Wi-Fi radio between hotspot and client.
+    ETH_INTERNET_UP_CHECKS = 2
+    ETH_INTERNET_DOWN_CHECKS = 3
 
     def __init__(self, config_manager, broadcaster=None, dashboard_port: int = 7000):
         self.config_manager = config_manager
@@ -33,6 +38,8 @@ class NetworkService:
         self._lock = asyncio.Lock()
         self._last_state_hash: Optional[str] = None
         self._last_client_retry: float = 0.0
+        self._eth_internet: Optional[bool] = None   # debounced: is Ethernet carrying internet?
+        self._eth_internet_streak: int = 0
 
         # Cached interface names (auto-detected if None)
         self.eth_interface: str = "enP2p1s0"
@@ -256,6 +263,8 @@ class NetworkService:
                 "ip": eth_info.get("ip"),
                 "mac": eth_info.get("mac"),
                 "operstate": eth_info.get("operstate"),
+                # Debounced result of the watchdog's check; None until the first check has run.
+                "internet": self._eth_internet if eth_connected else False,
             },
             "wifi": {
                 "interface": self.wifi_interface,
@@ -496,9 +505,14 @@ class NetworkService:
             status = await self.get_status()
             if self.broadcast:
                 await self.broadcast({"type": "network_status", "data": status})
+            message = f"Connected to Wi-Fi '{ssid}'"
+            if self._eth_internet:
+                # Rule 1 of _enforce_auto_failover will put the hotspot back within seconds.
+                message = (f"Wi-Fi '{ssid}' checked and saved. Ethernet has internet, so the hotspot comes back "
+                           f"on now; the Thor will use '{ssid}' whenever Ethernet is unplugged or loses internet.")
             return {
                 "status": "ok",
-                "message": f"Connected to Wi-Fi '{ssid}'",
+                "message": message,
                 "network": status
             }
 
@@ -577,19 +591,65 @@ class NetworkService:
     #  Background Watchdog (Ethernet-Aware Hotspot & Failover)
     # ══════════════════════════════════════════════════════════════════════
 
+    async def _check_ethernet_internet(self, eth_connected: bool) -> bool:
+        """
+        Is the wired port carrying internet right now? Asks NetworkManager, which already tests
+        each interface against its connectivity URL; if NetworkManager has no opinion (checking
+        disabled), falls back to one ping out of the wired interface.
+        """
+        if not eth_connected:
+            return False
+        rc, out, _ = await self._run_cmd(
+            "nmcli", "-g", "GENERAL.IP4-CONNECTIVITY", "dev", "show", self.eth_interface, timeout=6.0
+        )
+        state = out.strip().lower() if rc == 0 else ""
+        if "full" in state:
+            return True
+        if state and "unknown" not in state:
+            return False          # none / limited / portal: NetworkManager checked, no internet
+        for host in ("1.1.1.1", "8.8.8.8"):
+            rc, _, _ = await self._run_cmd("ping", "-I", self.eth_interface, "-c", "1", "-W", "2", host, timeout=5.0)
+            if rc == 0:
+                return True
+        return False
+
+    async def _ethernet_has_internet(self, eth_connected: bool) -> bool:
+        """Debounced form of _check_ethernet_internet (see ETH_INTERNET_*_CHECKS)."""
+        now_ok = await self._check_ethernet_internet(eth_connected)
+        if self._eth_internet is None:
+            self._eth_internet = now_ok          # first check after start decides directly
+            self._eth_internet_streak = 0
+        elif now_ok == self._eth_internet:
+            self._eth_internet_streak = 0
+        else:
+            self._eth_internet_streak += 1
+            needed = self.ETH_INTERNET_UP_CHECKS if now_ok else self.ETH_INTERNET_DOWN_CHECKS
+            # An unplugged cable is not a flaky check: act on it at once.
+            if self._eth_internet_streak >= needed or not eth_connected:
+                self._eth_internet = now_ok
+                self._eth_internet_streak = 0
+                logger.info(f"[Network Watchdog] Ethernet internet is now {'UP' if now_ok else 'DOWN'}.")
+        return bool(self._eth_internet)
+
     async def _enforce_auto_failover(self):
         """
-        Dual-State Logic:
-        1. When on Ethernet (90% of the time):
-           Wi-Fi runs purely as the Hotspot ("godofthunder") so users can connect anytime.
-        2. When no Ethernet:
-           - If connected to client Wi-Fi: keep client Wi-Fi running.
-           - If disconnected from client Wi-Fi: activate Hotspot ("godofthunder") as rescue AP!
+        1. Ethernet with internet: Ethernet is the uplink, and the Wi-Fi radio is the hotspot
+           ("godofthunder"), always - even if a Wi-Fi network was joined from the dashboard.
+           That network stays saved and is used again when Ethernet goes away.
+        2. No Ethernet, or Ethernet without internet:
+           - connected to the Wi-Fi network joined from the dashboard: keep it.
+           - otherwise: hotspot, retrying the saved network now and then.
         """
         status = await self.get_status()
         eth_connected = status["ethernet"]["connected"]
         wifi_mode = status["wifi"]["mode"]
         is_hotspot_active = status["hotspot"]["active"]
+
+        if await self._ethernet_has_internet(eth_connected):
+            if not is_hotspot_active:
+                logger.info("[Network Watchdog] Ethernet has internet. Wi-Fi radio switches to the hotspot.")
+                await self.start_hotspot()
+            return
 
         pinned = self._pinned_client_ssid()
         on_pinned_wifi = bool(pinned) and wifi_mode == "client" and status["wifi"]["connected_ssid"] == pinned

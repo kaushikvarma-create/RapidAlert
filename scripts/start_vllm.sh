@@ -104,7 +104,7 @@ docker run -d \
         --dtype auto \
         --enforce-eager \
         --max-num-seqs \"${VLLM_MAX_SEQS}\" \
-        --limit-mm-per-prompt '{\"image\": 4}' \
+        --limit-mm-per-prompt '{\"image\": 5}' \
         --mm-processor-cache-gb 0 \
         --trust-remote-code \
         ${EP_QUANTIZATION:+--quantization \"${EP_QUANTIZATION}\"} \

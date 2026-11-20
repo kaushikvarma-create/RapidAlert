@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-from backend.core.config import PROMPTS_CONFIG_PATH, load_prompts_config
+from backend.core.config import PROMPTS_CONFIG_PATH, atomic_write_json, load_prompts_config
 from backend.core.error_tracker import error_tracker
 
 
@@ -89,7 +89,7 @@ class PromptManager:
             followup_info = (
                 f"FOLLOW-UP CHECK #{cycle}, {interval_sec:.0f}s after the previous check.\n"
                 f"{prev_line}"
-                f"The 4 frames cover the time since that check. Decide the severity from what these frames show now, "
+                f"These frames cover the time since that check. Decide the severity from what these frames show now, "
                 f"not from the earlier rating. In 'evolution', say how the situation has changed since the previous "
                 f"check: resolved, unchanged, or worse. If the scene is now routine or empty, mark "
                 f"\"safety\": \"OK\", \"severity\": \"LOW\"."
@@ -163,8 +163,7 @@ class PromptManager:
         }
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
+            atomic_write_json(self.path, data)
             self._mtime = os.path.getmtime(self.path)
         except Exception as exc:
             error_tracker.capture_exception(

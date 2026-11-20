@@ -295,6 +295,7 @@
           <div style="display: flex; gap: 8px;">
             <button class="btn-ghost" id="btn-enable-all-cams" style="font-size: 0.75rem; padding: 3px 8px; cursor: pointer;">⚡ Enable All</button>
             <button class="btn-ghost" id="btn-disable-all-cams" style="font-size: 0.75rem; padding: 3px 8px; cursor: pointer;">⏸️ Disable All</button>
+            <button class="btn-danger" id="btn-remove-all-cams" style="font-size: 0.75rem; padding: 3px 8px; cursor: pointer;">🗑 Remove All</button>
           </div>
         </div>
         <table class="cam-table" id="cam-table">
@@ -557,6 +558,7 @@
         <div class="scan-results-wrap" id="scan-results-wrap" style="display:none">
           <div class="scan-results-header">
             <span id="scan-count">0 cameras found</span>
+            <input id="scan-filter" type="text" class="input" placeholder="🔍 Search camera name or IP…" style="flex: 1; max-width: 300px; margin: 0 12px; padding: 4px 8px; font-size: 0.78rem;" />
             <button class="btn-ghost" id="btn-scan-clear">Clear</button>
           </div>
           <div class="scan-results" id="scan-results"></div>
@@ -1549,6 +1551,6 @@
   <!-- ═══════════════════════════════════════════════════════════ TOAST -->
   <div class="toast-container" id="toast-container"></div>
 
-  <script src="/app.js?v=88"></script>
+  <script src="/app.js?v=91"></script>
 </body>
 </html>

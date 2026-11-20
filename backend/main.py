@@ -39,6 +39,7 @@ sys.path.insert(0, str(ROOT))
 
 # Centralized configuration & error tracking
 from backend.core.config import (
+    atomic_write_json,
     CONFIG_DIR,
     FRONTEND_DIR,
     DATABASE_PATH,
@@ -213,12 +214,59 @@ _bg_tasks = []
 _is_shutting_down = False
 
 
+def _install_crash_logging() -> None:
+    """
+    Route failures that would otherwise only reach the console (or nowhere) into the error log:
+    the dashboard's error list, logs/errors.log and the error_logs table.
+
+      - a background thread dying on an uncaught exception
+      - an asyncio task or callback failing with nobody awaiting it (a background loop that
+        stops silently is the "it just stopped and we don't know why" case)
+    Unhandled errors inside API requests are covered by _unhandled_api_error below.
+    """
+    def _thread_hook(args):
+        if args.exc_type is SystemExit:
+            return
+        try:
+            error_tracker.capture_exception(
+                args.exc_value or args.exc_type(),
+                component="Thread",
+                effect=f"Background thread '{getattr(args.thread, 'name', '?')}' died on an uncaught exception",
+                severity="ERROR",
+            )
+        except Exception:
+            pass
+        threading.__excepthook__(args)
+
+    threading.excepthook = _thread_hook
+
+    def _loop_hook(loop, context):
+        exc = context.get("exception")
+        msg = context.get("message", "asyncio error")
+        if isinstance(exc, asyncio.CancelledError) or _is_shutting_down:
+            return
+        try:
+            task = context.get("task") or context.get("future")
+            name = task.get_name() if hasattr(task, "get_name") else ""
+            effect = f"Background task {name + ' ' if name else ''}failed with nobody handling it: {msg}"
+            if exc is not None:
+                error_tracker.capture_exception(exc, component="AsyncLoop", effect=effect, severity="ERROR")
+            else:
+                error_tracker.capture_error(message=msg, component="AsyncLoop", effect=effect, severity="WARNING")
+        except Exception:
+            pass
+        loop.default_exception_handler(context)
+
+    asyncio.get_running_loop().set_exception_handler(_loop_hook)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _is_shutting_down
     _is_shutting_down = False
     # ── Startup ─────────────────────────────────────────────────
     t_start = time.monotonic()
+    _install_crash_logging()
     # Audit prior crash / unexpected power outage state
     watchdog_emailer.check_and_alert_prior_crash()
     camera_manager.sync()
@@ -342,6 +390,30 @@ app = FastAPI(
     description="High-Speed Hybrid VLM Surveillance & Incident Detection Engine (Clove Technologies)",
     lifespan=lifespan,
 )
+
+@app.exception_handler(Exception)
+async def _unhandled_api_error(request: Request, exc: Exception):
+    """
+    Any error an API route did not handle itself. Before this, the browser got a bare
+    "Internal Server Error" and the cause existed only as a traceback in the service journal.
+    Now it is recorded like every other error (dashboard list, errors.log, error_logs table)
+    and the response says what failed.
+    """
+    try:
+        error_tracker.capture_exception(
+            exc,
+            component="API",
+            effect=f"{request.method} {request.url.path} failed with an unhandled error",
+            severity="ERROR",
+        )
+    except Exception:
+        pass
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Server error in {request.url.path}: {type(exc).__name__}: {str(exc)[:200]}"},
+    )
+
 
 class GracefulShutdownMiddleware:
     """Catches CancelledError when uvicorn cancels streaming connections on graceful shutdown timeout."""
@@ -639,8 +711,7 @@ async def api_delete_camera(name: str):
 
 def _persist_cameras() -> None:
     try:
-        with open(CAMERAS_CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(camera_manager.get_config(), f, indent=2)
+        atomic_write_json(CAMERAS_CONFIG_PATH, camera_manager.get_config())
         camera_manager._config_mtime = os.path.getmtime(CAMERAS_CONFIG_PATH)
         # Keep MediaMTX's stream paths in step with the camera list; it reloads its config file
         # on change, so cameras added or removed in the dashboard get a live view without a restart.

@@ -1808,7 +1808,7 @@ const App = {
         const count = alert.thumbnails_b64.length;
         const defaultLabels = isFollowup
           ? ['t +2.5s', 't +5.0s', 't +7.5s', 't +10.0s (Outcome)']
-          : ['t -10.0s', 't -5.0s', 't -2.0s', 't 0.0s (Trigger)'];
+          : ['t -5.0s (Pre-incident)', 't -2.0s (Onset)', 't 0.0s (Trigger)', 't +2.5s (After)', 't +5.0s (Latest)'];
         const labels = (alert.labels && alert.labels.length === count) ? alert.labels : defaultLabels;
 
         alert.thumbnails_b64.forEach((b64, idx) => {
@@ -3595,16 +3595,37 @@ const App = {
   // ════════════════════════════════════════════════════════════
   //  API Calls
   // ════════════════════════════════════════════════════════════
+  // Both throw when the server refuses or cannot be reached, with the server's own reason, so
+  // callers can tell the operator instead of reporting success for a change that did not happen.
+  async _apiCheck(res, what) {
+    if (res && res.ok) return;
+    let reason = res ? `server said ${res.status}` : 'no response';
+    try { const d = await res.json(); if (d && d.detail) reason = d.detail; } catch { /* keep status */ }
+    throw new Error(`${what}: ${reason}`);
+  },
+
   async _apiUpsertCamera(cam) {
-    await this._authFetch('/api/cameras', {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify(cam),
-    });
+    let res;
+    try {
+      res = await this._authFetch('/api/cameras', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify(cam),
+      });
+    } catch (e) {
+      throw new Error(`Could not save "${cam.name}": the dashboard server is not reachable (${e.message})`);
+    }
+    await this._apiCheck(res, `Could not save "${cam.name}"`);
   },
 
   async _apiDeleteCamera(name) {
-    await this._authFetch(`/api/cameras/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    let res;
+    try {
+      res = await this._authFetch(`/api/cameras/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    } catch (e) {
+      throw new Error(`Could not remove "${name}": the dashboard server is not reachable (${e.message})`);
+    }
+    await this._apiCheck(res, `Could not remove "${name}"`);
   },
 
   async _saveMasterSceneContext() {
@@ -3671,7 +3692,13 @@ const App = {
     const url      = document.getElementById('new-cam-url')?.value.trim();
     const ctx = document.getElementById('new-cam-ctx')?.value.trim() || '';
     if (!name || !url) { this._showToast('Enter a name and RTSP URL', 'warn'); return; }
-    await this._apiUpsertCamera({ name, url, enabled: true, normal_context: ctx });
+    try {
+      await this._apiUpsertCamera({ name, url, enabled: true, normal_context: ctx });
+    } catch (e) {
+      // Keep what was typed so it can be retried.
+      this._showToast(e.message, 'err');
+      return;
+    }
     document.getElementById('new-cam-name').value = '';
     document.getElementById('new-cam-url').value  = '';
     if (document.getElementById('new-cam-ctx')) document.getElementById('new-cam-ctx').value = '';
@@ -3941,7 +3968,7 @@ const App = {
         const chUrl = ch.rtsp_url;
         const codec = ch.codec || 'H.264';
         return `
-          <div class="scan-url-row" style="display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 10px; background: var(--bg-card-hover, rgba(255,255,255,0.03)); border-radius: var(--radius-sm, 6px); border: 1px solid var(--border);">
+          <div class="scan-url-row" data-search="${this._esc(`${chName} ${ip} ${vendor} ${model}`.toLowerCase())}" style="display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 10px; background: var(--bg-card-hover, rgba(255,255,255,0.03)); border-radius: var(--radius-sm, 6px); border: 1px solid var(--border);">
             <div style="display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;">
               <span class="badge" style="font-size: 0.65rem; font-family: var(--font-mono); padding: 2px 6px; background: var(--accent-dim, rgba(0,200,255,0.15)); color: var(--accent, #00c8ff); font-weight: 700;">CH ${ch.channel}</span>
               <span style="font-weight: 600; font-size: 0.8rem; color: var(--text, #fff); white-space: nowrap;">${this._esc(chName)}</span>
@@ -3949,6 +3976,7 @@ const App = {
               <span class="scan-url-text" title="${this._esc(chUrl)}" style="font-size: 0.68rem; color: var(--text-3, #777); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;">${this._esc(chUrl)}</span>
             </div>
             <button class="btn-use-url" data-url="${this._esc(chUrl)}" data-name="${this._esc(chName)}" data-ip="${this._esc(ip)}" style="padding: 4px 10px; font-size: 0.72rem; font-weight: 600; background: var(--accent, #00c8ff); color: #000; border: none; border-radius: 4px; cursor: pointer; flex-shrink: 0;">+ Use Camera</button>
+            <button class="btn-add-scanned" data-url="${this._esc(chUrl)}" data-name="${this._esc(chName)}" data-ip="${this._esc(ip)}" title="Add this camera now, with this name" style="padding: 4px 10px; font-size: 0.72rem; font-weight: 600; background: var(--green, #22c55e); color: #000; border: none; border-radius: 4px; cursor: pointer; flex-shrink: 0;">+ Add</button>
           </div>
         `;
       }).join('');
@@ -3993,6 +4021,65 @@ const App = {
         this._toast(`Selected camera "${name}" → Cameras tab ready to add!`);
       });
     });
+
+    // "+ Add": add the camera straight from the result row, under the name shown.
+    list.querySelectorAll('.btn-add-scanned').forEach(btn => {
+      btn.addEventListener('click', () => this._addScannedCamera(btn));
+    });
+
+    // New results: start with the search box empty and everything visible.
+    const filterEl = document.getElementById('scan-filter');
+    if (filterEl) filterEl.value = '';
+    this._scanCountText = count.textContent;
+  },
+
+  // Show only the result rows whose camera name, IP, vendor or model contains the text.
+  _filterScanResults(text) {
+    const q = (text || '').trim().toLowerCase();
+    let shown = 0, total = 0;
+    document.querySelectorAll('#scan-results .scan-item').forEach(item => {
+      let any = false;
+      item.querySelectorAll('.scan-url-row').forEach(row => {
+        total++;
+        const hit = !q || (row.dataset.search || '').includes(q);
+        row.style.display = hit ? 'flex' : 'none';
+        if (hit) { any = true; shown++; }
+      });
+      item.style.display = any ? 'flex' : 'none';
+    });
+    const count = document.getElementById('scan-count');
+    if (count) count.textContent = q ? `${shown} of ${total} channels match "${text.trim()}"` : (this._scanCountText || count.textContent);
+  },
+
+  async _addScannedCamera(btn) {
+    const url = btn.dataset.url;
+    const raw = btn.dataset.name || `CAM_${btn.dataset.ip.replace(/\./g, '_')}`;
+    // Same shape as names typed in the Cameras tab; anything that is not a letter, digit,
+    // dash or underscore becomes "_" so the name is safe in links.
+    const base = raw.trim().replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').toUpperCase()
+      || `CAM_${btn.dataset.ip.replace(/\./g, '_')}`;
+    // Never overwrite a different camera that already has this name (two recorders can both
+    // have a "Camera 01"): add _2, _3 … instead.
+    const existingUrl = n => this.cameras?.[n]?.config?.url;
+    let name = base;
+    for (let i = 2; existingUrl(name) && existingUrl(name) !== url; i++) name = `${base}_${i}`;
+    if (existingUrl(name) === url) { this._showToast(`"${name}" is already added`, 'ok'); return; }
+
+    btn.disabled = true;
+    try {
+      const r = await this._authFetch('/api/cameras', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ name, url, enabled: true, normal_context: '' }),
+      });
+      if (!r || !r.ok) throw new Error(r ? `server said ${r.status}` : 'not signed in');
+      btn.textContent = '✓ Added';
+      btn.style.opacity = '0.6';
+      this._showToast(`Camera "${name}" added`, 'ok');
+    } catch (e) {
+      btn.disabled = false;
+      this._showToast(`Could not add "${name}": ${e.message}`, 'err');
+    }
   },
 
   // ════════════════════════════════════════════════════════════
@@ -4525,6 +4612,20 @@ const App = {
       }
     });
 
+    document.getElementById('btn-remove-all-cams')?.addEventListener('click', async () => {
+      // The table rows are the configured cameras; remove exactly those, one by one,
+      // through the same call the per-row bin uses.
+      const names = [...document.querySelectorAll('#cam-table-body .btn-del')].map(b => b.dataset.cam).filter(Boolean);
+      if (!names.length) { this._showToast('No cameras to remove', 'ok'); return; }
+      if (!confirm(`Remove all ${names.length} cameras? Their past alerts and history are kept.`)) return;
+      let removed = 0;
+      for (const name of names) {
+        try { await this._apiDeleteCamera(name); removed++; }
+        catch (err) { console.error(`Failed to remove ${name}:`, err); }
+      }
+      this._showToast(`Removed ${removed} of ${names.length} cameras`, removed === names.length ? 'ok' : 'err');
+    });
+
     // Delegated events for Settings Cameras Table
     const camTableBody = document.getElementById('cam-table-body');
     camTableBody?.addEventListener('change', async e => {
@@ -4535,15 +4636,22 @@ const App = {
       if (e.target.classList.contains('ctx-thresh'))     cfg.threshold = parseFloat(e.target.value);
       if (e.target.classList.contains('ctx-hb'))         cfg.heartbeat_sec = parseFloat(e.target.value);
       if (e.target.classList.contains('ctx'))            cfg.normal_context = e.target.value;
-      await this._apiUpsertCamera(cfg);
-      this._showToast(`Updated ${cam}`, 'ok');
+      try {
+        await this._apiUpsertCamera(cfg);
+        this._showToast(`Updated ${cam}`, 'ok');
+      } catch (err) {
+        this._showToast(err.message, 'err');
+      }
     });
 
     camTableBody?.addEventListener('click', async e => {
       const btn = e.target.closest('.btn-del');
       if (!btn) return;
       const cam = btn.dataset.cam;
-      if (cam && confirm(`Remove camera "${cam}"?`)) await this._apiDeleteCamera(cam);
+      if (cam && confirm(`Remove camera "${cam}"?`)) {
+        try { await this._apiDeleteCamera(cam); }
+        catch (err) { this._showToast(err.message, 'err'); }
+      }
     });
 
     // Prompt actions
@@ -4686,7 +4794,13 @@ const App = {
 
       if (!this.cameras[name]) this.cameras[name] = {};
       this.cameras[name].config = currentCfg;
-      await this._apiUpsertCamera(currentCfg);
+      try {
+        await this._apiUpsertCamera(currentCfg);
+      } catch (err) {
+        if (fb) { fb.textContent = '❌ Not saved'; fb.style.color = 'var(--red)'; }
+        this._showToast(err.message, 'err');
+        return;
+      }
       if (fb) {
         fb.textContent = '✅ Saved & Hot-Reloaded';
         fb.style.color = 'var(--green)';
@@ -4710,7 +4824,13 @@ const App = {
       if (!isNaN(major)) currentCfg.threshold = major;
       if (!isNaN(hb)) currentCfg.heartbeat_sec = hb;
       this.cameras[name].config = currentCfg;
-      await this._apiUpsertCamera(currentCfg);
+      try {
+        await this._apiUpsertCamera(currentCfg);
+      } catch (err) {
+        if (fb) { fb.textContent = '❌ Not applied'; fb.style.color = 'var(--red)'; }
+        this._showToast(err.message, 'err');
+        return;
+      }
       if (fb) {
         fb.textContent = '✅ Applied';
         fb.style.color = 'var(--green)';
@@ -4757,7 +4877,10 @@ const App = {
       document.getElementById('scan-results-wrap').style.display = 'none';
       document.getElementById('scan-results').innerHTML = '';
       document.getElementById('scan-count').textContent = '0 cameras found';
+      const f = document.getElementById('scan-filter');
+      if (f) f.value = '';
     });
+    document.getElementById('scan-filter')?.addEventListener('input', e => this._filterScanResults(e.target.value));
 
     // Search inputs
     const alertSearchInput = document.getElementById('alert-search-input');

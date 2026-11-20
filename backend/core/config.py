@@ -118,6 +118,25 @@ DEFAULT_WS_DISCOVERY_TIMEOUT_SEC = 3.0
 #  Scanner Configuration Loader
 # ══════════════════════════════════════════════════════════════════════
 
+def atomic_write_json(path, data) -> None:
+    """
+    Write JSON so the file on disk is always either the old version or the complete new one.
+
+    The config files are written while other parts of the system watch them, and this box gets
+    unplugged: a plain open(path, "w") leaves an empty or half-written file for the instant of
+    the write (the camera watcher read exactly that and logged a JSON error on every camera
+    add) and for good if power is cut mid-write. Write a sibling temp file, flush it to disk,
+    then swap it in with a single rename.
+    """
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 def load_scanner_config() -> Dict[str, Any]:
     """Load RTSP templates and WS-Discovery probe from config/scanner.json."""
     if SCANNER_CONFIG_PATH.exists():
@@ -353,8 +372,7 @@ class ConfigManager:
         """Persist current configuration to system.json."""
         try:
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.config_path, "w", encoding="utf-8") as f:
-                json.dump(self._cached_config.model_dump(), f, indent=2)
+            atomic_write_json(self.config_path, self._cached_config.model_dump())
             return True
         except Exception as e:
             print(f"[ConfigManager] ❌ Failed to save {self.config_path}: {e}")
