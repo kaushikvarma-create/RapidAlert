@@ -26,9 +26,6 @@
     }
   ],
   "auto_start_vllm": true,
-  "maintenance_restart_enabled": true,
-  "maintenance_restart_interval_days": 6,
-  "maintenance_stagger_delay_sec": 3600,
   "vllm_model": "cyankiwi/Qwen3.5-9B-AWQ-4bit",
   "vllm_port": 8000,
   "vllm_max_seqs": 4,
@@ -57,6 +54,10 @@
   "clip_retention_hours": 24.0,
   "incident_frames_max_sets": 100000,
   "incident_frames_max_gb": 11.5,
+  "retention_important_days": 90.0,
+  "retention_low_trigger_hours": 72.0,
+  "retention_low_periodic_hours": 36.0,
+  "retention_analysis_days": 90.0,
   "alert_severity_triggers": [
     "HIGH",
     "MEDIUM"
@@ -68,6 +69,8 @@
   "initial_concurrency": 4,
   "max_concurrency": 4,
   "frame_width": 1280,
+  "vlm_frame_width": 960,
+  "vlm_frame_quality": 90,
   "jpeg_quality": 85,
   "dashboard_port": 7000,
   "network": {
@@ -75,6 +78,10 @@
     "hotspot_password": "Cl0vernd@123",
     "hotspot_mode": "auto",
     "wifi_interface": "wlP1p1s0",
-    "ethernet_interface": "enP2p1s0"
-  }
+    "ethernet_interface": "enP2p1s0",
+    "wifi_client_ssid": "BMS Office_5G"
+  },
+  "maintenance_restart_enabled": true,
+  "maintenance_restart_interval_days": 6,
+  "maintenance_stagger_delay_sec": 3600
 }

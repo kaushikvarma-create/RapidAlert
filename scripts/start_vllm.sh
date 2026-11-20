@@ -61,11 +61,15 @@ fi
 
 docker rm -f "${CNAME}" >/dev/null 2>&1 || true
 
-# --restart unless-stopped: Docker itself brings a crashed container back, even when the backend
-# (and so its watchdog) is not running. `docker stop` / `docker rm` still stop it for good.
+# No Docker restart policy, on purpose. With `--restart unless-stopped` Docker started the old
+# container at boot one second BEFORE the GPU slices were created; it then failed with
+# "No CUDA GPUs are available" and Docker restarted it forever, while run.sh saw a "running,
+# still loading" container and left it alone (seen on 2026-11-20: 15 restarts, shard never came
+# up). Without a policy the container stays stopped at boot and run.sh starts a fresh one after
+# slicing, which is the behaviour that worked before. Crashes while the backend is running are
+# handled by its watchdog.
 docker run -d \
     --name "${CNAME}" \
-    --restart unless-stopped \
     --runtime nvidia \
     --network host \
     --shm-size=4g \
