@@ -1134,6 +1134,12 @@ def api_scanner_subnet():
 async def api_scan(body: ScanBody):
     """Run ONVIF WS-Discovery + TCP port 554 scan. May take 3-5 seconds."""
     global _scan_running
+    subnet = None
+    if body.subnet and body.subnet.strip():
+        try:
+            subnet = RTSPScanner.normalize_subnet(body.subnet)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
     async with _scan_lock:
         if _scan_running:
             raise HTTPException(status_code=409, detail="Scan already running")
@@ -1141,7 +1147,7 @@ async def api_scan(body: ScanBody):
     try:
         creds = (body.username, body.password) if body.username else None
         results = await RTSPScanner.full_scan(
-            subnet=body.subnet,
+            subnet=subnet,
             ws_timeout=body.ws_timeout,
             port_timeout=body.port_timeout,
             credentials=creds,

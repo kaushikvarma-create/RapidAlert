@@ -69,7 +69,13 @@ class RTSPScanner:
     # ── Subnet Discovery ─────────────────────────────────────────
     @staticmethod
     def detect_subnets() -> List[str]:
-        """Detects candidate subnets from network interfaces and existing cameras."""
+        """Detects candidate subnets from network interfaces and existing cameras.
+
+        The network this machine is on comes first; subnets of already-configured
+        cameras follow. local_subnet() shows the first one in the dashboard, so it
+        must be the machine's own network, not wherever old cameras used to live.
+        """
+        own: List[str] = []
         subnets = set()
 
         # 1. Inspect default outgoing socket subnet
@@ -78,7 +84,7 @@ class RTSPScanner:
                 s.connect(("8.8.8.8", 80))
                 ip = s.getsockname()[0]
             parts = ip.split(".")
-            subnets.add(f"{parts[0]}.{parts[1]}.{parts[2]}.0/24")
+            own.append(f"{parts[0]}.{parts[1]}.{parts[2]}.0/24")
         except Exception:
             pass
 
@@ -97,10 +103,37 @@ class RTSPScanner:
         except Exception:
             pass
 
-        if not subnets:
+        if not own and not subnets:
             subnets.add("192.168.1.0/24")
 
-        return sorted(list(subnets))
+        return own + sorted(s for s in subnets if s not in own)
+
+    @staticmethod
+    def normalize_subnet(text: str) -> str:
+        """Turn what an operator typed into a scannable network, or raise ValueError.
+
+        Accepts 192.168.1.0/24, a single address, and the common slips
+        "192.168.1", "192.168.1." and "192.168.1./24" (all read as that /24).
+        """
+        raw = (text or "").strip()
+        try:
+            net = ipaddress.ip_network(raw, strict=False)
+        except ValueError:
+            m = re.fullmatch(r"(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.?(?:/24)?", raw)
+            if not m:
+                raise ValueError(f"'{raw}' is not a valid subnet. Use the form 192.168.1.0/24.")
+            try:
+                net = ipaddress.ip_network(f"{m.group(1)}.{m.group(2)}.{m.group(3)}.0/24")
+            except ValueError:
+                raise ValueError(f"'{raw}' is not a valid subnet. Use the form 192.168.1.0/24.")
+        if net.version != 4:
+            raise ValueError("Only IPv4 subnets can be scanned.")
+        if net.prefixlen == 32:
+            # A single camera address: scan the /24 it sits in.
+            net = ipaddress.ip_network(f"{net.network_address}/24", strict=False)
+        if net.prefixlen < 22:
+            raise ValueError(f"{net} is too large to scan. Use a /24 such as 192.168.1.0/24.")
+        return str(net)
 
     @staticmethod
     def local_subnet() -> Optional[str]:
@@ -552,6 +585,14 @@ class RTSPScanner:
         )
 
         ws_ips, port_ips = await asyncio.gather(ws_task, port_task)
+        if subnet:
+            # ONVIF discovery is a multicast and answers come from every range on the wire.
+            # When the operator named a subnet, only inspect (and try logins on) devices in it.
+            try:
+                net = ipaddress.ip_network(subnet, strict=False)
+                ws_ips = [ip for ip in ws_ips if ipaddress.ip_address(ip) in net]
+            except ValueError:
+                pass
         discovered_ips = sorted(list(set(ws_ips + port_ips)))
 
         if not discovered_ips:
